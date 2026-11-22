@@ -9,6 +9,7 @@ import sys
 
 from pipeline.config import Settings
 from pipeline.mirrors import apply_mirrors
+from pipeline.runtime import ensure_runtime_layout, preflight
 from pipeline.util import ROOT, load_json, resolve
 
 apply_mirrors()
@@ -38,6 +39,7 @@ def _flux_dir() -> str:
 
 
 def _load_class(kind: str):
+    print("加载 mflux / transformers…", flush=True)
     from mflux.models.common.config import ModelConfig
 
     weights = _flux_dir()
@@ -212,6 +214,7 @@ def run_edit(story: dict, out: Path, settings: Settings, only: str | None, force
 
 def cmd_images(args: argparse.Namespace) -> None:
     settings = Settings.load(resolve(args.config) if args.config else None)
+    ensure_runtime_layout()
     out = resolve(args.out)
     story_path = out / "storyboard.json"
     if not story_path.exists():
@@ -219,6 +222,8 @@ def cmd_images(args: argparse.Namespace) -> None:
     story = load_json(story_path)
     phase = os.environ.get("NOVEL_IMAGE_PHASE", "t2i")
     if phase != "edit":
+        # 只在第一阶段做硬预检；edit 是同进程 exec 续跑，不必再卡一次
+        preflight(timeout_s=120.0, soft=False)
         needs_edit = run_t2i(story, out, settings, args.only, args.force)
         if needs_edit:
             env = os.environ.copy()

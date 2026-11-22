@@ -39,8 +39,45 @@ SCHEMA_HINT = """分镜不由本机 LLM 生成。请让 Cursor Agent 阅读小�
 
 音色：女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric。情绪写在镜头上，影响 TTS instruct。
 约束：竖屏短剧，每镜约 2 秒；能少就少；motion_prompt 与 music_prompt 必须是英文。
+硬性要求：小说里所有引号对白（「」 “” ""）必须原样出现在某个镜头的 dialogue 里，一句重要对白一个镜头；不要合并丢掉后半句。
 写好后：./scripts/run.sh screenplay --out output/demo
 """
+
+# 中文弯引号、直角引号、直引号
+_DIALOGUE_RE = re.compile(r"[「“\"]([^」”\"]+)[」”\"]")
+
+
+def extract_novel_dialogues(text: str) -> list[str]:
+    """抽出小说里的引号对白，保序去重。"""
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in _DIALOGUE_RE.finditer(text or ""):
+        line = match.group(1).strip()
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        found.append(line)
+    return found
+
+
+def _coverage_blob(shots: list[dict]) -> str:
+    return "\n".join(str(shot.get("dialogue") or "") for shot in shots)
+
+
+def assert_dialogue_coverage(novel_text: str, shots: list[dict]) -> None:
+    """分镜必须覆盖小说全部引号对白，否则直接失败，避免静默丢台词。"""
+    expected = extract_novel_dialogues(novel_text)
+    if not expected:
+        return
+    blob = _coverage_blob(shots)
+    missing = [line for line in expected if line not in blob]
+    if missing:
+        listed = "\n".join(f"- {line}" for line in missing)
+        raise SystemExit(
+            "分镜漏了对白。下面这些原文引号台词没有出现在任何镜头的 dialogue 里：\n"
+            f"{listed}\n"
+            "请改 storyboard.json：一句重要对白一个镜头，speaker 写中文名。"
+        )
 
 
 def re_id(value: str) -> str:
@@ -158,6 +195,14 @@ def normalize_storyboard(data: dict, *, novel_path: Path | None, max_shots: int)
     music_prompt = str(data.get("music_prompt") or "").strip() or default_music_prompt(style, title)
     if has_cjk(music_prompt):
         raise SystemExit("music_prompt 必须是英文，方便 MusicGen 理解")
+    novel_file = novel_path
+    if novel_file is None:
+        candidate = str(data.get("novel") or "").strip()
+        if candidate:
+            novel_file = Path(candidate)
+    if novel_file and novel_file.exists():
+        assert_dialogue_coverage(novel_file.read_text(encoding="utf-8"), shots)
+    spoken = sum(1 for shot in shots if shot.get("dialogue"))
     return {
         "title": title,
         "style": style,
@@ -165,6 +210,7 @@ def normalize_storyboard(data: dict, *, novel_path: Path | None, max_shots: int)
         "novel": str(novel_path) if novel_path else str(data.get("novel") or ""),
         "max_shots": max_shots,
         "truncated": bool(data.get("truncated", False)) or len(shots_in) > max_shots,
+        "dialogue_lines": spoken,
         "characters": characters,
         "shots": shots,
     }
@@ -179,9 +225,15 @@ def validate_or_explain(story_path: Path, novel_path: Path | None, settings: Set
     normalized = normalize_storyboard(raw, novel_path=novel_path, max_shots=settings.max_shots)
     if force or raw != normalized:
         dump_json(story_path, normalized)
-        print(f"已校验分镜：{story_path}，{len(normalized['shots'])} 镜，{len(normalized['characters'])} 个角色。")
+        print(
+            f"已校验分镜：{story_path}，{len(normalized['shots'])} 镜，"
+            f"{len(normalized['characters'])} 个角色，对白 {normalized.get('dialogue_lines', 0)} 条。"
+        )
     else:
-        print(f"分镜已就绪：{story_path}，{len(normalized['shots'])} 镜。")
+        print(
+            f"分镜已就绪：{story_path}，{len(normalized['shots'])} 镜，"
+            f"对白 {normalized.get('dialogue_lines', 0)} 条。"
+        )
     return story_path
 
 
@@ -194,4 +246,10 @@ def cmd_screenplay(args: argparse.Namespace) -> None:
     if novel and not novel.exists():
         raise SystemExit(f"找不到小说：{novel}")
     out.mkdir(parents=True, exist_ok=True)
-    validate_or_explain(out / "storyboard.json", novel if novel and novel.exists() else None, settings, args.force)
+    # 若未显式传小说，仍尝试用 storyboard 里的 novel 字段做对白覆盖检查
+    story_path = out / "storyboard.json"
+    if (novel is None or not novel.exists()) and story_path.exists():
+        linked = str(load_json(story_path).get("novel") or "").strip()
+        if linked:
+            novel = Path(linked)
+    validate_or_explain(story_path, novel if novel and novel.exists() else None, settings, args.force)

@@ -16,13 +16,38 @@ from pipeline.config import Settings
 from pipeline.images import cmd_images
 from pipeline.run import STAGES, cmd_run
 from pipeline.screenplay import cmd_screenplay
+from pipeline.screenplay import extract_novel_dialogues
 from pipeline.util import ROOT, chunk_novel, extract_json
 from pipeline.video import cmd_videos
 
 
 def cmd_doctor(_: argparse.Namespace) -> None:
+    from pipeline.runtime import (
+        cache_root,
+        ltx_cli,
+        main_venv_path,
+        ltx_venv_path,
+        musicgen_venv_path,
+        timed_import_transformers,
+    )
+
     settings = Settings.load()
     print(f"项目目录：{ROOT}")
+    print(f"venv 缓存根：{cache_root()}")
+    for label, path in (
+        ("主 .venv", ROOT / ".venv"),
+        ("LTX .venv", settings.ltx_dir / ".venv"),
+        ("MusicGen .venv", settings.musicgen_dir / ".venv"),
+    ):
+        if path.is_symlink():
+            print(f"{label}：符号链接 → {path.resolve()}")
+        elif path.exists():
+            print(f"{label}：实目录（应迁到 Caches）{path}")
+        else:
+            print(f"{label}：缺失")
+    print(f"主 venv 目标：{main_venv_path()}")
+    print(f"LTX venv 目标：{ltx_venv_path()}")
+    print(f"MusicGen venv 目标：{musicgen_venv_path()}")
     print("分镜：Cursor Agent 写 storyboard.json（本机不加载聊天 LLM）")
     print(f"文生图：{settings.image_model}，{settings.image_quantize}-bit，{settings.image_width}x{settings.image_height}")
     print(
@@ -40,12 +65,38 @@ def cmd_doctor(_: argparse.Namespace) -> None:
     print(f"ffmpeg：{settings.ffmpeg}（{'存在' if settings.ffmpeg.exists() else '缺失'}）")
     print(f"LTX 代码：{settings.ltx_dir}（{'存在' if settings.ltx_dir.exists() else '缺失'}）")
     print(f"MusicGen 代码：{settings.musicgen_dir}（{'存在' if settings.musicgen_dir.exists() else '缺失'}）")
+    gen_py = settings.musicgen_dir / "generate.py"
+    print(f"MusicGen generate.py：{'存在' if gen_py.exists() else '缺失'}")
+    patcher = ROOT / "scripts" / "apply_ltx_gemma_patch.py"
+    print(f"LTX Gemma 补丁脚本：{'存在' if patcher.exists() else '缺失'}")
+    marker = "NOVEL_VIDEO_STAGED_GEMMA_LOAD"
+    blocks = (
+        settings.ltx_dir
+        / "packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/utils/blocks.py"
+    )
+    if blocks.exists():
+        patched = marker in blocks.read_text(encoding="utf-8")
+        print(f"LTX Gemma 分阶段补丁：{'已打' if patched else '未打（请重跑 setup.sh）'}")
+    else:
+        print("LTX Gemma 分阶段补丁：vendor 未就绪")
+    try:
+        cli = ltx_cli(settings.ltx_dir)
+        print(f"LTX CLI：{cli}（存在）")
+    except SystemExit as exc:
+        print(f"LTX CLI：缺失（{exc}）")
     try:
         import mlx.core as mx
 
         print(f"MLX Metal：{mx.metal.is_available()}")
     except Exception as exc:
         print(f"MLX 还不可用：{exc}")
+    py = main_venv_path() / "bin" / "python"
+    if py.exists():
+        try:
+            seconds = timed_import_transformers(py, timeout_s=90.0)
+            print(f"transformers 导入：{seconds:.2f}s（>20s 仍偏慢）")
+        except Exception as exc:
+            print(f"transformers 导入失败：{exc}")
     if settings.ffmpeg.exists():
         subprocess.run([str(settings.ffmpeg), "-version"], check=False)
 
@@ -58,6 +109,23 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     assert len(chunks) == 2, chunks
     data = extract_json("说明\n```json\n{\"shots\": []}\n```")
     assert data == {"shots": []}
+    lines = extract_novel_dialogues('甲说：“你好。”乙回「在呢」。又说：“你好。”')
+    assert lines == ["你好。", "在呢"], lines
+    from pipeline.hf_cache import resolve_snapshot
+    from pipeline.runtime import main_venv_path, musicgen_venv_path, ltx_venv_path
+
+    assert resolve_snapshot("") is None
+    assert (ROOT / "scripts" / "apply_ltx_gemma_patch.py").exists(), "缺少 LTX 补丁脚本"
+    assert (ROOT / "input" / "demo_storyboard.json").exists(), "缺少演示分镜"
+    assert (ROOT / "input" / "novel.txt").exists(), "缺少演示小说"
+    for label, path in (
+        ("main", main_venv_path()),
+        ("ltx", ltx_venv_path()),
+        ("musicgen", musicgen_venv_path()),
+    ):
+        # setup 之后应有；纯逻辑自检时允许尚未安装
+        if path.exists() and not (path / "bin" / "python").exists():
+            raise AssertionError(f"{label} venv 损坏：{path}")
     print("selftest ok")
 
 

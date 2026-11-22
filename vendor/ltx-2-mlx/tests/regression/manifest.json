@@ -1,0 +1,293 @@
+{
+  "post_fix_2_kf": {
+    "g3b_hedgehog": {
+      "audio": {
+        "mean_abs": 0.031245216727256775,
+        "peak": 0.4705960750579834,
+        "rms": 0.05101587623357773,
+        "shape": [
+          2,
+          64512
+        ]
+      },
+      "mp4": "post_fix_2_kf__g3b_hedgehog.mp4",
+      "video": {
+        "mean": 81.75626373291016,
+        "p01": 5.0,
+        "p50": 62.0,
+        "p99": 246.0,
+        "shape": [
+          31,
+          448,
+          704,
+          3
+        ],
+        "std": 60.8868408203125
+      },
+      "wall_seconds": 906.3,
+      "wav": "post_fix_2_kf__g3b_hedgehog.wav"
+    },
+    "git_rev": "1c6f633"
+  },
+  "post_fix_3": {
+    "g1_two_stage": {
+      "audio": {
+        "mean_abs": 0.09918607771396637,
+        "peak": 0.6226943731307983,
+        "rms": 0.1286984235048294,
+        "shape": [
+          2,
+          64512
+        ]
+      },
+      "mp4": "post_fix_3__g1_two_stage.mp4",
+      "video": {
+        "mean": 78.55061340332031,
+        "p01": 5.0,
+        "p50": 62.0,
+        "p99": 218.0,
+        "shape": [
+          31,
+          448,
+          704,
+          3
+        ],
+        "std": 61.23429489135742
+      },
+      "wall_seconds": 699.2,
+      "wav": "post_fix_3__g1_two_stage.wav"
+    },
+    "git_rev": "463ac76"
+  },
+  "post_fix_decoder": {
+    "g1_two_stage": {
+      "audio": {
+        "mean_abs": 0.09918607771396637,
+        "peak": 0.6226943731307983,
+        "rms": 0.1286984235048294,
+        "shape": [
+          2,
+          64512
+        ]
+      },
+      "mp4": "post_fix_decoder__g1_two_stage.mp4",
+      "video": {
+        "mean": 78.54508209228516,
+        "p01": 9.0,
+        "p50": 61.0,
+        "p99": 218.0,
+        "shape": [
+          31,
+          448,
+          704,
+          3
+        ],
+        "std": 60.9510498046875
+      },
+      "wall_seconds": 707.2,
+      "wav": "post_fix_decoder__g1_two_stage.wav"
+    },
+    "g2_hq": {
+      "audio": {
+        "mean_abs": 0.08201079070568085,
+        "peak": 0.3620268702507019,
+        "rms": 0.10147557407617569,
+        "shape": [
+          2,
+          64512
+        ]
+      },
+      "mp4": "post_fix_decoder__g2_hq.mp4",
+      "video": {
+        "mean": 94.00862121582031,
+        "p01": 6.0,
+        "p50": 88.0,
+        "p99": 217.0,
+        "shape": [
+          31,
+          448,
+          704,
+          3
+        ],
+        "std": 54.29462814331055
+      },
+      "wall_seconds": 1183.9,
+      "wav": "post_fix_decoder__g2_hq.wav"
+    },
+    "g3b_hedgehog": {
+      "audio": {
+        "mean_abs": 0.031245216727256775,
+        "peak": 0.4705960750579834,
+        "rms": 0.05101587623357773,
+        "shape": [
+          2,
+          64512
+        ]
+      },
+      "mp4": "post_fix_decoder__g3b_hedgehog.mp4",
+      "video": {
+        "mean": 82.10808563232422,
+        "p01": 4.0,
+        "p50": 63.0,
+        "p99": 247.0,
+        "shape": [
+          31,
+          448,
+          704,
+          3
+        ],
+        "std": 61.24039077758789
+      },
+      "wall_seconds": 824.1,
+      "wav": "post_fix_decoder__g3b_hedgehog.wav"
+    },
+    "git_rev": "6c38f1e"
+  },
+  "post_phase_2": {
+    "g3b_hedgehog": {
+      "audio": {
+        "mean_abs": 0.03417244553565979,
+        "peak": 0.3745337426662445,
+        "rms": 0.05584497004747391,
+        "shape": [
+          2,
+          64512
+        ]
+      },
+      "mp4": "post_phase_2__g3b_hedgehog.mp4",
+      "video": {
+        "mean": 82.23274230957031,
+        "p01": 5.0,
+        "p50": 63.0,
+        "p99": 247.0,
+        "shape": [
+          31,
+          448,
+          704,
+          3
+        ],
+        "std": 61.4329719543457
+      },
+      "wall_seconds": 820.0,
+      "wav": "post_phase_2__g3b_hedgehog.wav"
+    },
+    "git_rev": "75ae836"
+  },
+  "pre_fix_1": {
+    "g1_two_stage": {
+      "audio": {
+        "mean_abs": 0.09918607771396637,
+        "peak": 0.6226943731307983,
+        "rms": 0.1286984235048294,
+        "shape": [
+          2,
+          64512
+        ]
+      },
+      "mp4": "pre_fix_1__g1_two_stage.mp4",
+      "video": {
+        "mean": 78.55061340332031,
+        "p01": 5.0,
+        "p50": 62.0,
+        "p99": 218.0,
+        "shape": [
+          31,
+          448,
+          704,
+          3
+        ],
+        "std": 61.23429489135742
+      },
+      "wall_seconds": 840.9,
+      "wav": "pre_fix_1__g1_two_stage.wav"
+    },
+    "g2_hq": {
+      "audio": {
+        "mean_abs": 0.08201079070568085,
+        "peak": 0.3620268702507019,
+        "rms": 0.10147557407617569,
+        "shape": [
+          2,
+          64512
+        ]
+      },
+      "mp4": "pre_fix_1__g2_hq.mp4",
+      "video": {
+        "mean": 93.82814025878906,
+        "p01": 6.0,
+        "p50": 88.0,
+        "p99": 217.0,
+        "shape": [
+          31,
+          448,
+          704,
+          3
+        ],
+        "std": 54.26045227050781
+      },
+      "wall_seconds": 1321.4,
+      "wav": "pre_fix_1__g2_hq.wav"
+    },
+    "git_rev": "f8f20c8"
+  },
+  "pre_fix_2_kf": {
+    "g3b_hedgehog": {
+      "audio": {
+        "mean_abs": 0.026175284758210182,
+        "peak": 0.5888588428497314,
+        "rms": 0.04829812049865723,
+        "shape": [
+          2,
+          64512
+        ]
+      },
+      "mp4": "pre_fix_2_kf__g3b_hedgehog.mp4",
+      "video": {
+        "mean": 81.49189758300781,
+        "p01": 5.0,
+        "p50": 62.0,
+        "p99": 245.0,
+        "shape": [
+          31,
+          448,
+          704,
+          3
+        ],
+        "std": 60.579002380371094
+      },
+      "wall_seconds": 867.2,
+      "wav": "pre_fix_2_kf__g3b_hedgehog.wav"
+    },
+    "git_rev": "1c6f633"
+  },
+  "v0_18_0": {
+    "g3b_hedgehog": {
+      "audio": {
+        "mean_abs": 0.026844477280974388,
+        "peak": 0.28044795989990234,
+        "rms": 0.04032880812883377,
+        "shape": [
+          2,
+          63840
+        ]
+      },
+      "mp4": "v0_18_0__g3b_hedgehog.mp4",
+      "video": {
+        "mean": 81.80127716064453,
+        "p01": 5.0,
+        "p50": 64.0,
+        "p99": 244.0,
+        "shape": [
+          33,
+          448,
+          704,
+          3
+        ],
+        "std": 59.737937927246094
+      },
+      "wall_seconds": 2759.7,
+      "wav": "v0_18_0__g3b_hedgehog.wav"
+    },
+    "git_rev": "b82b97e"
+  }
+}

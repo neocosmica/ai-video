@@ -1,0 +1,1172 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+While the project is pre-1.0 (`0.x.y`), the `0.y` segment serves as the major
+version: breaking changes bump `y`, additive changes bump `z`. See
+[`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
+stability guarantees.
+
+## [0.18.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.17.0...v0.18.0) (2026-10-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* `ltx_core_mlx.utils.video` (`load_video_frames_normalized`, `load_video_for_encoding`) is removed. Use `ltx_pipelines_mlx.utils.media_io.decode_video_by_frame` + `video_preprocess`, which match upstream's preprocessing.
+* `ltx-2-mlx keyframe` and `KeyframeInterpolationPipeline` are removed, as upstream. Use `ltx-2-mlx generate --two-stage --image start.png 0 1.0 guide --image end.png last 1.0 guide --refine-audio` (Python: `TI2VidTwoStagesPipeline` with `ImageConditioningInput.guide(...)` images and `refine_audio=True`). It runs 30 stage-1 steps where `keyframe` defaulted to 20.
+* `ImageConditioningInput` is now a frozen dataclass `(path, strength, binding, crf)`. Build it with `ImageConditioningInput.at(path, frame_idx, strength, crf)` (the old rule: frame 0 replaces, later frames guide), `.replace(...)` or `.guide(...)` instead of `ImageConditioningInput(path, frame_idx, strength, crf)`. On the CLI, `--image PATH FRAME_IDX STRENGTH [BINDING] [CRF]` takes `auto` (default, unchanged), `replace` or `guide`; an `auto` anchor at a negative index (`-num_frames` included) is now a guide.
+
+### Features
+
+* **pipelines:** add --refine-audio to generate --two-stage (upstream v1.5.0) ([#226](https://github.com/dgrauet/ltx-2-mlx/issues/226)) ([69b1cda](https://github.com/dgrauet/ltx-2-mlx/commit/69b1cdaaf152da31c100b632ca18f7a061e591db))
+* **pipelines:** export A2VidDistilledPipeline, A2VidDFRPipeline and ExtendDistilledPipeline from ltx_pipelines_mlx ([#233](https://github.com/dgrauet/ltx-2-mlx/issues/233)) ([1d61027](https://github.com/dgrauet/ltx-2-mlx/commit/1d61027c63caa5aa4adc1edd050476e79036cf43))
+* remove the keyframe command and KeyframeInterpolationPipeline (upstream v1.5.0) ([#229](https://github.com/dgrauet/ltx-2-mlx/issues/229)) ([17ff317](https://github.com/dgrauet/ltx-2-mlx/commit/17ff317cb6a9d54e440219723afa88f7c7d71688))
+* replace and guide bindings for --image (upstream v1.5.0) ([#227](https://github.com/dgrauet/ltx-2-mlx/issues/227)) ([03597a9](https://github.com/dgrauet/ltx-2-mlx/commit/03597a9e5675b5e3b62b84856023c597b65c1c0a))
+
+
+### Bug Fixes
+
+* **pipelines:** close the gaps found by the v1.5.0 sync audit ([#232](https://github.com/dgrauet/ltx-2-mlx/issues/232)) ([8efbfef](https://github.com/dgrauet/ltx-2-mlx/commit/8efbfef427afd873f25d976231a87922786fe39e))
+* **pipelines:** tile the DFR spatial epilogue on one grid of tiles up to 32 cells, as upstream v1.5.0 (`--spatial-upscalings 2` renders change; about 2x faster at 1536x1024) ([#228](https://github.com/dgrauet/ltx-2-mlx/issues/228)) ([1d67857](https://github.com/dgrauet/ltx-2-mlx/commit/1d678573e36380c6a730b38f42b5372032831c1a))
+
+
+### Code Refactoring
+
+* drop the dead ltx_core_mlx.utils.video module and fold the prompt-encode helpers ([#233](https://github.com/dgrauet/ltx-2-mlx/issues/233)) ([1d61027](https://github.com/dgrauet/ltx-2-mlx/commit/1d61027c63caa5aa4adc1edd050476e79036cf43))
+
+## [0.17.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.16.3...v0.17.0) (2026-10-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* generate --distilled / --dfr with --segment now also gates audio_attn2 (audio relay strength 1.0 by default, as the reference ComfyUI node); --relay-audio-strength 0 reproduces the previous renders bit for bit. The CFG modes keep the video-only relay by default.
+
+### Features
+
+* **core:** unfused LoRAs under --low-ram block streaming ([#213](https://github.com/dgrauet/ltx-2-mlx/issues/213)) ([9e4a1a5](https://github.com/dgrauet/ltx-2-mlx/commit/9e4a1a54194460547a103334b5e06382724fbba6)), closes [#192](https://github.com/dgrauet/ltx-2-mlx/issues/192)
+* **pipelines:** audio-to-video on the DFR base path (a2v --dfr) ([#219](https://github.com/dgrauet/ltx-2-mlx/issues/219)) ([5fed9e2](https://github.com/dgrauet/ltx-2-mlx/commit/5fed9e2a588102c231658d2a2b7be1ef7bf350b4))
+* **pipelines:** capture and resume the distilled stage 1 (return_stage1 / stage1) ([#217](https://github.com/dgrauet/ltx-2-mlx/issues/217)) ([fa79407](https://github.com/dgrauet/ltx-2-mlx/commit/fa79407684ec3d5cc3955228b9e0a7312093e166))
+* prompt relay on the audio cross-attention (audio_attn2) ([#218](https://github.com/dgrauet/ltx-2-mlx/issues/218)) ([0879826](https://github.com/dgrauet/ltx-2-mlx/commit/087982635bc25d9037367d204e39a56db73b0254))
+
+
+### Bug Fixes
+
+* **ic-lora:** run stage 2 on the reloaded clean transformer ([#220](https://github.com/dgrauet/ltx-2-mlx/issues/220)) ([5438924](https://github.com/dgrauet/ltx-2-mlx/commit/5438924f8cf950e6cad25549bc32612da5999548))
+* **pipelines:** evaluate the image encode and the a2v upsample before their encoder is freed ([#216](https://github.com/dgrauet/ltx-2-mlx/issues/216)) ([aaa3d51](https://github.com/dgrauet/ltx-2-mlx/commit/aaa3d5128cd1390ca543ab98e7d1abe4308e6274))
+* **pipelines:** refuse stage-1 resume on DFR and 2.3 packs before the a2v --dfr audio encode ([#224](https://github.com/dgrauet/ltx-2-mlx/issues/224)) ([4fee375](https://github.com/dgrauet/ltx-2-mlx/commit/4fee3756660860b47e5a4a21580226cda7460847))
+* **pipelines:** retake regenerates the audio tokens that overlap the window in time ([#222](https://github.com/dgrauet/ltx-2-mlx/issues/222)) ([fc399f3](https://github.com/dgrauet/ltx-2-mlx/commit/fc399f3e911fff960aaa23b54288b4062d6e48ea))
+
+
+### Documentation
+
+* align docs and CLI help with the code before 0.17.0 ([#225](https://github.com/dgrauet/ltx-2-mlx/issues/225)) ([e7e03fc](https://github.com/dgrauet/ltx-2-mlx/commit/e7e03fcbdaa6993368237c40b4d7aa4055b6ac0f))
+* ic-lora runs on 2.5 with the published 2.5 IC-LoRAs ([#221](https://github.com/dgrauet/ltx-2-mlx/issues/221)) ([1b99b83](https://github.com/dgrauet/ltx-2-mlx/commit/1b99b83f7934ad359a2d82b509b67220c35de23f))
+
+## [0.16.3](https://github.com/dgrauet/ltx-2-mlx/compare/v0.16.2...v0.16.3) (2026-10-09)
+
+
+### Features
+
+* distilled audio-to-video (a2v --distilled) ([#201](https://github.com/dgrauet/ltx-2-mlx/issues/201)) ([51a9967](https://github.com/dgrauet/ltx-2-mlx/commit/51a9967df86fd7a9811244a7bd9872155c370c02))
+* distilled extend (extend --distilled) ([#209](https://github.com/dgrauet/ltx-2-mlx/issues/209)) ([04e2dd0](https://github.com/dgrauet/ltx-2-mlx/commit/04e2dd00795fcceb3fae65694f7eb8d87fa92d45))
+* distilled retake (retake --distilled) ([#204](https://github.com/dgrauet/ltx-2-mlx/issues/204)) ([3e292d7](https://github.com/dgrauet/ltx-2-mlx/commit/3e292d7957e5d1f3540ae26eb624d7558ca049e6))
+* normalized attention guidance (nag) for the distilled path ([#207](https://github.com/dgrauet/ltx-2-mlx/issues/207)) ([88e1d35](https://github.com/dgrauet/ltx-2-mlx/commit/88e1d356e157561cbf0fbb949dd8c6a578118b6e))
+
+
+### Bug Fixes
+
+* **a2v:** evaluate the source audio tokens before freeing the audio encoder ([#208](https://github.com/dgrauet/ltx-2-mlx/issues/208)) ([9c8c05e](https://github.com/dgrauet/ltx-2-mlx/commit/9c8c05ebc33a2b3b59ea57cab84e366383f9534a))
+* **pipelines:** evaluate the retake source encode before the DiT loads, tile it like upstream ([#203](https://github.com/dgrauet/ltx-2-mlx/issues/203)) ([51b0332](https://github.com/dgrauet/ltx-2-mlx/commit/51b0332bd9d5f6560f8a34b2888daef33598d37a))
+
+
+### Documentation
+
+* align docs and CLI help with the code before 0.16.3 ([#210](https://github.com/dgrauet/ltx-2-mlx/issues/210)) ([00ca7c0](https://github.com/dgrauet/ltx-2-mlx/commit/00ca7c03fbef19c6d9f6ad43db69ec9b5716fd38))
+* generate --distilled with start and end images as a faster keyframe alternative on 2.5 ([#206](https://github.com/dgrauet/ltx-2-mlx/issues/206)) ([d70f6af](https://github.com/dgrauet/ltx-2-mlx/commit/d70f6afec9db6c06b2b57cf36b25ff9178767775))
+
+## [0.16.2](https://github.com/dgrauet/ltx-2-mlx/compare/v0.16.1...v0.16.2) (2026-10-07)
+
+
+### Features
+
+* **core:** opt-in block-sparse video self-attention for the distilled stage 2 (LTX2_SOL_TAU) ([#196](https://github.com/dgrauet/ltx-2-mlx/issues/196)) ([eed73a2](https://github.com/dgrauet/ltx-2-mlx/commit/eed73a245134ff576386732d4441224b53427dfb))
+
+
+### Bug Fixes
+
+* center-crop control videos like upstream video_preprocess ([#198](https://github.com/dgrauet/ltx-2-mlx/issues/198)) ([8605f32](https://github.com/dgrauet/ltx-2-mlx/commit/8605f326edb736e50922f5fc40c01778e8a6d17a)), closes [#194](https://github.com/dgrauet/ltx-2-mlx/issues/194)
+* **samplers:** res2s re-applies the conditioning mask after SDE noise injection ([#200](https://github.com/dgrauet/ltx-2-mlx/issues/200)) ([82d362f](https://github.com/dgrauet/ltx-2-mlx/commit/82d362fbf7af9433220bcae266063157a7d13d8e))
+
+## [0.16.1](https://github.com/dgrauet/ltx-2-mlx/compare/v0.16.0...v0.16.1) (2026-10-06)
+
+
+### Features
+
+* **core:** opt-in unfused LoRA adapters (LTX2_LORA_MODE=unfused) ([#191](https://github.com/dgrauet/ltx-2-mlx/issues/191)) ([43c1a9e](https://github.com/dgrauet/ltx-2-mlx/commit/43c1a9e6585939c88d6998013bed9fbbe73cff2d))
+
+
+### Bug Fixes
+
+* match upstream image-conditioning preprocessing ([#193](https://github.com/dgrauet/ltx-2-mlx/issues/193)) ([bfa5755](https://github.com/dgrauet/ltx-2-mlx/commit/bfa5755371a973651ea218ac3b56dcd34aa92c45)), refs [#188](https://github.com/dgrauet/ltx-2-mlx/issues/188)
+
+## [0.16.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.12...v0.16.0) (2026-10-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* hdr-ic-lora is now upstream v1.4's single-stage ACEScct SDR-to-HDR IC-LoRA on LTX-2.5 packs (HLG mp4 + EXR frames). It no longer accepts --prompt, -H/-W/-f, --lora, --video-conditioning, --stage1-steps/--stage2-steps, --skip-stage-2, --image or --tile-*; the .hdr.npz output and LTX-2.3 (LogC3) HDR are gone.
+
+### Features
+
+* acescct colour, hlg and exr media for hdr ([#182](https://github.com/dgrauet/ltx-2-mlx/issues/182)) ([e4bf87d](https://github.com/dgrauet/ltx-2-mlx/commit/e4bf87db55185a70602ad4ca31b2a8418fd5eb3b))
+* **core:** opt-in float16 compute for DiT attention and feed-forward (LTX2_COMPUTE_DTYPE) ([#171](https://github.com/dgrauet/ltx-2-mlx/issues/171)) ([b2b813d](https://github.com/dgrauet/ltx-2-mlx/commit/b2b813df18a58dcd11c7d38df399cb92cdc7f395))
+* **core:** run the DiT without an audio stream ([#181](https://github.com/dgrauet/ltx-2-mlx/issues/181)) ([2131415](https://github.com/dgrauet/ltx-2-mlx/commit/213141573e3f017c511d0d2de1fe6c79a381e616))
+* **pipelines:** accept `last` and negative FRAME_IDX in --image ([#167](https://github.com/dgrauet/ltx-2-mlx/issues/167)) ([d3785c5](https://github.com/dgrauet/ltx-2-mlx/commit/d3785c54e68fd456bb8cf79a3e4e58ef981e130e))
+* replace hdr-ic-lora with the upstream ACEScct SDR-to-HDR pipeline ([#183](https://github.com/dgrauet/ltx-2-mlx/issues/183)) ([0e9f642](https://github.com/dgrauet/ltx-2-mlx/commit/0e9f64223557b44c67c9db5456c8b5d6882ee5c3))
+
+
+### Bug Fixes
+
+* **cli:** stop accepting --tile-* on pipelines that ignore it ([#178](https://github.com/dgrauet/ltx-2-mlx/issues/178)) ([08facfe](https://github.com/dgrauet/ltx-2-mlx/commit/08facfe67d0d2305342ae351d1d970573bb95ca3))
+* **loader:** keep the scales/biases dtype when fusing a LoRA into a quantized weight ([#186](https://github.com/dgrauet/ltx-2-mlx/issues/186)) ([f3c5bad](https://github.com/dgrauet/ltx-2-mlx/commit/f3c5bad7d559aa26843f873a10aa1b730691e8ab))
+* **pipelines:** floor off-grid frame counts before sizing the audio ([#177](https://github.com/dgrauet/ltx-2-mlx/issues/177)) ([ee1d585](https://github.com/dgrauet/ltx-2-mlx/commit/ee1d585222c28336a5d900d903274f9f0c9c1c0a))
+* **pipelines:** freeze the stage-2 audio of the two-stage pipeline ([#173](https://github.com/dgrauet/ltx-2-mlx/issues/173)) ([6f05eaa](https://github.com/dgrauet/ltx-2-mlx/commit/6f05eaaa3094989c8d1c0f65a9be4f953b2b82c0))
+* **pipelines:** honour --frame-rate in a2v positions and keyframe audio length ([#176](https://github.com/dgrauet/ltx-2-mlx/issues/176)) ([4254a8f](https://github.com/dgrauet/ltx-2-mlx/commit/4254a8f5e77145027647b4c0af3bf693bcbb7a8e))
+* **pipelines:** rebuild the LipDub stage-2 audio reference from stage 1 ([#174](https://github.com/dgrauet/ltx-2-mlx/issues/174)) ([e3d0275](https://github.com/dgrauet/ltx-2-mlx/commit/e3d02756119e525d12108e76e65a611478c7b48b))
+* **pipelines:** resolve the image conditioning CRF from the model generation ([#187](https://github.com/dgrauet/ltx-2-mlx/issues/187)) ([2524595](https://github.com/dgrauet/ltx-2-mlx/commit/2524595c8c9b34c02aae8dcb23ccab238b47381a))
+* **pipelines:** run the DFR spatial epilogue as pinned windows, 2x2 then 4x4 ([#180](https://github.com/dgrauet/ltx-2-mlx/issues/180)) ([8de47e1](https://github.com/dgrauet/ltx-2-mlx/commit/8de47e183dc7ad40ea22f50c0b476ea2198afbf5))
+* **pipelines:** run the HQ two-stage refine with the res_2s sampler ([#175](https://github.com/dgrauet/ltx-2-mlx/issues/175)) ([d612feb](https://github.com/dgrauet/ltx-2-mlx/commit/d612febe00fe7014e85eece848503543479c4999))
+* **pipelines:** sample LTX-2.5 distilled stage 2 with ancestral Euler ([#172](https://github.com/dgrauet/ltx-2-mlx/issues/172)) ([5c1ca4a](https://github.com/dgrauet/ltx-2-mlx/commit/5c1ca4a3f416751149be572cdcff34b72f260852))
+* **pipelines:** start DFR temporal tiles on a keyframe plane with a pinned prefix ([#179](https://github.com/dgrauet/ltx-2-mlx/issues/179)) ([57794bb](https://github.com/dgrauet/ltx-2-mlx/commit/57794bb08ddd38443806865a5421b2addffcbcc5))
+* stop hdr-ic-lora crashing under LTX2_COMPUTE_DTYPE, plus pre-release audit fixes ([#189](https://github.com/dgrauet/ltx-2-mlx/issues/189)) ([552b512](https://github.com/dgrauet/ltx-2-mlx/commit/552b5129b3887870231c75a735d8ddcb13aca877))
+* **trainer:** save LoRA factors C-contiguous ([#169](https://github.com/dgrauet/ltx-2-mlx/issues/169)) ([4b18bc6](https://github.com/dgrauet/ltx-2-mlx/commit/4b18bc6828e0a57e7b77e70848ca2b1bfcf06201))
+
+
+### Documentation
+
+* align readme, claude.md and docs with the code before 0.16.0 ([#190](https://github.com/dgrauet/ltx-2-mlx/issues/190)) ([75c463e](https://github.com/dgrauet/ltx-2-mlx/commit/75c463ea0289f1e392ca523405162c2eb2d9c45f))
+
+## [0.15.12](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.11...v0.15.12) (2026-09-27)
+
+
+### Features
+
+* **pipelines:** TeaCache stage-1 acceleration for a2v ([#129](https://github.com/dgrauet/ltx-2-mlx/issues/129)) ([45d1b70](https://github.com/dgrauet/ltx-2-mlx/commit/45d1b7006d328035e4351ba0fb99b27192ba6c1a))
+
+
+### Bug Fixes
+
+* **core:** run the DurationHead pooler attention through fused SDPA ([#124](https://github.com/dgrauet/ltx-2-mlx/issues/124)) ([3e4ea99](https://github.com/dgrauet/ltx-2-mlx/commit/3e4ea99c1eb41f1678ed5904bdb6cd23522f9d20))
+* **pipelines:** keep the terminal sigma when stage steps are shortened ([#141](https://github.com/dgrauet/ltx-2-mlx/issues/141)) ([14ee96f](https://github.com/dgrauet/ltx-2-mlx/commit/14ee96f5267515149faa3427d16c6b8c18a5c10c))
+* **pipelines:** reject a2v audio shorter than the requested clip ([#165](https://github.com/dgrauet/ltx-2-mlx/issues/165)) ([7db16c2](https://github.com/dgrauet/ltx-2-mlx/commit/7db16c2d2c1a7bdf0be18a55fc03121c5ad4ba7c)), closes [#164](https://github.com/dgrauet/ltx-2-mlx/issues/164)
+* **scripts:** pass frame_rate in calibrate_teacache, clear ty findings, make ty blocking ([#166](https://github.com/dgrauet/ltx-2-mlx/issues/166)) ([1d3f522](https://github.com/dgrauet/ltx-2-mlx/commit/1d3f5227b03330c0665b5a97d4c58d42e7e7ade4))
+
+## [0.15.11](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.10...v0.15.11) (2026-09-26)
+
+
+### Features
+
+* **pipelines:** user-supplied negative_prompt on every CFG pipeline ([#155](https://github.com/dgrauet/ltx-2-mlx/issues/155)) ([a8b92ff](https://github.com/dgrauet/ltx-2-mlx/commit/a8b92ff876966dcf5d2d5fd26c0892cecabc9034))
+* **trainer:** per-step metrics callback with loss and lr ([#154](https://github.com/dgrauet/ltx-2-mlx/issues/154)) ([3e199e5](https://github.com/dgrauet/ltx-2-mlx/commit/3e199e5fe9e2bcc394ee9df698514b5a3b782397))
+
+## [0.15.10](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.9...v0.15.10) (2026-09-26)
+
+
+### Features
+
+* **core:** keyframe-aware diffusion decode for dfr (--video-decoder diffusion) ([#156](https://github.com/dgrauet/ltx-2-mlx/issues/156)) ([86f6b94](https://github.com/dgrauet/ltx-2-mlx/commit/86f6b941446e10237bf0d7558efd00a673bd5cac))
+* **pipelines:** dfr spatial epilogue (--spatial-upscalings 2) ([#161](https://github.com/dgrauet/ltx-2-mlx/issues/161)) ([714f71b](https://github.com/dgrauet/ltx-2-mlx/commit/714f71b6fcd679450f7d429b49aa59724d2d9538))
+* **pipelines:** dfr temporal rounds (--temporal-upscalings) ([#158](https://github.com/dgrauet/ltx-2-mlx/issues/158)) ([15e7f00](https://github.com/dgrauet/ltx-2-mlx/commit/15e7f002f8944d5c647286ef801c595a4f28ac6f))
+
+
+### Bug Fixes
+
+* **core:** frozen modality streams use sigma 0 like upstream (a2v, lipdub, retake shift) ([#159](https://github.com/dgrauet/ltx-2-mlx/issues/159)) ([9b91fe2](https://github.com/dgrauet/ltx-2-mlx/commit/9b91fe24481a99afb0a023c2e0c8187ccd763e11))
+* **core:** ic-lora reference positions follow the frame rate; diffusion decoder casts its input ([#153](https://github.com/dgrauet/ltx-2-mlx/issues/153)) ([ab7a2b0](https://github.com/dgrauet/ltx-2-mlx/commit/ab7a2b0d6f364a4a3fc2b64a7f2af8c2c028b8dc))
+* **core:** upstream-iso modality tiling (interval conditioning keep, seam split, position normalize) ([#160](https://github.com/dgrauet/ltx-2-mlx/issues/160)) ([84e22ab](https://github.com/dgrauet/ltx-2-mlx/commit/84e22abf6eed3e23eedd47de1477aa6c7c000602))
+* **pipelines:** dfr keyframe decode follow-ups (tie-break, stderr notes, quiet conv note) ([#157](https://github.com/dgrauet/ltx-2-mlx/issues/157)) ([3b2e77f](https://github.com/dgrauet/ltx-2-mlx/commit/3b2e77fd73af5f08961f4436ae979c0579d5deed))
+
+
+### Documentation
+
+* the dfr detailing lora is a gated hf repo; name the licence page on failure ([#151](https://github.com/dgrauet/ltx-2-mlx/issues/151)) ([7296f23](https://github.com/dgrauet/ltx-2-mlx/commit/7296f236acf12cbf7f7653e3d0acdd4174d7be1e))
+
+## [0.15.9](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.8...v0.15.9) (2026-09-21)
+
+
+### Features
+
+* **pipelines:** dfr base path (generate --dfr) on ltx-2.5 packs ([#150](https://github.com/dgrauet/ltx-2-mlx/issues/150)) ([f848f77](https://github.com/dgrauet/ltx-2-mlx/commit/f848f77a8f6ceff8193c731a7bdafa91b9bdf2dd))
+
+
+### Documentation
+
+* pipelines guide with decision tree, per-pipeline cards and a flag matrix ([#148](https://github.com/dgrauet/ltx-2-mlx/issues/148)) ([4abe012](https://github.com/dgrauet/ltx-2-mlx/commit/4abe0129376117c11cc9f4560f2a2b65baf013da))
+
+## [0.15.8](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.7...v0.15.8) (2026-09-20)
+
+
+### Bug Fixes
+
+* **core:** conv VAE decode tiling estimate measured, spatial tiles in the auto path ([#146](https://github.com/dgrauet/ltx-2-mlx/issues/146)) ([8dc80b4](https://github.com/dgrauet/ltx-2-mlx/commit/8dc80b483a5144f8ef39c5a40b5b74694c0b6625))
+
+## [0.15.7](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.6...v0.15.7) (2026-09-19)
+
+
+### Features
+
+* **pipelines:** tiled decode for the diffusion video decoder (--diffvae-tile, auto budget sizing) ([#144](https://github.com/dgrauet/ltx-2-mlx/issues/144)) ([effd115](https://github.com/dgrauet/ltx-2-mlx/commit/effd115ca2b66906cb4bf41a0ecfe1a9666b253d))
+
+## [0.15.6](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.5...v0.15.6) (2026-09-17)
+
+
+### Features
+
+* **core:** diffusion video decoder for LTX-2.5 (opt-in, single tile) ([#139](https://github.com/dgrauet/ltx-2-mlx/issues/139)) ([b88e35e](https://github.com/dgrauet/ltx-2-mlx/commit/b88e35e275db3a5c066a0581926cac93fc43e330))
+
+## [0.15.5](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.4...v0.15.5) (2026-09-14)
+
+
+### Features
+
+* **core:** generated keyframe slots + keyframe absolute-position marker (LTX 2.5) ([#135](https://github.com/dgrauet/ltx-2-mlx/issues/135)) ([45c5c53](https://github.com/dgrauet/ltx-2-mlx/commit/45c5c53ae9ed608a895b93ed2885ad5dc89d9b23))
+
+## [0.15.4](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.3...v0.15.4) (2026-09-13)
+
+
+### Features
+
+* **pipelines:** print an up-front denoising cost estimate before step 1 ([#133](https://github.com/dgrauet/ltx-2-mlx/issues/133)) ([077d560](https://github.com/dgrauet/ltx-2-mlx/commit/077d560096a0e2daeeec7e2084c2f6334705ba31)), closes [#94](https://github.com/dgrauet/ltx-2-mlx/issues/94)
+
+## [0.15.3](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.2...v0.15.3) (2026-09-12)
+
+
+### Features
+
+* **pipelines:** add `generate --no-audio` to skip audio decode and mux ([#132](https://github.com/dgrauet/ltx-2-mlx/issues/132)) ([54ce09e](https://github.com/dgrauet/ltx-2-mlx/commit/54ce09ec030647e3fca6e5f8f404e30901b8f90e)), closes [#126](https://github.com/dgrauet/ltx-2-mlx/issues/126)
+
+
+### Bug Fixes
+
+* **core:** load DurationHead packs with pre-split q/k/v projections ([#130](https://github.com/dgrauet/ltx-2-mlx/issues/130)) ([5b22407](https://github.com/dgrauet/ltx-2-mlx/commit/5b22407547cb2edaeb2d46e9ecdf67aff209c3bd)), closes [#125](https://github.com/dgrauet/ltx-2-mlx/issues/125)
+* **core:** stop VideoDecoder.decode_and_stream deadlocking on unread ffmpeg stderr ([#131](https://github.com/dgrauet/ltx-2-mlx/issues/131)) ([1181277](https://github.com/dgrauet/ltx-2-mlx/commit/11812779769f9a87d09aae1264a151faa8f97330)), closes [#92](https://github.com/dgrauet/ltx-2-mlx/issues/92)
+
+
+### Documentation
+
+* credit the v0.15.2 external contributions in the changelog ([#122](https://github.com/dgrauet/ltx-2-mlx/issues/122)) ([91e6f6c](https://github.com/dgrauet/ltx-2-mlx/commit/91e6f6c9bd621ff2ae31adfee643e113d67d6ae8))
+
+## [0.15.2](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.1...v0.15.2) (2026-08-29)
+
+
+### Features
+
+* AdaLN per-token sigma-dedupe + lazy per-block gather — multi-GB activation-memory cut on conditioned runs, bitwise-identical by construction ([#86](https://github.com/dgrauet/ltx-2-mlx/issues/86)) ([24f8aa8](https://github.com/dgrauet/ltx-2-mlx/commit/24f8aa8339688d6d6006e262bdcdbe64db1203a6)). Contributed by [@mrbizarro](https://github.com/mrbizarro). Opt-out switches: `LTX2_ADALN_DEDUPE=0`, `LTX2_ADALN_LAZY=0`.
+
+
+### Dependencies
+
+* bump mlx 0.31.1 → 0.32.2 ([#85](https://github.com/dgrauet/ltx-2-mlx/issues/85)) ([7a8aba2](https://github.com/dgrauet/ltx-2-mlx/commit/7a8aba21d2ca95e5a7abf12f93f2ba3216e3fb5c)). Contributed by [@plz12345](https://github.com/plz12345).
+
+
+### Bug Fixes
+
+* **core:** keep bitwise AdaLN comparisons below the M1 Metal reduction limit ([#121](https://github.com/dgrauet/ltx-2-mlx/issues/121)) ([5627990](https://github.com/dgrauet/ltx-2-mlx/commit/5627990b4055883c4217a47d765e4a9e51963aa7))
+* **core:** run the plain AdaLN path under streaming, not dedupe-without-lazy ([#119](https://github.com/dgrauet/ltx-2-mlx/issues/119)) ([4d60fc9](https://github.com/dgrauet/ltx-2-mlx/commit/4d60fc92bc141b681703e1ab3b5c6f6ee1497ed6))
+
+## [0.15.1](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.0...v0.15.1) (2026-08-28)
+
+
+### Features
+
+* **pipelines:** wire --low-ram block streaming into retake and extend ([#115](https://github.com/dgrauet/ltx-2-mlx/issues/115)) ([99c9c7f](https://github.com/dgrauet/ltx-2-mlx/commit/99c9c7f124d3a56b5bfd63ebb8e96cf76cc7cd0a))
+
+
+### Documentation
+
+* add the LTX-2.5 pack variants table (bf16 / q8 / q4) ([#117](https://github.com/dgrauet/ltx-2-mlx/issues/117)) ([09c1c78](https://github.com/dgrauet/ltx-2-mlx/commit/09c1c78e0194fb5bdf0b10e8171bb2e2b270dfa1))
+* reflect the completed LTX-2.5 coverage across README and CLAUDE.md ([#118](https://github.com/dgrauet/ltx-2-mlx/issues/118)) ([62499a4](https://github.com/dgrauet/ltx-2-mlx/commit/62499a456612710f556cabeaf8bc58b99316a52b))
+
+## [0.15.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.23...v0.15.0) (2026-08-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **pipelines:** `generate`'s implicit -f 97 default is gone on LTX-2.3 packs. Without a DurationHead-equipped checkpoint (2.3), num_frames must now be passed explicitly (via -f) or generation raises immediately; LTX-2.5 packs auto-predict duration from the prompt when -f is omitted.
+* **pipelines:** two-stage and two-stages-hq audio output changes for the same seed (2.3 included); the two-stage baselines must be re-recorded.
+* **core:** versioned DiT config — read the 2.5 fields from the checkpoint ([#101](https://github.com/dgrauet/ltx-2-mlx/issues/101))
+
+### Features
+
+* **core:** load the 2.5 conv video VAE pair by pack evidence ([#105](https://github.com/dgrauet/ltx-2-mlx/issues/105)) ([2a2e1b2](https://github.com/dgrauet/ltx-2-mlx/commit/2a2e1b29ff2b395f23e9967e43e9c828334dbfb8))
+* **core:** port the euler-ancestral sampler and the 2.5 sigma tables ([#103](https://github.com/dgrauet/ltx-2-mlx/issues/103)) ([e3cd8cb](https://github.com/dgrauet/ltx-2-mlx/commit/e3cd8cbb0e5ad4759238522d068f2f8007045cba))
+* **core:** vendor the Gemma-4 text tower and key the encoder off the checkpoint ([#104](https://github.com/dgrauet/ltx-2-mlx/issues/104)) ([0459f0a](https://github.com/dgrauet/ltx-2-mlx/commit/0459f0ab25dd5a3b2676b6c14b49992d822779a4))
+* **core:** versioned DiT config — read the 2.5 fields from the checkpoint ([#101](https://github.com/dgrauet/ltx-2-mlx/issues/101)) ([83a7011](https://github.com/dgrauet/ltx-2-mlx/commit/83a70112ef1fb144181656934893eab5d610c8b4))
+* **pipelines:** auto-predicted duration via the LTX-2.5 DurationHead ([#112](https://github.com/dgrauet/ltx-2-mlx/issues/112)) ([8fff273](https://github.com/dgrauet/ltx-2-mlx/commit/8fff27307c9930f5c1413ccaa50bd2dc7d25d22f))
+* **pipelines:** validate keyframe interpolation on LTX-2.5 packs ([#110](https://github.com/dgrauet/ltx-2-mlx/issues/110)) ([0f70ec3](https://github.com/dgrauet/ltx-2-mlx/commit/0f70ec3801ee5e38e9c3a9251c289e1bc3e1b7f7))
+* **pipelines:** wire the distilled pipeline for LTX-2.5 packs ([#106](https://github.com/dgrauet/ltx-2-mlx/issues/106)) ([ab33200](https://github.com/dgrauet/ltx-2-mlx/commit/ab33200b17623e4e7024c1cf53a35b8e1b9af55c))
+* **pipelines:** wire the two-stage dev+CFG pipeline for LTX-2.5 packs ([#107](https://github.com/dgrauet/ltx-2-mlx/issues/107)) ([dd23aff](https://github.com/dgrauet/ltx-2-mlx/commit/dd23aff436c14698d649e4c0a35cd7d0b6b75efa))
+
+
+### Bug Fixes
+
+* **cli:** forward the source frame rate in the retake/extend decode helper ([#113](https://github.com/dgrauet/ltx-2-mlx/issues/113)) ([add0142](https://github.com/dgrauet/ltx-2-mlx/commit/add0142ece318bb09ad4bf295214724859fb241b))
+* **pipelines:** keep stage-1 audio in the two-stage pipelines, matching upstream ([#108](https://github.com/dgrauet/ltx-2-mlx/issues/108)) ([c6dd5b9](https://github.com/dgrauet/ltx-2-mlx/commit/c6dd5b94f3f5028d7a66b15d56a8e60374a2b53e))
+
+
+### Documentation
+
+* mark --two-stages-hq as supported on LTX-2.5 packs ([#109](https://github.com/dgrauet/ltx-2-mlx/issues/109)) ([a4825db](https://github.com/dgrauet/ltx-2-mlx/commit/a4825db99be7c5a934ac69356ebab495f4d29a65))
+* mark a2v as supported on LTX-2.5 packs ([#111](https://github.com/dgrauet/ltx-2-mlx/issues/111)) ([a7124e9](https://github.com/dgrauet/ltx-2-mlx/commit/a7124e96492469251c879b7606b97c73e0e9965d))
+* mark retake and extend as supported on LTX-2.5 packs ([#114](https://github.com/dgrauet/ltx-2-mlx/issues/114)) ([15b0dec](https://github.com/dgrauet/ltx-2-mlx/commit/15b0dec26bbb96b23817fb60a641a3c729c406b8))
+
+## [0.14.23](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.22...v0.14.23) (2026-08-23)
+
+
+### Features
+
+* **scripts:** add a numerics report to gate mlx upgrades on evidence ([#98](https://github.com/dgrauet/ltx-2-mlx/issues/98)) ([ead5fce](https://github.com/dgrauet/ltx-2-mlx/commit/ead5fce0a2934d66575b16ae7fe91baafe808f7c))
+
+
+### Performance Improvements
+
+* **media:** zero-copy frame/audio writes, opt-in write overlap ([#83](https://github.com/dgrauet/ltx-2-mlx/issues/83)) ([0d536c9](https://github.com/dgrauet/ltx-2-mlx/commit/0d536c90e20f22404d4021699251fc13eb09fa17))
+
+## [0.14.22](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.21...v0.14.22) (2026-08-22)
+
+
+### Bug Fixes
+
+* **tests:** stop weight-gated tests from silently skipping, and unbreak them ([#95](https://github.com/dgrauet/ltx-2-mlx/issues/95)) ([803951a](https://github.com/dgrauet/ltx-2-mlx/commit/803951af67bdb9cafea317d163de1711e9120ae9))
+
+## [0.14.21](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.20...v0.14.21) (2026-08-17)
+
+
+### Features
+
+* stepwise previews during generation ([#88](https://github.com/dgrauet/ltx-2-mlx/issues/88)) ([a42db21](https://github.com/dgrauet/ltx-2-mlx/commit/a42db21d39af53abdd57552b2952d95b74fe1d1a))
+
+## [0.14.20](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.19...v0.14.20) (2026-08-14)
+
+
+### Bug Fixes
+
+* **ci:** unbreak the build and lint after hatchling 1.32 and ruff 0.16 ([#89](https://github.com/dgrauet/ltx-2-mlx/issues/89)) ([2167b5b](https://github.com/dgrauet/ltx-2-mlx/commit/2167b5b8075409067857d4b9b899ab144b1a57c1))
+
+## [0.14.19](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.18...v0.14.19) (2026-07-19)
+
+
+### Bug Fixes
+
+* explain macOS GPU-watchdog kills instead of dying cryptically ([#75](https://github.com/dgrauet/ltx-2-mlx/issues/75)) ([#78](https://github.com/dgrauet/ltx-2-mlx/issues/78)) ([8f43c23](https://github.com/dgrauet/ltx-2-mlx/commit/8f43c23e1cba9ad586afeccde07d9e851903c0cf))
+* free the DiT before VAE decode in low-memory mode ([#74](https://github.com/dgrauet/ltx-2-mlx/issues/74)) ([#76](https://github.com/dgrauet/ltx-2-mlx/issues/76)) ([89d5400](https://github.com/dgrauet/ltx-2-mlx/commit/89d54005a06c7d35d8557b46fd30c354252c8d7a))
+* stop the Gemma encoder from widening a stricter cache limit ([#79](https://github.com/dgrauet/ltx-2-mlx/issues/79)) ([#80](https://github.com/dgrauet/ltx-2-mlx/issues/80)) ([aed35d6](https://github.com/dgrauet/ltx-2-mlx/commit/aed35d63714e71a6b8ed56b54aba3b9aac207648))
+
+## [0.14.18](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.17...v0.14.18) (2026-07-11)
+
+
+### Features
+
+* warn on output dimension snapping via shared helper ([#72](https://github.com/dgrauet/ltx-2-mlx/issues/72)) ([42ea2bb](https://github.com/dgrauet/ltx-2-mlx/commit/42ea2bb6dc29e9ff974def828d95de192ef11393))
+
+
+### Documentation
+
+* document ic-lora --upsample-only / --refine-steps in CLAUDE.md ([#70](https://github.com/dgrauet/ltx-2-mlx/issues/70)) ([8e1526d](https://github.com/dgrauet/ltx-2-mlx/commit/8e1526d3147086d8981b30f1e03496012c059125))
+
+## [0.14.17](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.16...v0.14.17) (2026-07-10)
+
+
+### Features
+
+* ic-lora --upsample-only + control-aware --refine-steps ([#68](https://github.com/dgrauet/ltx-2-mlx/issues/68)) ([16580db](https://github.com/dgrauet/ltx-2-mlx/commit/16580db376888316803505d5e163048cc902ec93))
+
+
+### Documentation
+
+* document 0.14.16 features in CLAUDE.md ([#65](https://github.com/dgrauet/ltx-2-mlx/issues/65)) ([b283144](https://github.com/dgrauet/ltx-2-mlx/commit/b283144a5207c97a10b3cc8df2bb6491f7f14285))
+
+## [0.14.16](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.15...v0.14.16) (2026-07-09)
+
+
+### Features
+
+* Prompt Relay temporal prompt gating ([#61](https://github.com/dgrauet/ltx-2-mlx/issues/61)) ([b9aa475](https://github.com/dgrauet/ltx-2-mlx/commit/b9aa475ac90ebc2bbfe1dffd97ee6bdee5a823f5))
+
+
+### Bug Fixes
+
+* ic-lora dev-mode fuses distilled lora in the main pass; add --single-stage ([#63](https://github.com/dgrauet/ltx-2-mlx/issues/63)) ([dcaf982](https://github.com/dgrauet/ltx-2-mlx/commit/dcaf982be68dd2e893eca4d5851a4ab31f71ca55))
+* support quantized transformers at any group_size (not just 64) ([#60](https://github.com/dgrauet/ltx-2-mlx/issues/60)) ([9af01c8](https://github.com/dgrauet/ltx-2-mlx/commit/9af01c8fe318089abf042d33443fb815877e56d7))
+
+## [0.14.15](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.14...v0.14.15) (2026-07-01)
+
+
+### Bug Fixes
+
+* add missing frame_rate to combined_image_conditionings, fixing a2v/lipdub with image conditioning ([#56](https://github.com/dgrauet/ltx-2-mlx/issues/56)) ([cc0cacc](https://github.com/dgrauet/ltx-2-mlx/commit/cc0caccc4287855c56ba56628b5346b55f192c37))
+* do not truncate muxed video to shortest stream in VAE decode ([#58](https://github.com/dgrauet/ltx-2-mlx/issues/58)) ([d9f566a](https://github.com/dgrauet/ltx-2-mlx/commit/d9f566a641294a8562e9776ba343263771c26f70))
+
+## [0.14.14](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.13...v0.14.14) (2026-06-29)
+
+
+### Bug Fixes
+
+* apply streaming LoRA deltas under the correct block prefix ([#52](https://github.com/dgrauet/ltx-2-mlx/issues/52)) ([#53](https://github.com/dgrauet/ltx-2-mlx/issues/53)) ([b68459f](https://github.com/dgrauet/ltx-2-mlx/commit/b68459f8c284a87da18eedc518237ff16e73c47d))
+
+## [Unreleased]
+
+## [0.14.13] - 2026-06-22
+
+Makes multi-anchor I2V reachable on the `--one-stage` and `--distilled`
+generate modes. Both pipelines already accepted the upstream-iso `images=`
+list and routed it through `combined_image_conditionings`; a leftover CLI
+guard (`_legacy_single_image`) was the only thing rejecting more than one
+`--image` anchor or a non-trivial `frame_idx`/`strength` on these modes,
+artificially restricting multi-anchor I2V to `--two-stage` / `--two-stages-hq`.
+Removing the guard brings the CLI in line with upstream, where `--image` is
+repeatable across all modes. Purely additive — only previously-erroring paths
+are affected; `--two-stage` / `--two-stages-hq` behavior is unchanged.
+Validated with start+end anchor smoke tests at 512×512×25 on both
+`--distilled` and `--one-stage`. Thanks to
+[@plz12345](https://github.com/plz12345) (#45).
+
+### Added
+
+- Multi-anchor I2V on `--one-stage` and `--distilled`: the repeatable
+  `--image PATH FRAME_IDX STRENGTH` form now works on every `generate` mode.
+  `frame_idx=0` hard-replaces the first latent frame
+  (`VideoConditionByLatentIndex`); `frame_idx>0` appends a soft keyframe anchor
+  (`VideoConditionByKeyframeIndex`). New "Multi-Anchor I2V" section in
+  `CLAUDE.md` documents the form and the `(num_frames - 1) % 8 == 0`
+  frame-count constraint.
+
+### Fixed
+
+- `VideoConditionByKeyframeIndex.frame_idx` docstring corrected from "latent
+  frame index" to "pixel frame index (0-based)", matching the math in
+  `_compute_keyframe_positions` and the `--image` help text.
+- `uv.lock` resynced to the released package versions (the 0.14.12 release
+  bumped the workspace `pyproject` files but left the lockfile at 0.14.11).
+
+## [0.14.12] - 2026-06-15
+
+Enables end-to-end joint audio-video LoRA training on Apple Silicon, closing
+the gap between what the trainer config accepted and what it could actually
+execute. Adds an audio preprocessing path, a video slicer for preparing
+training clips, and gradient checkpointing so the dev model can backprop on a
+64 GB machine. Also fixes four latent crashers in the existing trainer that
+would have broken any audio training run — three of them (`fps=` →
+`frame_rate=` at trainer call sites) are regressions from the v0.14.0
+iso-strict rename that missed the trainer package, the same class of miss as
+the v0.14.1 decode-wrapper fix. Validated with a real 2000-step audio-style
+LoRA run on an M5 Pro 64 GB (74 clips, 192×192, rank 32). Thanks to
+[@plz12345](https://github.com/plz12345) (#43).
+
+### Added
+
+- `ltx-2-mlx slice` command — cuts long source videos into normalized,
+  resolution-aligned training clips with audio retained: fixed-interval or
+  timecode-list slicing, aspect-safe crop/pad, `--max-clips` with even or
+  sequential sampling, and per-source output subfolders
+  (`ltx_trainer_mlx/slice_clips.py`).
+- `preprocess --with-audio` — encodes each clip's audio track through the
+  audio VAE encoder into `audio_latents/` alongside the video latents, sized
+  to `compute_audio_token_count()` so the two modalities are aligned by
+  construction. Adds `load_audio_vae_encoder` to the trainer model loader and
+  recursive clip discovery so per-source subfolders from `slice` work.
+- Gradient checkpointing on `LTXModel` (`gradient_checkpointing` flag, default
+  off, no inference effect), wired to the trainer via
+  `OptimizationConfig.enable_gradient_checkpointing` and the `train --low-ram`
+  CLI flag. Recomputes each transformer block in the backward pass to cap
+  activation memory at ~1 block (vs storing all 48), letting the dev model
+  backprop fit on 64 GB. LoRA params are passed as explicit `mx.checkpoint`
+  inputs so their gradients are tracked (a naive wrap would silently zero
+  them). Covered by a grad-equivalence test.
+- `transformer_file` config field to pin an explicit transformer safetensors
+  filename (e.g. `transformer-dev.safetensors`) instead of relying on
+  auto-detection.
+- Example training config `configs/lora_av_whisper.yaml` (whisper/ASMR
+  audio-style LoRA).
+
+### Changed
+
+- `preprocess` no longer downloads the full model snapshot when given a
+  HuggingFace repo ID. It now does a partial download of only the encoder
+  files preprocessing actually loads (connector + video/audio VAE), skipping
+  the ~20 GB transformer (~80 GB total saved). **Impact:** anyone who relied
+  on `preprocess` to populate the full HF cache must now run
+  `huggingface-cli download <repo>` separately or pass an already-cached local
+  path. `~` is now expanded in `model_path` config validation.
+
+### Fixed
+
+- Trainer audio training was broken by `fps=` keyword arguments at three call
+  sites (`trainer.py`, `training_strategies/base_strategy.py`,
+  `validation_sampler.py`) — the parameter was renamed to `frame_rate=` in
+  v0.14.0 but the trainer package was not covered by that audit.
+- Validation sampler called the video and audio decoders directly
+  (`decoder(latent)`) instead of `decoder.decode(latent)`.
+- `bfloat16` arrays were passed to numpy without a cast in `video_utils.py`
+  (numpy has no bfloat16 buffer dtype); now cast to `float32` in MLX first.
+
+## [0.14.11] - 2026-06-08
+
+Fixes audio cross-modal gating (speech / lip-sync) by reading the
+transformer config from the checkpoint instead of relying on hardcoded
+dataclass defaults. Every LTX-2.3 checkpoint ships
+`av_ca_timestep_scale_multiplier = 1000.0` (in both `config.json` and
+`embedded_config.json`), but the MLX `LTXModelConfig` dataclass default was
+`1.0` and the loaders never read the checkpoint — so the audio↔video
+cross-attention gate AdaLN received `sigma * 1` instead of `sigma * 1000`,
+mis-weighting the cross-modal information that carries voice/dialog. The
+root cause was copying upstream's *dataclass* default (`1`) without wiring
+upstream's *configurator*, which reads the value from the checkpoint
+(`config.get("av_ca_timestep_scale_multiplier", 1)` → `1000`). The fix
+mirrors upstream `LTXModelConfigurator.from_config`: hyperparameters are now
+read from the checkpoint at load time across all pipelines and the trainer.
+Audio output changes for every generation (toward upstream parity);
+validated end-to-end (config-driven output is bit-identical to manually
+setting the multiplier to 1000, and materially different — waveform
+correlation 0.31 — from the previous behaviour). See issue #37; independent
+confirmation in Acelogic/LTX-2-MLX `AUDIO_ISSUES.md`.
+
+### Fixed
+
+- AV cross-attention gate was attenuated by reading
+  `av_ca_timestep_scale_multiplier = 1.0` (dataclass default) instead of the
+  checkpoint's `1000.0`. `load_transformer` (`utils/_orchestration.py`), the
+  LoRA-fused path (`_base.py`) and the trainer loader
+  (`ltx_trainer_mlx/model_loader.py`) now build the model config from the
+  checkpoint via `LTXModelConfig.from_checkpoint_dir()` (#37).
+
+### Added
+
+- `LTXModelConfig.from_checkpoint_config(dict)` and
+  `LTXModelConfig.from_checkpoint_dir(path)` — read transformer
+  hyperparameters from a checkpoint's `embedded_config.json` (preferred) or
+  `config.json`, mirroring upstream `LTXModelConfigurator.from_config`. The
+  dataclass defaults are the per-key fallback, so direct `LTXModel()`
+  construction is unchanged.
+- `tests/test_av_ca_timestep_config.py` — pins the checkpoint-read behaviour,
+  guards against architecture drift (only `av_ca_timestep_scale_multiplier`
+  may differ from defaults on the shipped config), and asserts the gate
+  timestep embedding is load-bearing.
+
+## [0.14.10] - 2026-06-07
+
+Fixes near-silent audio (mean ≈ −52 dB instead of ≈ −13 dB) in generated
+videos on **mlx 0.31.2**. mlx 0.31.2 shipped a Metal scatter-kernel
+regression (ml-explore/mlx#3266, reported as #3477, fixed upstream by
+#3483 but not yet in any release) where `mx.array.at[<strided slice>].add()`
+mis-indexes its *source* on the Metal backend. The audio path used that
+op twice for zero-insert upsampling — in the BigVGAN vocoder
+(`UpSample1d`) and the BWE resampler (`HannSincResampler`) — so the
+corrupted zero-insert fed every SnakeBeta activation and collapsed the
+waveform to noise. Video was unaffected. Both call sites now use plain
+strided assignment, which is equivalent (the destination is freshly
+zeroed) and correct on mlx 0.31.1, 0.31.2 and main. No version pin is
+added: 0.31.1 is itself unsafe on some setups (Metal watchdog crashes at
+text-encode) and `mlx-lm>=0.31.3` requires `mlx>=0.31.2`. See issue #34.
+
+### Fixed
+
+- `audio_vae/vocoder.py` (`UpSample1d`) and `audio_vae/bwe.py`
+  (`HannSincResampler`): replace `at[<strided>].add()` zero-insert with
+  strided assignment to dodge the mlx 0.31.2 Metal scatter bug (#34).
+
+### Added
+
+- `tests/test_audio_scatter_regression.py` — NumPy-reference tests for the
+  two real call sites (`UpSample1d`, `HannSincResampler`) plus a framework
+  canary that skips with a diagnostic on an affected mlx backend.
+
+## [0.14.9] - 2026-06-02
+
+Handles LTX-2.3 model directories that ship versioned safetensors
+filenames (e.g. `transformer-distilled-1.1.safetensors`). Previously the
+loader hardcoded unversioned names, so it silently ignored LTX's newer
+file revisions — and failed hard if a user kept only the newer file to
+save disk. Resolution is now dynamic: the alphabetically-latest versioned
+file wins over the unversioned exact name when both are present. After an
+upstream sync + re-forge, the code picks up the newer weights with no
+changes. Thanks to [@plz12345](https://github.com/plz12345) for the
+contribution (PR #32).
+
+### Added
+
+- `BasePipeline._resolve_safetensors(model_dir, stem)` — resolves a
+  (possibly versioned) safetensors path, preferring `{stem}-*.safetensors`
+  over `{stem}.safetensors` and returning the canonical exact path when
+  nothing exists (clear `FileNotFoundError`). Wired into transformer,
+  distilled-LoRA, and upscaler resolution across `_base`, `distilled`,
+  `ic_lora`, and `ti2vid_two_stages`.
+- `_load_weights` fallback in `loader/sft_loader.py` — loads extensionless
+  HuggingFace cache blobs via `mx.load(path, format="safetensors")`, which
+  `mx.load` cannot infer by suffix. Reachable when a model dir resolves
+  through a `snapshots/` symlink to the real GUID blob name (custom or
+  refined models).
+- Trainer `model_loader.load_transformer` auto-detect extended to
+  versioned transformer names.
+
+### Fixed
+
+- Upscaler file naming and key-prefix handling: supports both the new
+  v1.1+ bare-key layout and the legacy stem-prefixed layout.
+
+## [0.14.8] - 2026-05-22
+
+Enables `generate --lora` on the `--low-ram` block-streaming path.
+Previously, combining the two raised `NotImplementedError` because
+LoRA fusion required a fully-materialised weight dict before
+block-stream eviction started. The streaming path now attaches each
+pending LoRA as a `BlockLoraSource` on the `StreamingLTXModel`
+wrapper — fusion happens per-block at each `bind()`, mirroring the
+pattern already used by `ICLoraPipeline._fuse_loras` for control
+LoRAs. Works for community LoRAs at strength 1.0 and at custom
+strengths. Thanks to [@plz12345](https://github.com/plz12345) for the
+contribution (PR #30, follow-up to #20).
+
+### Added
+
+- `resolve_lora_path` helper in `ltx_pipelines_mlx.utils._orchestration`
+  shared by the streaming and non-streaming LoRA paths. Accepts local
+  `.safetensors` paths and HuggingFace repo IDs. Raises `ValueError`
+  on ambiguous multi-safetensors repos (lists the candidate file
+  names) and `FileNotFoundError` on empty repos.
+- Audio / joint-block LoRA key remappings (`.linear_1.` → `.linear1.`,
+  `.linear_2.` → `.linear2.`, `audio_ff.net.0.proj.` →
+  `audio_ff.proj_in.`, `audio_ff.net.2.` → `audio_ff.proj_out.`)
+  consolidated into the shared `LTXV_LORA_COMFY_RENAMING_MAP` in
+  `ltx_core_mlx.loader.sd_ops` so the streaming path picks them up
+  automatically (it goes through the map directly, no longer through
+  `ti2vid_two_stages._remap_lora_keys`).
+- Tests: streaming dispatch now pins `BlockLoraSource` ctor args and
+  exercises a parametrized two-LoRA case; new `test_resolve_lora_path`
+  covers the 4 resolution branches (local-exists, HF single, HF
+  multi-raises, HF zero-raises); new `test_lora_renaming_map` locks
+  the contract for the 4 audio/joint-block patterns.
+
+### Changed
+
+- CLAUDE.md "Limitations" + CLI `--low-ram` help text updated: the
+  `generate --lora` flag is now compatible with `--low-ram` via
+  per-block bind-time fusion.
+- `_remap_lora_keys` in `ti2vid_two_stages.py` simplified to a single
+  dict comprehension; `or k` fallback removed (verified dead — the
+  shared map's `apply_to_key` always returns a string given
+  `with_matching()` + no `allowed_keys`).
+- `resolve_lora_path` writes its "Downloading LoRA from HuggingFace"
+  notice to stderr via `print(..., file=sys.stderr)` instead of
+  `logging.info` (which was swallowed by the absent logger config).
+
+## [0.14.7] - 2026-05-20
+
+Hotfix for a long-standing IC-LoRA reference-video crash. Any caller
+passing an 8k-frame source file (the format LTX itself produces — its
+``_decode_and_save_video`` drops the leading frame on write) into
+``ICLoraPipeline.generate_and_save(video_conditioning=...)`` hit a
+``space_to_depth`` reshape error at ``ltx_core_mlx/model/video_vae/sampling.py:121``
+because the encoder's first temporal-stride-2 block requires a
+``(1 + 8k)``-frame input. Failure was input-content-independent: a raw
+RGB driving video and a canny-edges control map produced byte-identical
+error numbers at the same reshape site.
+
+### Fixed
+
+- ``append_ic_lora_reference_video_conditionings`` in ``iclora_utils.py``
+  now probes the source with ``probe_video_info``, clamps to the
+  caller's target ``num_frames``, and rounds down to the nearest
+  ``(1 + 8k)`` before invoking ``load_video_frames_normalized``.
+  Mirrors ``RetakePipeline._encode_source_video``. Applies to every
+  ``ICLoraPipeline`` subclass — including ``HDRICLoraPipeline`` (where
+  the reporter observed the same crash at a different spatial scale,
+  ``reference_downscale_factor=1``) and ``LipDubPipeline``'s
+  video-reference path.
+
+### Changed
+
+- Lifted the local ``from ltx_core_mlx.components.patchifiers import
+  compute_video_latent_shape`` inside ``append_ic_lora_reference_video_conditionings``
+  to module scope. Same scoping anti-pattern that caused the
+  ``UnboundLocalError`` previously fixed in ``ic_lora.py`` (commit
+  ``23127d6``); not load-bearing here, but matches the cleanup precedent.
+
+### Credit
+
+Bug surfaced and diagnosed by [@R0drig0Diaz](https://github.com/R0drig0Diaz)
+in [#27](https://github.com/dgrauet/ltx-2-mlx/issues/27) — with
+byte-identical reproductions across two input modalities (RGB +
+canny-edges) and two LoRA variants (Union Control with
+``reference_downscale_factor=2``, HDR with ``reference_downscale_factor=1``),
+plus the ``RetakePipeline._encode_source_video`` precedent and a 3-fix
+proposal. The two scoping-trap items called out in #27 (``ic_lora.py:261``
++ ``ic_lora.py:501``) were already resolved on ``main`` since
+``23127d6``; the reporter was on stale HEAD ``0e753b6``.
+
+## [0.14.6] - 2026-05-20
+
+Automatic temporal tiling for the video VAE decoder. The block-3
+DepthToSpaceUpsample intermediate (``(B, 512, 4F, 4H, 4W)`` in bf16)
+dominates peak Metal activation memory at HD or long durations and
+pushed 32 GB Macs into swap on 720p+ runs beyond ~20s — even when the
+rest of the pipeline (transformer streamed, decoders loaded on demand)
+fit comfortably.
+
+### Added
+
+- ``_compute_decode_tiling(latent_shape, frame_rate)`` in
+  ``ltx_core_mlx.model.video_vae.video_vae``: pure-arithmetic helper
+  that derives a ``TilingConfig`` from the latent shape and the
+  ``LTX2_VAE_DECODE_BUDGET_GB`` budget (default ``8.0``). Returns
+  ``None`` when the full video already fits, so the no-tiling path
+  has zero overhead at common resolutions. Tile size and overlap
+  scale with frame rate (~1 second of pixel frames of overlap).
+- ``VideoDecoder.decode_and_stream`` (pipelines wrapper) now prints
+  ``[vae-decode tiled: tile_frames=N overlap=K]`` to stderr when tiling
+  kicks in, gated on the pipeline's ``verbose`` flag.
+
+### Changed
+
+- ``VideoDecoder.tiled_decode`` (core) inserts ``mx.eval`` +
+  ``aggressive_cleanup`` after each tile decode and after each
+  accumulation step so prior-tile activations are freed before the
+  next tile begins.
+- ``VideoDecoder.decode`` gains an opt-in ``_materialize_stages``
+  keyword-only flag (default ``False``) that forces ``mx.eval`` between
+  the four upsample stages. Only set ``True`` by ``tiled_decode`` —
+  the no-tiling fast path keeps full kernel fusion across upsample
+  stages.
+- ``A2VidPipelineTwoStage._upscale_and_optionally_encode`` was
+  reaching into ``self.vae_decoder.decode_and_stream`` directly;
+  routed through ``self.video_decoder_block.decode_and_stream`` like
+  every other pipeline. Removes a stale ``assert self.vae_decoder
+  is not None`` (the block's ``load()`` is idempotent) and gives a2v
+  the same stderr marker as the rest.
+
+### Note on numerical equivalence
+
+Tiled decode is **not** bit-equivalent to a non-tiled decode at the
+same configuration. The video VAE's causal ``Conv3dBlock``
+(``convolution.py:62-66``) replicates each tile's first frame for
+temporal padding, so isolated tiles diverge from the full-decode
+context at boundaries. The trapezoidal blend mask smooths the seam
+visually but does not reconstruct the exact signal. This is intrinsic
+to any tiled-VAE-decode and matches the upstream behaviour — users
+switching into tiled mode at 1080p+ should expect minor boundary
+drift vs. the same config with enough RAM to skip tiling.
+
+### Benchmarks (one run each, ``--distilled`` 8/3 at 480p × 15s × 25fps)
+
+| stage | no-tile | tiled (opt-in via large input) | Δ |
+|---|---|---|---|
+| decode | 124.1s | 131.4s | +5.9% |
+| total | 841.0s | 881.9s | +4.9% |
+
+No-tiling fast path is unchanged.
+
+### Credit
+
+End-to-end PR by [@plz12345](https://github.com/plz12345) in
+[#25](https://github.com/dgrauet/ltx-2-mlx/pull/25), iterated through
+two rounds of review covering env-var budget gating, scoped
+``BrokenPipeError`` handling, fp32→bf16 budget correction, stderr
+marker plumbing, a2v consistency cleanup, and the multi-tile
+integration test. Production-validated on plz12345's M5 MacBook Air
+32 GB for a week prior to submission.
+
+## [0.14.5] - 2026-05-19
+
+CLI phase-marker coverage gap on the distilled two-stage path. The
+``[Encoding prompt] ... done in X.Xs`` marker introduced in v0.13.1
+was emitted by every pipeline that goes through ``BasePipeline``'s
+text-encoding helper, but ``DistilledPipeline.generate_two_stage``
+encodes the (positive-only) prompt inline and was missed in the v0.13.1
+audit. ``[Loading text encoder]`` was emitted, then silence until
+``[Loading DiT]``.
+
+### Fixed
+
+- Wrap ``_encode_text`` + ``_materialize`` in ``DistilledPipeline.generate_two_stage``
+  with the ``phase("Encoding prompt", ...)`` context manager so the
+  encoding duration is reported on stderr like every other pipeline.
+  Caught by external contributor [@plz12345](https://github.com/plz12345)
+  in PR #28.
+
+## [0.14.4] - 2026-05-14
+
+Apple Silicon Metal watchdog hardening for the denoise loop. On
+M2 Max 64 GB (and any Apple Silicon under load), the macOS GPU
+watchdog could fire with ``MTLCommandBufferErrorInternal`` (code 14)
+at the start of a denoise loop when the accumulated pre-denoise lazy
+graph — VAE encoding, conditioning blend, and noise addition — was
+submitted as a single oversized Metal command buffer exceeding the
+~10s watchdog window.
+
+### Fixed
+
+- Add ``BasePipeline._pre_denoise_flush(video_state, audio_state)``
+  that calls ``mx.eval`` on the noised latent states to force-materialise
+  the accumulated graph in its own command buffer before the denoise
+  loop begins. Each subsequent denoise-step buffer is then within the
+  watchdog window.
+- Wire the flush at every denoise call site across all pipelines
+  (18 sites total): ``BasePipeline.generate`` (one-stage distilled),
+  ``TI2VidOneStagePipeline`` (dev one-stage + CFG), ``DistilledPipeline``
+  (two-stage), ``TI2VidTwoStagesPipeline`` and ``TI2VidTwoStagesHQPipeline``
+  (both stages), ``A2VidPipelineTwoStage`` (both stages),
+  ``ICLoraPipeline`` and ``HDRICLoraPipeline`` (both stages, via
+  inheritance), ``RetakePipeline`` (retake + extend), ``KeyframeInterpolationPipeline``
+  (stage 1 dev/distilled branches + stage 2), and ``LipDubPipeline``
+  (both stages).
+
+### Credit
+
+Initial fix and validation on M2 Max 64 GB by
+[@colinbdesign](https://github.com/colinbdesign) in
+[#22](https://github.com/dgrauet/ltx-2-mlx/pull/22) — covered
+``BasePipeline.generate`` plus the two two-stage variants. Coverage
+extended to the remaining 14 call sites in
+[#23](https://github.com/dgrauet/ltx-2-mlx/pull/23).
+
+## [0.14.3] - 2026-05-14
+
+Accurate transformer-load phase timing. Before this patch, the
+``[Loading transformer (...)] done in 0.1s`` marker reported ~0.1s for
+a 10+ GB load — MLX is lazy, so ``apply_quantization`` + ``load_weights``
+build a graph but defer the real work. The marker measured graph
+construction, not loading.
+
+### Fixed
+
+- Force MLX graph materialisation immediately after ``load_weights`` in
+  both the orchestration helper (``utils._orchestration.load_transformer``)
+  and the LoRA-fusion path (``_base.py``). Both branches now report
+  real load time (~1.8s empirically observed by the reporter on a
+  typical run).
+
+### Credit
+
+Bug surfaced by [@plz12345](https://github.com/plz12345) in
+[#18](https://github.com/dgrauet/ltx-2-mlx/pull/18). Release PR
+adds the symmetric guard to the LoRA-fusion path for consistency.
+
+## [0.14.2] - 2026-05-14
+
+Hotfix for a long-standing latent bug: setting ``pipe._pending_loras = [...]``
+from the CLI was silently dropped by every pipeline whose ``load()`` method
+overrides :meth:`BasePipeline.load` — that is, ``--distilled``, ``--one-stage``,
+``--two-stage``, and ``--two-stages-hq``. Only the ``BasePipeline.load()``
+path (no longer reached by any T2V/I2V CLI mode) honored the flag, so T2V
+generation with ``--lora`` produced output indistinguishable from a
+base-model run.
+
+### Fixed
+
+- ``BasePipeline._load_transformer_with_optional_streaming`` now honors
+  ``_pending_loras`` directly. Every pipeline whose ``load()`` routes
+  through this wrapper (or through ``_load_dev_transformer``, which
+  transitively calls the wrapper) automatically picks up LoRA fusion —
+  no subclass-level boilerplate required. Pre-existing pipelines fixed:
+  ``DistilledPipeline``, ``TI2VidOneStagePipeline``, ``TI2VidTwoStagesPipeline``,
+  ``TI2VidTwoStagesHQPipeline``.
+- New regression test (``tests/test_pending_loras_dispatch.py``) locks the
+  contract: every pipeline ``load()`` override must route DiT construction
+  through the wrapper. Catches future overrides that would silently
+  reintroduce the bug.
+
+### Credit
+
+Bug surfaced by [@colinbdesign](https://github.com/colinbdesign) in
+[#16](https://github.com/dgrauet/ltx-2-mlx/pull/16) (closed in favor of
+this PR's wrapper-level fix, which is upstream-iso friendly and covers
+all four affected pipelines instead of just ``DistilledPipeline``).
+
+## [0.14.1] - 2026-05-14
+
+Hotfix for a regression introduced by the v0.14.0 `fps` → `frame_rate`
+rename. The `VideoDecoder.decode_and_stream` wrapper in
+`ltx_pipelines_mlx/utils/blocks.py` was missed during the audit and
+kept the old `fps=` kwarg, while the inner `ltx_core_mlx`
+`VAE.decode_and_stream` now requires `frame_rate=` mandatory
+keyword-only. Every decode path raised `TypeError: ... got an
+unexpected keyword argument 'frame_rate'` at mux time.
+
+### Fixed
+
+- `VideoDecoder.decode_and_stream` wrapper accepts and forwards
+  `frame_rate=` (was still `fps=`). Affects every pipeline that goes
+  through the orchestration helper: `--two-stage`, `--two-stages-hq`,
+  `a2v`, `keyframe`, `ic-lora`, `hdr-ic-lora`. One-stage was
+  unaffected — bug was isolated to the decode hop.
+  Closes [#17](https://github.com/dgrauet/ltx-2-mlx/pull/17).
+  Thanks to [@plz12345](https://github.com/plz12345) for the catch +
+  patch.
+
+## [0.14.0] - 2026-05-13
+
+Ultra-strict upstream-iso pass on the `frame_rate` parameter. Mirrors
+`Lightricks/LTX-2`'s pipeline signatures byte-for-byte: every public
+pipeline method now takes `frame_rate: float` as a **mandatory
+keyword-only** parameter (no default, matches upstream's required
+`frame_rate=` kwarg). The legacy `fps=` kwarg is renamed throughout the
+pipelines layer + immediate core helpers. Closes the audit gap
+identified on [issue #6](https://github.com/dgrauet/ltx-2-mlx/issues/6).
+
+### Changed
+
+- **Breaking**: every pipeline public method (`generate*`,
+  `generate_and_save`, `interpolate`, `retake`, `extend`,
+  `generate_lipdub`) renames `fps: float = 24.0` →
+  `frame_rate: float` (mandatory keyword-only). 8 pipelines affected:
+  `TI2VidOneStagePipeline`, `TI2VidTwoStagesPipeline`,
+  `TI2VidTwoStagesHQPipeline`, `DistilledPipeline`,
+  `A2VidPipelineTwoStage`, `KeyframeInterpolationPipeline`,
+  `ICLoraPipeline`, `HDRICLoraPipeline`. The 2 pipelines that derive
+  `frame_rate` from the source video metadata (`RetakePipeline`,
+  `LipDubPipeline`) still don't expose a public kwarg, but their
+  internal `extend(...)` accepts `frame_rate` keyword-only too.
+
+- **Breaking**: every CLI subcommand that previously accepted `--fps`
+  now accepts `--frame-rate` and makes it **required**. Coverage
+  changes: `--frame-rate` is now also required on `generate`
+  (all four modes), `ic-lora`, and `hdr-ic-lora` — fixing the silent
+  24fps default that was unintentionally baked into the temporal RoPE
+  on those pipelines. `retake`, `extend`, and `lipdub` derive
+  `frame_rate` from the source video and need no flag.
+
+- **Breaking** (core helpers): `compute_video_positions`,
+  `compute_audio_token_count`, `decode_and_stream`,
+  `VideoConditionByKeyframeIndex` constructor, `_decode_and_save_video`,
+  `combined_image_conditionings` all rename `fps` → `frame_rate`. The
+  `fps` field on `RetakePipeline._SourceMeta` is renamed to
+  `frame_rate`. `VideoInfo.fps` (ffprobe metadata carrier) **keeps
+  its `fps` name** — it describes a source video file's metadata, not
+  a pipeline parameter, and aligns with how ffprobe and upstream's
+  `VideoPixelShape(fps=...)` data class label the concept.
+
+### Migration
+
+Python API callers:
+
+```python
+# 0.13.x
+pipe.generate_and_save(prompt="...", num_frames=97, fps=24.0)
+# 0.14.0
+pipe.generate_and_save(prompt="...", num_frames=97, frame_rate=24.0)
+```
+
+`frame_rate` is mandatory and keyword-only — positional callers and
+callers relying on the implicit 24.0 default will hit a `TypeError`.
+
+CLI users:
+
+```bash
+# 0.13.x
+ltx-2-mlx a2v --audio music.wav --fps 24 ...
+# 0.14.0
+ltx-2-mlx a2v --audio music.wav --frame-rate 24 ...
+
+# 0.13.x silently assumed 24
+ltx-2-mlx generate --two-stage -p "..." -o out.mp4
+# 0.14.0 requires it explicitly
+ltx-2-mlx generate --two-stage --frame-rate 24 -p "..." -o out.mp4
+```
+
+LTX-2.3 was trained at 24 fps. Values far from 24 drift out of the
+temporal RoPE training distribution — quality risk. ComfyUI exposes
+the same knob with the same caveat.
+
+## [0.13.1] - 2026-05-13
+
+Adds CLI phase markers around previously silent long-running stages
+(Gemma load + prompt encode, transformer load, decoder load, video
+decode). Addresses [issue #5](https://github.com/dgrauet/ltx-2-mlx/issues/5)
+— a UX-only change with no impact on math, performance, or output.
+
+### Added
+
+- **CLI phase markers**. Each pipeline now prints `[phase] ...` /
+  `[phase] done in X.Ys` lines to **stderr** around the five silent
+  stages: loading the text encoder, encoding the prompt, loading the
+  transformer, loading the decoders, and decoding video + audio +
+  muxing. Output goes to stderr so stdout stays clean for callers that
+  pipe pipeline output. Suppressed by `--quiet`.
+- `BasePipeline.verbose` constructor parameter (default `True`)
+  controlling the phase markers. CLI maps `verbose=not args.quiet` after
+  pipeline construction. Programmatic users can set it either via the
+  constructor or by assigning `pipe.verbose = False` after the fact.
+- New `ltx_pipelines_mlx.utils.progress.phase()` context manager. Small
+  helper used internally by `BasePipeline` to wrap silent stages; no-op
+  when `verbose=False`. Public-ish utility, but mainly an internal
+  building block.
+
+## [0.13.0] - 2026-05-13
+
+Removes the standalone `upscale` pipeline and its `upscale` CLI subcommand.
+The pipeline was a local experimental addition with no upstream counterpart
+in `Lightricks/LTX-2`, kept out of scope for this MLX port.
+
+### Removed
+
+- **`UpscalePipeline`** class and `upscale` CLI subcommand. The pipeline
+  exposed the LTX neural latent upsampler (`spatial_upscaler_x2_v1_1` /
+  `spatial_upscaler_x1_5_v1_0`) as a standalone VAE-encode → upsampler →
+  VAE-decode tool with no DiT. It has no upstream equivalent and was only
+  ever a local experiment. Removed from `ltx_pipelines_mlx.__all__`,
+  `ltx-2-mlx --help`, and the maturity matrix.
+
+  **What still works.** The neural latent upsampler module
+  (`ltx_core_mlx/model/upsampler/`) is unchanged — it's a load-bearing
+  component of every two-stage pipeline (`generate --two-stage` /
+  `--two-stages-hq` / `--distilled`, `keyframe`, `ic-lora`, `hdr-ic-lora`,
+  `a2v`, `lipdub`). Only the standalone CLI wrapper is gone.
+
+  **Migration.** No upstream-iso replacement exists. If you relied on
+  standalone latent upscaling, pin `ltx-2-mlx==0.12.1` or re-implement
+  externally on top of `ltx_core_mlx.model.upsampler.LatentUpsampler`.
+
+## [0.12.1] - 2026-05-13
+
+Adds `LipDubPipeline` from upstream PR #212 as a new
+**[experimental tier](docs/PIPELINE_MATURITY.md) pipeline**.
+
+### Added
+
+- **`LipDubPipeline`** + `lipdub` CLI subcommand. Two-stage lip-dubbing
+  pipeline that takes a reference video providing both visual structure
+  (via IC-LoRA reference latent appends) and target audio (via the audio
+  VAE encoded as `AudioConditionByReferenceLatent`). Frame count is
+  auto-derived from the reference video metadata (snapped to `8k+1`).
+  Stage 2 keeps the stage-1 audio latent unchanged (`frozen=True`
+  semantics) and only refines the video. Exported from
+  `ltx_pipelines_mlx` as `LipDubPipeline`.
+
+  **Known limitations** (model-level, not a port bug):
+  - Output audio is a **VAE+vocoder reconstruction** of the reference
+    audio, perceptually similar but not bit-identical to the input.
+    Spectral artifacts can be audible on rich musical content. To
+    preserve the original audio bit-exact, remux the source audio over
+    the output mp4 via ffmpeg post-pipeline (loses fine lip-sync but
+    preserves source music).
+  - Lip-sync quality depends on prompt-audio alignment. Generic prompts
+    produce visually plausible but loosely-synced output.
+  - Uses `Lightricks/LTX-2.3-22b-IC-LoRA-LipDub` (currently `v0.9`).
+    Pin a specific app version if depending on the current behaviour.
+
+  Classified as **Experimental** in `docs/PIPELINE_MATURITY.md`. The
+  CLI `--help` output marks it as `[experimental]`.
+
+## [0.12.0] - 2026-05-13
+
+Upstream sync from Lightricks/LTX-2 PR #212 — surfaces two **default value
+changes**. No public API additions or removals; existing callers that pass
+explicit values are unaffected, but consumers that relied on the previous
+defaults should retest before upgrading.
+
+### Changed (potentially breaking for callers relying on defaults)
+
+- **`TilingConfig.default()`** spatial config bumped from `512×512` /
+  `64` overlap to **`768×768` / `64` overlap**; temporal config from
+  `64` frames / `24` overlap to **`80` frames / `24` overlap**. Matches
+  upstream's tradeoff (fewer tile boundaries at production resolutions).
+  Our internal pipelines do not call `TilingConfig.default()` directly,
+  but external consumers using this helper will get the new defaults.
+- **`precompute_rope_freqs` default `rope_type`** switched from
+  `"interleaved"` to `"split"`. All in-repo call sites pass `rope_type=`
+  explicitly so this is a no-op for our pipelines, but external consumers
+  that called `precompute_rope_freqs` without specifying `rope_type` will
+  see different output (the LTX-2.3 checkpoints all use SPLIT — upstream
+  switched the default to match reality).
+
+### Added
+
+- `AudioConditionByReferenceLatent` now exported from
+  `ltx_core_mlx.conditioning` and `ltx_core_mlx.conditioning.types`
+  (was previously importable only from the leaf module).
+
+## [0.11.1] - 2026-05-13
+
+Additive upstream sync from Lightricks/LTX-2 PR #212 (merged upstream 2026-05-11),
+plus a low-risk internal refactor. No public default values change in this
+release.
+
+### Added
+
+- `iclora_utils.py` module exposing the shared IC-LoRA helpers from upstream
+  PR #212: `read_lora_reference_downscale_factor`,
+  `downsample_mask_video_to_latent`, `append_ic_lora_reference_video_conditionings`.
+  Used by ic-lora and the upcoming lip-dub pipeline.
+- `AudioConditionByReferenceLatent` conditioning type for appending
+  reference audio tokens with negative-shifted RoPE positions. Audio-side
+  mirror of `VideoConditionByReferenceLatent`.
+- `ltx_core_mlx.components.diffusion_steps` — `EulerDiffusionStep`,
+  `Res2sDiffusionStep`, `EulerCfgPpDiffusionStep` primitives + protocol +
+  `_get_ancestral_step` helper. Available as standalone primitives;
+  existing samplers still inline this math (no behaviour change for
+  current pipelines).
+- `ltx_core_mlx.utils.diffusion` — `to_velocity` / `to_denoised` helpers
+  matching upstream.
+
+### Changed
+
+- `ic_lora.py` refactored to delegate the IC-LoRA reference video
+  conditioning to `iclora_utils.append_ic_lora_reference_video_conditionings`.
+  -151 LOC net. Public API unchanged. Bit-exact regression validated
+  against the pre-refactor Q20 baseline (SHA256 match).
+
+## [0.11.0] - 2026-05-11
+
+### Added
+- `--start-strength` / `--end-strength` flags on `keyframe` CLI to expose
+  per-keyframe conditioning strength (upstream-iso surface, default `1.0`).
+- Static-scene I2V recipe documentation (ic-lora + canny control video),
+  validated end-to-end on Phoenix Q15.
+- Standalone `upscale` pipeline + CLI subcommand (VAE encode → neural
+  upsampler → VAE decode, no DiT).
+- Modality tiling (`--tile-frames N --tile-spatial M`) on `generate` (one-stage /
+  --two-stage / --two-stages-hq), `a2v`, `keyframe`.
+
+### Fixed
+- `ic_lora` upstream-iso tightening: fix `UnboundLocalError` introduced by an
+  earlier edit, 4 API alignments with upstream `ICLoraPipeline._create_conditionings`.
+- Default `stg_scale=1.0` restored on standard pipelines (matches upstream
+  `LTX_2_3_PARAMS`). Was hardcoded `0.0` for 32 GB Mac compat — that's now
+  the user's choice, not the default.
+- Strip appended keyframe tokens before unpatchify across all pipelines (fix
+  for multi-anchor I2V at `frame_idx > 0`).
+- Multi-image conditioning propagated to all I2V pipelines; upstream-iso
+  `combined_image_conditionings` helper used end-to-end.
+- Metal watchdog: drop wasteful Gemma re-load in `load()` methods (Gemma was
+  being loaded twice — once before forward, once before DiT — causing 7.5 GB
+  heap thrash). Production-quality generation on M2 Pro 32 GB now passes
+  under sustained system contention.
+
+### Changed
+- `media_io.py` ported 1:1 upstream-iso (replaces the previous divergent
+  shim).
+- `prepare_image_for_encoding` applies H.264 CRF round-trip (matches
+  upstream's training-distribution pre-processing).
+- `metal_watchdog.py` removed; auto eval gating (per-layer Gemma /
+  per-block connector) supersedes the opt-in `LTX2_METAL_WATCHDOG_GUARD` env var.
+
+## [0.10.0] - 2026-05-08
+
+### Removed (BREAKING)
+- `ImageToVideoPipeline` removed — no upstream equivalent. I2V is now
+  supported on every public pipeline via `image=` kwarg / `--image` CLI flag
+  (consistent with upstream's `combined_image_conditionings` pattern).
+
+## [0.9.x] - 2026-05 (pre-isomorphism patch series)
+
+Series of bit-exact iso-tightening patches across pipelines (T2V, I2V, A2V,
+keyframe, ic-lora, hdr-ic-lora). Detailed per-commit history in `git log v0.9.0..v0.9.8`.
+
+## [0.x] - earlier (foundations)
+
+Initial MLX port of LTX-2.3 from Lightricks/LTX-2 reference. Bring-up of
+video VAE, audio VAE + vocoder + BWE, DiT transformer, Gemma 3 12B text
+encoder, conditioning system, two-stage pipelines, distilled mode.

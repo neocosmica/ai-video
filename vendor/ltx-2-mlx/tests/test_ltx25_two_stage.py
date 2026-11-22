@@ -1,0 +1,386 @@
+"""LTX-2.5 pack detection + distilled LoRA resolution in TI2VidTwoStagesPipeline.
+
+The tests exercise pack-evidence-based LoRA resolution (2.5 vs 2.3 defaults),
+explicit-argument override, and upsampler path resolution via synthetic packs
+shaped like 2.5 configs, 2.3 configs, and missing configs.
+"""
+
+import json
+
+import pytest
+
+from ltx_pipelines_mlx.ti2vid_two_stages import TI2VidTwoStagesPipeline
+from ltx_pipelines_mlx.ti2vid_two_stages_hq import TI2VidTwoStagesHQPipeline
+
+
+def _write_pack_config(tmp_path, *, ltx25: bool) -> None:
+    """Write a minimal transformer config marking the dir as a 2.5 / 2.3 pack."""
+    transformer: dict = {"num_layers": 48}
+    if ltx25:
+        transformer["ff_bias"] = False
+    (tmp_path / "embedded_config.json").write_text(json.dumps({"transformer": transformer}))
+
+
+def _make_two_stage(
+    tmp_path,
+    monkeypatch,
+    *,
+    ltx25: bool,
+    distilled_lora: str | None = None,
+    with_upscaler: str | None = None,
+) -> TI2VidTwoStagesPipeline:
+    """Build a TI2VidTwoStagesPipeline over a synthetic pack.
+
+    Writes tmp_path/embedded_config.json shaped like a 2.5 or 2.3 config,
+    creates an empty tmp_path/<with_upscaler>.safetensors if requested,
+    stubs out network-dependent methods via monkeypatch, then constructs
+    TI2VidTwoStagesPipeline(model_dir=str(tmp_path), distilled_lora=distilled_lora).
+
+    Args:
+        tmp_path: pytest temporary directory.
+        monkeypatch: pytest monkeypatch fixture.
+        ltx25: When True, write ff_bias=False (LTX-2.5 signal).
+        distilled_lora: Optional override for the distilled LoRA filename.
+        with_upscaler: Optional upsampler filename to create as an empty file.
+
+    Returns:
+        Constructed TI2VidTwoStagesPipeline instance.
+    """
+    _write_pack_config(tmp_path, ltx25=ltx25)
+
+    if with_upscaler:
+        (tmp_path / with_upscaler).touch()
+
+    return TI2VidTwoStagesPipeline(
+        model_dir=str(tmp_path),
+        distilled_lora=distilled_lora,
+    )
+
+
+def _make_two_stage_hq(
+    tmp_path,
+    monkeypatch,
+    *,
+    ltx25: bool,
+    distilled_lora: str | None = None,
+    with_upscaler: str | None = None,
+) -> TI2VidTwoStagesHQPipeline:
+    """Build a TI2VidTwoStagesHQPipeline over a synthetic pack.
+
+    Same as _make_two_stage but constructs TI2VidTwoStagesHQPipeline instead.
+    """
+    _write_pack_config(tmp_path, ltx25=ltx25)
+
+    if with_upscaler:
+        (tmp_path / with_upscaler).touch()
+
+    return TI2VidTwoStagesHQPipeline(
+        model_dir=str(tmp_path),
+        distilled_lora=distilled_lora,
+    )
+
+
+def test_25_pack_sets_is_25_true(tmp_path, monkeypatch):
+    """Verify that an LTX-2.5 pack sets _is_25 to True."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=True)
+    assert pipe._is_25 is True
+
+
+def test_23_pack_sets_is_25_false(tmp_path, monkeypatch):
+    """Verify that an LTX-2.3 pack sets _is_25 to False."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=False)
+    assert pipe._is_25 is False
+
+
+def test_25_pack_resolves_450_lora_by_default(tmp_path, monkeypatch):
+    """Verify that an LTX-2.5 pack resolves to the 2.5 distilled LoRA when unspecified."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=True)
+    assert pipe._distilled_lora == "ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
+
+
+def test_23_pack_resolves_384_lora_by_default(tmp_path, monkeypatch):
+    """Verify that an LTX-2.3 pack resolves to the 2.3 distilled LoRA when unspecified."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=False)
+    assert pipe._distilled_lora == "ltx-2.3-22b-distilled-lora-384.safetensors"
+
+
+def test_explicit_lora_wins_on_25_pack(tmp_path, monkeypatch):
+    """Verify that an explicit distilled_lora overrides the 2.5 default."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=True, distilled_lora="custom.safetensors")
+    assert pipe._distilled_lora == "custom.safetensors"
+
+
+def test_explicit_lora_wins_on_23_pack(tmp_path, monkeypatch):
+    """Verify that an explicit distilled_lora overrides the 2.3 default."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=False, distilled_lora="custom.safetensors")
+    assert pipe._distilled_lora == "custom.safetensors"
+
+
+def test_25_pack_upsampler_resolves_v1_0(tmp_path, monkeypatch):
+    """Verify that an LTX-2.5 pack picks the v1_0 upsampler when present."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=True, with_upscaler="spatial_upscaler_x2_v1_0.safetensors")
+    assert pipe._resolve_upsampler_path().name == "spatial_upscaler_x2_v1_0.safetensors"
+
+
+def test_23_pack_keeps_v1_1_upsampler(tmp_path, monkeypatch):
+    """Verify that an LTX-2.3 pack keeps the v1_1 upsampler."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=False, with_upscaler="spatial_upscaler_x2_v1_1.safetensors")
+    assert pipe._resolve_upsampler_path().name == "spatial_upscaler_x2_v1_1.safetensors"
+
+
+def test_teacache_raises_on_25_pack(tmp_path, monkeypatch):
+    """Verify that enable_teacache=True raises ValueError on an LTX-2.5 pack."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=True)
+    with pytest.raises(ValueError, match="TeaCache"):
+        pipe.generate_two_stage(prompt="a fox", num_frames=9, frame_rate=24.0, enable_teacache=True)
+
+
+class _AbortError(Exception):
+    """Sentinel exception for testing that guard allows 2.3 path to proceed."""
+
+    pass
+
+
+def test_teacache_still_allowed_on_23_pack(tmp_path, monkeypatch):
+    """Verify that the TeaCache guard does not raise on an LTX-2.3 pack.
+
+    We plant a probe (_AbortError) right after the guard (in text encoding) and
+    verify that it gets raised, not a ValueError from the guard.
+    """
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=False)
+
+    def boom(*a, **k):
+        raise _AbortError
+
+    monkeypatch.setattr(pipe, "_encode_text_with_negative", boom, raising=False)
+    with pytest.raises(_AbortError):
+        pipe.generate_two_stage(prompt="a fox", num_frames=9, frame_rate=24.0, enable_teacache=True)
+
+
+def test_teacache_raises_on_25_pack_hq(tmp_path, monkeypatch):
+    """Verify that enable_teacache=True raises ValueError on an LTX-2.5 pack (HQ pipeline)."""
+    pipe = _make_two_stage_hq(tmp_path, monkeypatch, ltx25=True)
+    with pytest.raises(ValueError, match="TeaCache"):
+        pipe.generate_two_stage(prompt="a fox", num_frames=9, frame_rate=24.0, enable_teacache=True)
+
+
+def test_teacache_still_allowed_on_23_pack_hq(tmp_path, monkeypatch):
+    """Verify that the TeaCache guard does not raise on an LTX-2.3 pack (HQ pipeline).
+
+    We plant a probe (_AbortError) right after the guard (in text encoding) and
+    verify that it gets raised, not a ValueError from the guard.
+    """
+    pipe = _make_two_stage_hq(tmp_path, monkeypatch, ltx25=False)
+
+    def boom(*a, **k):
+        raise _AbortError
+
+    monkeypatch.setattr(pipe, "_encode_text_with_negative", boom, raising=False)
+    with pytest.raises(_AbortError):
+        pipe.generate_two_stage(prompt="a fox", num_frames=9, frame_rate=24.0, enable_teacache=True)
+
+
+def test_cli_generate_distilled_lora_defaults_to_none(monkeypatch):
+    """Regression for the C1 review finding: the CLI must not reintroduce a
+    literal ``--distilled-lora`` default, or the pack-evidence resolution in
+    ``TI2VidTwoStagesPipeline.__init__`` (2.5 -> ...-450-bf16, 2.3 -> ...-384)
+    is unreachable from ``generate --two-stage``. This test parses real argv
+    through the real CLI parser (not a hand-built parser) so it fails the
+    same way #C1 did if the default is ever reintroduced.
+    """
+    import ltx_pipelines_mlx.cli as cli
+
+    captured: dict = {}
+
+    def _capture(args):
+        captured["distilled_lora"] = args.distilled_lora
+
+    monkeypatch.setattr(cli, "_cmd_generate", _capture)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ltx-2-mlx",
+            "generate",
+            "--two-stage",
+            "--prompt",
+            "a fox",
+            "--frame-rate",
+            "24",
+            "-o",
+            "out.mp4",
+        ],
+    )
+
+    cli.main()
+
+    assert captured["distilled_lora"] is None
+
+
+# --------------------------------------------------------------------------
+# Upstream sync: stage 2 refines video only — the returned audio is stage 1's
+# --------------------------------------------------------------------------
+#
+# Mirrors upstream ``ti2vid_two_stages.py`` (``video_state, _ = self.stage_2``,
+# then the stage-1 ``audio_state`` is decoded). The spies below echo their
+# input latents, so stage 1's audio output is its initial noise while stage 2's
+# input is the *renoised* stage-1 audio — numerically distinct. Returning
+# stage 2's audio therefore fails these tests (mutation-verified).
+
+import mlx.core as mx  # noqa: E402
+
+from ltx_pipelines_mlx import ti2vid_two_stages as _ts_mod  # noqa: E402
+from ltx_pipelines_mlx import ti2vid_two_stages_hq as _hq_mod  # noqa: E402
+from ltx_pipelines_mlx.utils.samplers import DenoiseOutput  # noqa: E402
+
+
+class _EchoLoop:
+    """Denoising-loop stand-in: records kwargs, echoes the input latents."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def __call__(self, **kwargs) -> DenoiseOutput:
+        self.calls.append(kwargs)
+        return DenoiseOutput(
+            video_latent=kwargs["video_state"].latent,
+            audio_latent=kwargs["audio_state"].latent,
+        )
+
+
+class _IdentityVae:
+    def denormalize_latent(self, x):
+        return x
+
+    def normalize_latent(self, x):
+        return x
+
+
+def _stub_generate(pipe, monkeypatch, mod, stage1_name: str) -> tuple[_EchoLoop, _EchoLoop]:
+    """Stub the heavyweight collaborators; the real generate_two_stage runs."""
+    pipe.load = lambda: None
+    pipe.dit = object()
+    pipe.vae_encoder = _IdentityVae()
+    pipe.upsampler = lambda x: mx.repeat(mx.repeat(x, 2, axis=3), 2, axis=4)
+    pipe._fuse_distilled_lora = lambda dit: None
+    pipe._encode_text_with_negative = lambda encode_prompt, negative_prompt=None: (
+        mx.zeros((1, 8, 4096), dtype=mx.bfloat16),
+        mx.zeros((1, 8, 2048), dtype=mx.bfloat16),
+        mx.zeros((1, 8, 4096), dtype=mx.bfloat16),
+        mx.zeros((1, 8, 2048), dtype=mx.bfloat16),
+    )
+    monkeypatch.setattr(mod, "X0Model", lambda dit: dit)
+    stage1 = _EchoLoop()
+    stage2 = _EchoLoop()
+    monkeypatch.setattr(mod, stage1_name, stage1)
+    monkeypatch.setattr(mod, "denoise_loop", stage2, raising=False)  # HQ no longer imports it
+    return stage1, stage2
+
+
+def _assert_audio_is_stage1(pipe, stage1: _EchoLoop, stage2: _EchoLoop) -> None:
+    _video, audio = pipe.generate_two_stage(
+        prompt="a fox", height=128, width=128, num_frames=9, frame_rate=24.0, seed=7
+    )
+    stage1_audio = pipe.audio_patchifier.unpatchify(stage1.calls[0]["audio_state"].latent)
+    stage2_audio = pipe.audio_patchifier.unpatchify(stage2.calls[0]["audio_state"].latent)
+    assert mx.array_equal(audio, stage1_audio), "returned audio must be stage 1's"
+    assert not mx.array_equal(audio, stage2_audio), "stage-2 renoised audio must differ (guards the mutation)"
+
+
+@pytest.mark.parametrize("ltx25", [False, True])
+def test_two_stage_freezes_stage2_audio(tmp_path, monkeypatch, ltx25):
+    """Upstream v1.4.0 ``ti2vid_two_stages.py`` refines with ``freeze_audio=True``: stage 2
+    sees stage 1's audio as clean, frozen context (sigma 0, zero mask) instead of a
+    re-noised copy, and the shipped audio is stage 1's."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=ltx25)
+    stage1, stage2 = _stub_generate(pipe, monkeypatch, _ts_mod, "guided_denoise_loop")
+    _video, audio = pipe.generate_two_stage(
+        prompt="a fox", height=128, width=128, num_frames=9, frame_rate=24.0, seed=7
+    )
+    stage1_tokens = stage1.calls[0]["audio_state"].latent
+    stage2_state = stage2.calls[0]["audio_state"]
+    assert stage2_state.frozen is True
+    assert mx.array_equal(stage2_state.denoise_mask, mx.zeros_like(stage2_state.denoise_mask)).item()
+    assert mx.array_equal(stage2_state.latent, stage1_tokens).item(), "frozen audio must not be re-noised"
+    assert stage2.calls[0]["video_state"].frozen is False
+    assert mx.array_equal(audio, pipe.audio_patchifier.unpatchify(stage1_tokens)).item()
+
+
+@pytest.mark.parametrize("ltx25", [False, True])
+def test_two_stage_refine_audio_denoises_stage2_audio(tmp_path, monkeypatch, ltx25):
+    """Upstream v1.5.0 ``refine_audio=True`` (``freeze_audio=not refine_audio``): stage 2
+    re-noises stage 1's audio at its first sigma, denoises it with the video, and the
+    shipped audio is stage 2's."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=ltx25)
+    stage1, stage2 = _stub_generate(pipe, monkeypatch, _ts_mod, "guided_denoise_loop")
+    _video, audio = pipe.generate_two_stage(
+        prompt="a fox", height=128, width=128, num_frames=9, frame_rate=24.0, seed=7, refine_audio=True
+    )
+    stage1_tokens = stage1.calls[0]["audio_state"].latent
+    stage2_state = stage2.calls[0]["audio_state"]
+    assert stage2_state.frozen is False
+    assert mx.array_equal(stage2_state.denoise_mask, mx.ones_like(stage2_state.denoise_mask)).item()
+    assert not mx.array_equal(stage2_state.latent, stage1_tokens).item(), "refined audio must be re-noised"
+    assert mx.array_equal(audio, pipe.audio_patchifier.unpatchify(stage2_state.latent)).item()
+
+
+def _run_cli_generate(monkeypatch, *mode_args: str) -> dict:
+    """Parse real argv through ``generate``; capture the pipeline's ``generate_and_save`` kwargs."""
+    import ltx_pipelines_mlx.cli as cli
+
+    captured: dict = {}
+
+    class _FakePipe:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def generate_and_save(self, **kwargs) -> str:
+            captured.update(kwargs)
+            return "out.mp4"
+
+    monkeypatch.setattr(_ts_mod, "TI2VidTwoStagesPipeline", _FakePipe)
+    monkeypatch.setattr(cli, "_print_result", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["ltx-2-mlx", "generate", *mode_args, "--prompt", "a fox", "-f", "9", "--frame-rate", "24", "-o", "out.mp4"],
+    )
+    cli.main()
+    return captured
+
+
+def test_cli_refine_audio_reaches_two_stage(monkeypatch):
+    assert _run_cli_generate(monkeypatch, "--two-stage", "--refine-audio")["refine_audio"] is True
+    assert "refine_audio" not in _run_cli_generate(monkeypatch, "--two-stage")
+
+
+@pytest.mark.parametrize("mode", ["--two-stages-hq", "--distilled", "--one-stage", "--dfr"])
+def test_cli_refine_audio_refused_off_two_stage(monkeypatch, mode):
+    with pytest.raises(SystemExit, match="--refine-audio requires --two-stage"):
+        _run_cli_generate(monkeypatch, mode, "--refine-audio")
+
+
+def test_two_stage_hq_returns_stage1_audio(tmp_path, monkeypatch):
+    pipe = _make_two_stage_hq(tmp_path, monkeypatch, ltx25=False)
+    res2s, _euler = _stub_generate(pipe, monkeypatch, _hq_mod, "res2s_denoise_loop")
+    _video, audio = pipe.generate_two_stage(
+        prompt="a fox", height=128, width=128, num_frames=9, frame_rate=24.0, seed=7
+    )
+    stage1_audio = pipe.audio_patchifier.unpatchify(res2s.calls[0]["audio_state"].latent)
+    stage2_audio = pipe.audio_patchifier.unpatchify(res2s.calls[1]["audio_state"].latent)
+    assert mx.array_equal(audio, stage1_audio), "returned audio must be stage 1's"
+    assert not mx.array_equal(audio, stage2_audio), "stage-2 renoised audio must differ (guards the mutation)"
+
+
+@pytest.mark.parametrize("ltx25", [False, True])
+def test_two_stage_hq_stage2_runs_res2s_without_guidance(tmp_path, monkeypatch, ltx25):
+    """Upstream ``ti2vid_two_stages_hq.py`` refines with ``res2s_audio_video_denoising_loop``
+    and a ``SimpleDenoiser`` (no CFG / STG), on the stage-2 distilled sigmas."""
+    pipe = _make_two_stage_hq(tmp_path, monkeypatch, ltx25=ltx25)
+    res2s, euler = _stub_generate(pipe, monkeypatch, _hq_mod, "res2s_denoise_loop")
+    pipe.generate_two_stage(prompt="a fox", height=128, width=128, num_frames=9, frame_rate=24.0, seed=7)
+    assert euler.calls == [], "HQ stage 2 must not fall back to the Euler loop"
+    assert len(res2s.calls) == 2
+    stage1, stage2 = res2s.calls
+    assert stage1.get("video_guider_factory") is not None
+    assert stage2.get("video_guider_factory") is None and stage2.get("audio_guider_factory") is None
+    assert stage2["sigmas"][-1] == 0.0
+    assert stage2["video_state"].latent.shape[1] == 4 * stage1["video_state"].latent.shape[1]

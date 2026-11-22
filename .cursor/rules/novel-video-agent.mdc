@@ -18,9 +18,21 @@ alwaysApply: true
 2. 人物填 `gender`（female/male）和可选 `voice`（女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric）
 3. 有对白的镜头填 `emotion`（calm/warm/sad/tense/bitter/nostalgic 等）
 4. 顶层写英文 `music_prompt`（无人声器乐）
-5. `./scripts/run.sh screenplay --out output/<片名>`
+5. `./scripts/run.sh screenplay --out output/<片名>`（会校验引号对白是否全部落入 dialogue）
 6. `./scripts/run.sh run --from images --out output/<片名>`（含 audio 混音）
+
+演示可直接：`cp input/demo_storyboard.json output/demo/storyboard.json`
+
+对白硬性规则：
+- 小说里所有「」/“”/"" 引号台词必须原样进入某个镜头的 `dialogue`，禁止漏句、合并丢掉后半句
+- 一句重要对白一个镜头；`speaker` 写中文名
+- 无对白的空镜可以 `dialogue: ""`，但不能因此挤掉原文台词
 
 不要重新拉取聊天用 Qwen。外貌只取原文可见特征；竖屏；每镜约 2 秒；`motion_prompt` 必须英文。
 
-下载一律走国内镜像（`scripts/env.sh`）：HF→hf-mirror.com 且禁用 XET；PyPI→清华；GitHub→ghfast.top。不要改回官方源傻等。
+下载一律走国内镜像（`scripts/env.sh`）：HF→hf-mirror.com 且禁用 XET；PyPI→清华。`vendor/` 与 `tools/` 已入库，默认不从 GitHub 克隆；仅仓内缺失时才用 ghfast.top 回退。不要改回官方源傻等。
+
+运行时护栏：
+- `.venv` / `vendor/*/.venv` 指向 `~/Library/Caches/novel-video/venvs/`（由 setup.sh 装好）
+- 视频阶段直接调用 LTX venv 的 `ltx-2-mlx`；配乐直接调用 MusicGen venv 的 Python 跑 `generate.py`；禁止每镜 `uv run`
+- 卡在「加载文生图」或 Gemma 之前、CPU≈0%：先 `doctor` 看 venv / LTX 标记，不要盲着重跑

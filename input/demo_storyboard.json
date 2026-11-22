@@ -1,0 +1,78 @@
+{
+  "title": "雨夜重逢",
+  "style": "写实华语短剧，自然肤色，阴雨天气，暖黄灯光，浅景深",
+  "music_prompt": "Soft melancholic piano and warm ambient pads, rainy night city, Chinese short drama reunion, instrumental only, no vocals, gentle cinematic underscore",
+  "characters": [
+    {
+      "id": "linwan",
+      "name": "林晚",
+      "gender": "female",
+      "appearance": "年龄约二十多岁，女性，短发，肤色自然，穿着深色风衣",
+      "seed": 2012789438,
+      "voice": "Serena"
+    },
+    {
+      "id": "zhouyu",
+      "name": "周屿",
+      "gender": "male",
+      "appearance": "年龄约二十多岁，男性，黑色短发，肤色自然，穿着便利店围裙",
+      "seed": 1665941331,
+      "voice": "Dylan"
+    }
+  ],
+  "shots": [
+    {
+      "id": "s001",
+      "characters": ["linwan"],
+      "location": "街角便利店门口",
+      "image_prompt": "全景，雨天街道，林晚站在便利店门口，风衣领子竖起，手中握着热美式咖啡杯",
+      "motion_prompt": "Static shot",
+      "speaker": "林晚",
+      "dialogue": "你不是去了南方吗？",
+      "seed": 4068872013,
+      "emotion": "surprised"
+    },
+    {
+      "id": "s002",
+      "characters": ["zhouyu"],
+      "location": "便利店收银台",
+      "image_prompt": "中景，便利店内部，周屿穿着围裙，手指沾着墨水，抬头看向林晚",
+      "motion_prompt": "Camera slowly zooms in",
+      "speaker": "周屿",
+      "dialogue": "去了。又回来了。",
+      "seed": 2860171874,
+      "emotion": "bitter"
+    },
+    {
+      "id": "s003",
+      "characters": ["linwan", "zhouyu"],
+      "location": "便利店收银台",
+      "image_prompt": "近景，便利店收银台，周屿把折好的纸条压到林晚的杯套下面，两人隔着柜台对视",
+      "motion_prompt": "Camera slowly pushes in on the hands and note",
+      "speaker": "周屿",
+      "dialogue": "下班等我。有些话，当时没讲完。",
+      "seed": 3107600572,
+      "emotion": "whisper"
+    },
+    {
+      "id": "s004",
+      "characters": ["linwan", "zhouyu"],
+      "location": "便利店门口",
+      "image_prompt": "中景，林晚站在雨棚下，手握热美式，透过玻璃门看周屿转身去加热关东煮",
+      "motion_prompt": "Static shot",
+      "speaker": "",
+      "dialogue": "",
+      "seed": 4269667953
+    },
+    {
+      "id": "s005",
+      "characters": ["linwan"],
+      "location": "便利店门口",
+      "image_prompt": "特写，林晚的手将纸条放入风衣口袋，雨滴落在纸条上",
+      "motion_prompt": "Camera focuses on the hand movement",
+      "speaker": "",
+      "dialogue": "",
+      "seed": 1341069107
+    }
+  ]
+}

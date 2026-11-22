@@ -1,5 +1,5 @@
 #!/bin/zsh
-# 国内镜像环境。setup.sh / run.sh 都会 source 这份文件。
+# 国内镜像 + 本地缓存环境。setup.sh / run.sh 都会 source 这份文件。
 
 # Hugging Face → hf-mirror（关掉 XET，避免走到海外 CDN）
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
@@ -19,3 +19,8 @@ export GITHUB_MIRROR_PREFIX="${GITHUB_MIRROR_PREFIX:-https://ghfast.top/}"
 
 # 强制 Python 子进程也看见这些变量
 export PYTHONUNBUFFERED=1
+
+# 重型 venv 装到 Library/Caches，项目内只留符号链接
+export NOVEL_VIDEO_CACHE="${NOVEL_VIDEO_CACHE:-$HOME/Library/Caches/novel-video}"
+mkdir -p "$NOVEL_VIDEO_CACHE/venvs"
+export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$NOVEL_VIDEO_CACHE/venvs/main}"

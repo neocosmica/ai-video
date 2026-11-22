@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -11,6 +10,7 @@ import soundfile as sf
 
 from pipeline.config import Settings
 from pipeline.mirrors import child_env
+from pipeline.runtime import ensure_runtime_layout, musicgen_python, musicgen_venv_path
 from pipeline.util import dump_json, load_json, resolve, stable_seed
 from pipeline.voices import (
     default_music_prompt,
@@ -18,16 +18,6 @@ from pipeline.voices import (
     infer_gender,
     pick_voice,
 )
-
-
-def _uv() -> str:
-    found = shutil.which("uv")
-    if found:
-        return found
-    candidate = Path.home() / ".local" / "bin" / "uv"
-    if candidate.exists():
-        return str(candidate)
-    raise SystemExit("找不到 uv。请先运行 scripts/setup.sh")
 
 
 def _character_map(story: dict) -> dict[str, dict]:
@@ -163,18 +153,21 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
         return dest
     if not settings.musicgen_dir.exists():
         raise SystemExit(f"还没有 MusicGen 代码：{settings.musicgen_dir}。请先运行 scripts/setup.sh")
+    script = settings.musicgen_dir / "generate.py"
+    if not script.exists():
+        raise SystemExit(f"MusicGen 源码不完整：缺少 {script}。请重新运行 scripts/setup.sh")
 
+    ensure_runtime_layout(musicgen_dir=settings.musicgen_dir)
+    py = musicgen_python(settings.musicgen_dir)
     print(f"生成配乐（MusicGen small，约 {duration:.0f}s）：{prompt}")
     env = child_env()
     local_bin = str(Path.home() / ".local" / "bin")
     env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
-    # 该仓库的 console script 依赖 cwd 包布局，直接跑 generate.py 更稳。
+    # 直调 Caches 里的 Python + 仓库 cwd；禁止 uv run（会反复解析/偶发重建）
+    env["UV_PROJECT_ENVIRONMENT"] = str(musicgen_venv_path())
+    env.pop("VIRTUAL_ENV", None)
     cmd = [
-        _uv(),
-        "run",
-        "--directory",
-        str(settings.musicgen_dir),
-        "python",
+        str(py),
         "generate.py",
         prompt,
         "-m",
@@ -189,9 +182,16 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
     log = out / "logs" / "bgm.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("w", encoding="utf-8") as handle:
+        handle.write("cwd=" + str(settings.musicgen_dir) + "\n")
         handle.write(" ".join(cmd) + "\n\n")
         handle.flush()
-        proc = subprocess.run(cmd, stdout=handle, stderr=subprocess.STDOUT, env=env)
+        proc = subprocess.run(
+            cmd,
+            cwd=str(settings.musicgen_dir),
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
     if proc.returncode != 0 or not dest.exists():
         raise SystemExit(f"配乐失败，详见 {log}")
     return dest
@@ -199,6 +199,7 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
 
 def cmd_audio(args: argparse.Namespace) -> None:
     settings = Settings.load(resolve(args.config) if args.config else None)
+    ensure_runtime_layout(musicgen_dir=settings.musicgen_dir)
     out = resolve(args.out)
     story_path = out / "storyboard.json"
     if not story_path.exists():

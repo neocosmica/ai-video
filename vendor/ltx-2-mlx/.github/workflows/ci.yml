@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    # `edited` matters: commitlint checks the PR title, and without it a title
+    # fixed after a red run never re-runs, leaving the check stuck red until an
+    # unrelated commit is pushed. The other three are the default set, which
+    # naming any type at all would otherwise drop.
+    types: [opened, synchronize, reopened, edited]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: lint (ruff check)
+        uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89  # v4.1.0
+        with:
+          # Pin to the locked ruff so CI matches local `uv run ruff`. Without
+          # this the action installs the newest release and a ruff upgrade
+          # reddens every open PR at once (0.16.0 did, by formatting the
+          # Python snippets in CLAUDE.md).
+          version-file: uv.lock
+          args: check packages/ tests/
+      - name: format (ruff format)
+        uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89  # v4.1.0
+        with:
+          version-file: uv.lock
+          args: format --check packages/ tests/
+
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Validate Python syntax
+        run: |
+          python -c "
+          import ast, sys, glob
+          files = glob.glob('packages/**/src/**/*.py', recursive=True) + glob.glob('tests/**/*.py', recursive=True)
+          ok = True
+          for f in sorted(set(files)):
+              try:
+                  with open(f) as fh: ast.parse(fh.read())
+              except SyntaxError as e:
+                  print(f'FAIL: {f}: {e}'); ok = False
+          print(f'{len(files)} files checked')
+          if not ok: sys.exit(1)
+          "
+
+  test:
+    runs-on: macos-15
+    # A wedged Metal command buffer on the M1 runners once burned the full 6 h
+    # default; the suite normally finishes in ~2 min.
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install ffmpeg
+        run: brew install ffmpeg
+      - run: uv sync --all-extras
+      - name: Type-check with ty
+        run: uv run ty check
+      # faulthandler_timeout dumps all thread stacks if any single test
+      # exceeds 10 min, so a GPU-side hang leaves a usable trace in the log.
+      - run: uv run pytest tests/ -v -m "not slow" --tb=short -o faulthandler_timeout=600
+
+  # Lints the pull request TITLE, not the individual commits.
+  #
+  # Squash is the only merge method, and `squash_merge_commit_title` is
+  # PR_TITLE, so the PR title is the subject that lands on main and the one
+  # release-please reads to pick a version bump. The commits inside a PR are
+  # discarded by the squash, so requiring conventional-commit subjects on them
+  # asked contributors to reword messages that never reach the history the rule
+  # exists to protect -- see the #83 thread.
+  #
+  # The push branch is a backstop: on main the squashed subject is the PR title,
+  # so linting it catches anything that reached main another way.
+  commitlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22"
+      - name: Install commitlint
+        run: npm install --no-save @commitlint/cli @commitlint/config-conventional
+      - name: Lint the pull request title
+        if: github.event_name == 'pull_request'
+        # Via env, never interpolated into the script: a PR title is
+        # attacker-controlled text and would otherwise be a command injection.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$PR_TITLE" | npx commitlint
+      - name: Lint the pushed commit
+        if: github.event_name == 'push'
+        run: npx commitlint --from HEAD~1 --to HEAD
