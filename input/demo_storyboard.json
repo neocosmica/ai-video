@@ -8,7 +8,7 @@
       "name": "林晚",
       "gender": "female",
       "appearance": "年龄约二十多岁，女性，短发，肤色自然，穿着深色风衣，领子竖起",
-      "seed": 1516426319,
+      "seed": 420302209,
       "voice": "Serena"
     },
     {
@@ -16,86 +16,103 @@
       "name": "周屿",
       "gender": "male",
       "appearance": "年龄约二十多岁，男性，黑色短发，肤色自然，穿着便利店围裙，手指沾着墨水",
-      "seed": 2865491127,
+      "seed": 1860959392,
       "voice": "Dylan"
     }
   ],
   "shots": [
     {
       "id": "s001",
-      "characters": ["linwan"],
+      "characters": [
+        "linwan"
+      ],
       "location": "街角便利店门口",
       "image_prompt": "中全景，暴雨夜街角，林晚竖起风衣领子，双手推开便利店玻璃门，冷白灯光从门缝泻出，雨水打在肩头",
       "motion_prompt": "Camera slowly pushes in as she opens the glass door",
       "speaker": "",
       "dialogue": "",
-      "seed": 1346345433,
+      "seed": 2098966574,
       "emotion": "calm"
     },
     {
       "id": "s002",
-      "characters": ["linwan", "zhouyu"],
+      "characters": [
+        "linwan",
+        "zhouyu"
+      ],
       "location": "便利店收银台",
       "image_prompt": "中景，便利店内冷白灯，关东煮热气糊在柜台上，林晚握着热美式，收银的周屿抬头，两人同时停住对视",
       "motion_prompt": "Subtle camera push-in on their frozen eye contact",
       "speaker": "",
       "dialogue": "",
-      "seed": 3460307010,
+      "seed": 1476005273,
       "emotion": "surprised"
     },
     {
       "id": "s003",
-      "characters": ["linwan"],
+      "characters": [
+        "linwan"
+      ],
       "location": "便利店收银台",
       "image_prompt": "近景，林晚双手握紧纸杯，指节发白，雨夜便利店冷白灯光映在侧脸，眼神震惊又克制",
       "motion_prompt": "Static close-up with slight handheld tremble",
       "speaker": "林晚",
       "dialogue": "你不是去了南方吗？",
-      "seed": 3094209332,
+      "seed": 1341404386,
       "emotion": "surprised"
     },
     {
       "id": "s004",
-      "characters": ["zhouyu"],
+      "characters": [
+        "zhouyu"
+      ],
       "location": "便利店收银台",
       "image_prompt": "近景，周屿穿着围裙，手指沾着墨水，嘴角极轻地笑了一下，抬头看向对面，关东煮热气在背景升起",
       "motion_prompt": "Slow zoom in on his quiet smile",
       "speaker": "周屿",
       "dialogue": "去了。又回来了。",
-      "seed": 2323224628,
+      "seed": 9047622,
       "emotion": "bitter"
     },
     {
       "id": "s005",
-      "characters": ["linwan", "zhouyu"],
+      "characters": [
+        "linwan",
+        "zhouyu"
+      ],
       "location": "便利店收银台",
       "image_prompt": "特写，周屿把一张折好的纸条压进林晚杯套下面，两人的手隔着柜台短暂交错，热气与冷白灯交织",
       "motion_prompt": "Camera focuses on the hands pressing the folded note under the cup sleeve",
       "speaker": "周屿",
       "dialogue": "下班等我。有些话，当时没讲完。",
-      "seed": 1680233946,
+      "seed": 1807253916,
       "emotion": "whisper"
     },
     {
       "id": "s006",
-      "characters": ["linwan", "zhouyu"],
+      "characters": [
+        "linwan",
+        "zhouyu"
+      ],
       "location": "便利店门口雨棚下",
       "image_prompt": "中景，林晚站在雨棚下握着热美式，透过玻璃门看着店内周屿转身去给下一位客人加热关东煮，雨水顺着棚沿落下",
       "motion_prompt": "Static shot through rain-streaked glass",
       "speaker": "",
       "dialogue": "",
-      "seed": 67564026,
+      "seed": 108531805,
       "emotion": "nostalgic"
     },
     {
       "id": "s007",
-      "characters": ["linwan"],
+      "characters": [
+        "linwan"
+      ],
       "location": "便利店门口雨棚下",
       "image_prompt": "特写，林晚的手将边角被雨水打湿的纸条放进深色风衣口袋，雨滴落在袖口与纸条边角",
       "motion_prompt": "Camera follows the hand tucking the damp note into the coat pocket",
       "speaker": "",
       "dialogue": "",
-      "seed": 2600207158,
+      "seed": 2013420990,
       "emotion": "warm"
     }
   ]

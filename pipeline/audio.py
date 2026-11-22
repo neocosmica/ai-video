@@ -10,8 +10,10 @@ import numpy as np
 import soundfile as sf
 
 from pipeline.config import Settings
+from pipeline.hf_cache import resolve_snapshot
 from pipeline.mirrors import child_env
 from pipeline.runtime import ensure_runtime_layout, musicgen_python, musicgen_venv_path
+from pipeline.progress import run_tee
 from pipeline.util import dump_json, frames_for_duration, load_json, resolve, stable_seed
 from pipeline.voices import (
     default_music_prompt,
@@ -109,8 +111,14 @@ def _generate_dialogue(settings: Settings, story: dict, out: Path, force: bool) 
             if dest.exists()
         ]
 
-    print(f"加载 TTS：{settings.tts_model}")
-    model = load_model(settings.tts_model)
+    tts_dir = resolve_snapshot(settings.tts_model)
+    if tts_dir is None:
+        raise SystemExit(f"找不到 TTS 权重 {settings.tts_model}。请先运行 scripts/setup.sh，不要在成片时再下载。")
+    # 传本地目录，mlx_audio 就不会再 snapshot_download
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    print(f"加载 TTS：{tts_dir}")
+    model = load_model(str(tts_dir))
     results = []
     for shot, dest, profile, line in jobs:
         if dest.exists() and not force:
@@ -119,11 +127,15 @@ def _generate_dialogue(settings: Settings, story: dict, out: Path, force: bool) 
         print(f"对白 {shot['id']} · {profile['voice']} · {profile['emotion']}：{line}")
         chunks = []
         sample_rate = 24000
+        # 条的总长按字数估，留足余量；说到 EOS 就停，避免默认 2048 步看起来几乎不动
+        max_tokens = min(2048, max(128, len(line) * 8))
         for result in model.generate_custom_voice(
             text=line,
             speaker=profile["voice"],
             language="Chinese",
             instruct=profile["instruct"],
+            verbose=True,
+            max_tokens=max_tokens,
         ):
             chunks.append(np.array(result.audio, dtype=np.float32).reshape(-1))
             sample_rate = int(getattr(result, "sample_rate", sample_rate) or sample_rate)
@@ -215,6 +227,19 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
 
     ensure_runtime_layout(musicgen_dir=settings.musicgen_dir)
     py = musicgen_python(settings.musicgen_dir)
+    model_dir = resolve_snapshot(settings.music_model)
+    t5_dir = resolve_snapshot("t5-base")
+    if (
+        model_dir is None
+        or not (model_dir / "state_dict.bin").is_file()
+        or not (model_dir / "compression_state_dict.bin").is_file()
+    ):
+        raise SystemExit(
+            f"找不到 MusicGen 权重 {settings.music_model}（需要 state_dict.bin 与 compression_state_dict.bin）。"
+            "请先运行 scripts/setup.sh。"
+        )
+    if t5_dir is None or not (t5_dir / "model.safetensors").is_file():
+        raise SystemExit("找不到 MusicGen 文本编码器 t5-base。请先运行 scripts/setup.sh。")
     print(f"生成配乐（MusicGen small，约 {duration:.0f}s）：{prompt}")
     env = child_env()
     local_bin = str(Path.home() / ".local" / "bin")
@@ -222,12 +247,16 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
     # 直调 Caches 里的 Python + 仓库 cwd；禁止 uv run（会反复解析/偶发重建）
     env["UV_PROJECT_ENVIRONMENT"] = str(musicgen_venv_path())
     env.pop("VIRTUAL_ENV", None)
+    # 权重目录已在本地。T5 仍按检查点里的名字 t5-base 加载，离线后只会读缓存。
+    env["HF_HUB_OFFLINE"] = "1"
+    env["TRANSFORMERS_OFFLINE"] = "1"
+    env["HF_DATASETS_OFFLINE"] = "1"
     cmd = [
         str(py),
         "generate.py",
         prompt,
         "-m",
-        settings.music_model,
+        str(model_dir),
         "-d",
         str(int(round(duration))),
         "-o",
@@ -236,19 +265,8 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
     ]
     _ = seed  # MusicGen-MLX CLI 暂不暴露 seed；保留变量便于以后接上
     log = out / "logs" / "bgm.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("w", encoding="utf-8") as handle:
-        handle.write("cwd=" + str(settings.musicgen_dir) + "\n")
-        handle.write(" ".join(cmd) + "\n\n")
-        handle.flush()
-        proc = subprocess.run(
-            cmd,
-            cwd=str(settings.musicgen_dir),
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            env=env,
-        )
-    if proc.returncode != 0 or not dest.exists():
+    code = run_tee(cmd, log=log, env=env, cwd=settings.musicgen_dir)
+    if code != 0 or not dest.exists():
         raise SystemExit(f"配乐失败，详见 {log}")
     return dest
 

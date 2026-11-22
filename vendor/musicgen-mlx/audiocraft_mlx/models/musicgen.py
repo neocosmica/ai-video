@@ -9,6 +9,7 @@
 import typing as tp
 
 import mlx.core as mx
+from tqdm import tqdm
 
 from .encodec import CompressionModel
 from .genmodel import BaseGenModel
@@ -32,6 +33,31 @@ _HF_MODEL_CHECKPOINTS_MAP = {
     "stereo-large": "facebook/musicgen-stereo-large",
     "stereo-melody": "facebook/musicgen-stereo-melody",
 }
+
+
+class _StepBar:
+    """把 (已生成, 总数) 回调画成一条 tqdm。"""
+
+    def __init__(self, desc: str) -> None:
+        self._desc = desc
+        self._bar: tqdm | None = None
+        self._total: int | None = None
+
+    def update(self, done: int, total: int) -> None:
+        if total <= 0:
+            return
+        if self._bar is None or self._total != total:
+            self.close()
+            self._bar = tqdm(total=total, desc=self._desc, unit="tok")
+            self._total = total
+        self._bar.n = min(max(int(done), 0), int(total))
+        self._bar.refresh()
+
+    def close(self) -> None:
+        if self._bar is not None:
+            self._bar.close()
+            self._bar = None
+            self._total = None
 
 
 class MusicGen(BaseGenModel):
@@ -233,16 +259,17 @@ class MusicGen(BaseGenModel):
         max_prompt_len = int(min(self.duration, self.max_duration)
                              * self.frame_rate)
         current_gen_offset: int = 0
+        bar = _StepBar("MusicGen")
 
         def _progress_callback(generated_tokens: int,
                                tokens_to_generate: int):
             nonlocal current_gen_offset
+            step = generated_tokens
             generated_tokens += current_gen_offset
             if self._progress_callback is not None:
                 self._progress_callback(generated_tokens, tokens_to_generate)
             else:
-                print(f'{generated_tokens: 6d} / {tokens_to_generate: 6d}',
-                      end='\r')
+                bar.update(step, tokens_to_generate)
 
         if prompt_tokens is not None:
             assert max_prompt_len >= prompt_tokens.shape[-1], \
@@ -251,10 +278,13 @@ class MusicGen(BaseGenModel):
         callback = _progress_callback if progress else None
 
         if self.duration <= self.max_duration:
-            gen_tokens = self.lm.generate(
-                prompt_tokens, attributes,
-                callback=callback, max_gen_len=total_gen_len,
-                **self.generation_params)
+            try:
+                gen_tokens = self.lm.generate(
+                    prompt_tokens, attributes,
+                    callback=callback, max_gen_len=total_gen_len,
+                    **self.generation_params)
+            finally:
+                bar.close()
         else:
             # Extended generation with melody/style wav handling
             ref_wavs = [attr.wav.get('self_wav') for attr in attributes]
@@ -297,10 +327,13 @@ class MusicGen(BaseGenModel):
                         path=[None],
                         seek_time=[0.])
 
-                gen_tokens = self.lm.generate(
-                    prompt_tokens, attributes,
-                    callback=callback, max_gen_len=max_gen_len,
-                    **self.generation_params)
+                try:
+                    gen_tokens = self.lm.generate(
+                        prompt_tokens, attributes,
+                        callback=callback, max_gen_len=max_gen_len,
+                        **self.generation_params)
+                finally:
+                    bar.close()
 
                 if prompt_tokens is None:
                     all_tokens.append(gen_tokens)

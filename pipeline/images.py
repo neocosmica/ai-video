@@ -56,7 +56,34 @@ def _load_class(kind: str):
     return Flux2KleinEdit, ModelConfig.flux2_klein_4b(), weights
 
 
-def _generate(model, *, prompt: str, seed: int, width: int, height: int, steps: int, images=None):
+_BAR_PATCHED = False
+
+
+def _use_step_bar(desc: str) -> None:
+    """给 mflux 去噪循环的 tqdm 加上说明。每张图新建 Config，所以各有一条。"""
+    global _BAR_PATCHED
+    from tqdm import tqdm
+
+    from mflux.models.common.config.config import Config
+
+    Config._novel_step_desc = desc  # type: ignore[attr-defined]
+    if _BAR_PATCHED:
+        return
+
+    def time_steps(self):
+        if self._time_steps is None:
+            label = getattr(Config, "_novel_step_desc", "") or None
+            self._time_steps = tqdm(
+                range(self.init_time_step, self.num_inference_steps),
+                desc=label,
+            )
+        return self._time_steps
+
+    Config.time_steps = property(time_steps)
+    _BAR_PATCHED = True
+
+
+def _generate(model, *, prompt: str, seed: int, width: int, height: int, steps: int, desc: str, images=None):
     kwargs = {
         "seed": seed,
         "prompt": prompt,
@@ -67,6 +94,7 @@ def _generate(model, *, prompt: str, seed: int, width: int, height: int, steps: 
     }
     if images:
         kwargs["image_paths"] = images
+    _use_step_bar(desc)
     try:
         return model.generate_image(**kwargs)
     except TypeError:
@@ -156,6 +184,7 @@ def run_t2i(story: dict, out: Path, settings: Settings, only: str | None, force:
             width=settings.portrait_width,
             height=settings.portrait_height,
             steps=settings.image_steps,
+            desc=f"肖像 {char['name']}",
         )
         _save_image(image, path)
     for shot, path in pending_frames:
@@ -167,6 +196,7 @@ def run_t2i(story: dict, out: Path, settings: Settings, only: str | None, force:
             width=settings.image_width,
             height=settings.image_height,
             steps=settings.image_steps,
+            desc=f"空镜 {shot['id']}",
         )
         _save_image(image, path)
     del model
@@ -205,6 +235,7 @@ def run_edit(story: dict, out: Path, settings: Settings, only: str | None, force
             width=settings.image_width,
             height=settings.image_height,
             steps=settings.image_steps,
+            desc=f"静帧 {shot['id']}",
             images=refs,
         )
         _save_image(image, path)

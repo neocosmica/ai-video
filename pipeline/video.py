@@ -17,6 +17,7 @@ from pipeline.runtime import (
     main_venv_path,
     preflight,
 )
+from pipeline.progress import run_tee
 from pipeline.util import dump_json, load_json, resolve, snap, snap_frames
 
 DEFAULT_GEMMA = "mlx-community/gemma-3-12b-it-4bit"
@@ -205,14 +206,9 @@ def _run_once(
         gemma=gemma,
         audio=audio,
     )
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("w", encoding="utf-8") as handle:
-        handle.write(" ".join(cmd) + "\n\n")
-        handle.flush()
-        mode = "a2v" if audio is not None else "i2v"
-        print(f"启动 LTX CLI（{mode}，日志 {log.name}）…", flush=True)
-        proc = subprocess.run(cmd, stdout=handle, stderr=subprocess.STDOUT, env=env)
-    return proc.returncode
+    mode = "a2v" if audio is not None else "i2v"
+    print(f"启动 LTX CLI（{mode}，日志 {log.name}）…", flush=True)
+    return run_tee(cmd, log=log, env=env)
 
 
 def _wait_memory_headroom(min_free_pct: float = 25.0, timeout_s: float = 90.0) -> None:

@@ -255,7 +255,34 @@ snapshot_download(
 snapshot_download("mlx-community/gemma-3-12b-it-4bit")
 snapshot_download("mflux-community/flux2-klein-4b-mflux-q4")
 snapshot_download("mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit")
-snapshot_download("facebook/musicgen-small")
+# musicgen-mlx 只读 Audiocraft 的 state_dict.bin / compression_state_dict.bin。
+# pytorch_model.bin 与 model.safetensors 是同一套权重的 transformers 格式，约 4.5GB，不加载。
+snapshot_download(
+    "facebook/musicgen-small",
+    allow_patterns=[
+        "state_dict.bin",
+        "compression_state_dict.bin",
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "spiece.model",
+        "generation_config.json",
+        "preprocessor_config.json",
+        "README.md",
+        ".gitattributes",
+    ],
+)
+# MusicGen 的 T5Conditioner 运行时只读这四份；整仓还有 pytorch/tf/flax，用不到
+snapshot_download(
+    "t5-base",
+    allow_patterns=[
+        "config.json",
+        "model.safetensors",
+        "tokenizer.json",
+        "spiece.model",
+    ],
+)
 print("weights ready")
 PY
 
