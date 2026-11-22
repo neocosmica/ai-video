@@ -207,8 +207,8 @@ def _run_once(
         audio=audio,
     )
     mode = "a2v" if audio is not None else "i2v"
-    print(f"启动 LTX CLI（{mode}，日志 {log.name}）…", flush=True)
-    return run_tee(cmd, log=log, env=env)
+    shot_id = str(shot.get("id") or "shot")
+    return run_tee(cmd, log=log, env=env, progress=f"{shot_id} {mode}")
 
 
 def _wait_memory_headroom(min_free_pct: float = 25.0, timeout_s: float = 90.0) -> None:
@@ -281,11 +281,6 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 print(f"跳过 {shot['id']}：请先 ./scripts/run.sh audio --out {out}")
                 continue
             audio_for_ltx = _prepare_a2v_audio(out, shot, voice, frames, settings.video_fps)
-        mode = "a2v+对白" if audio_for_ltx else "i2v 空镜"
-        print(
-            f"生成镜头 {shot['id']}（{mode}）：{width}x{height}，{frames} 帧。"
-            "这一步在 16GB 的 M4 Air 上通常要几分钟到几十分钟，机器会发热。"
-        )
         _wait_memory_headroom()
         code = _run_once(
             settings,
@@ -353,7 +348,6 @@ def cmd_videos(args: argparse.Namespace) -> None:
         shot["video"] = str(dest)
         shot["video_frames"] = frames
         shot["video_mode"] = "a2v" if audio_for_ltx is not None else "i2v"
-        print(f"完成 {dest}")
     dump_json(story_path, story)
     if failures:
         raise SystemExit(f"有 {failures} 个镜头没有生成。成功的镜头仍会在合成阶段用上。")

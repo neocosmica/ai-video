@@ -135,19 +135,18 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     assert STAGES == ("screenplay", "images", "audio", "videos", "assemble"), STAGES
     assert frames_for_duration(2.0, 24, min_frames=25, max_frames=97) == 49
     assert frames_for_duration(0.2, 24, min_frames=25, max_frames=97) == 25
-    import time
-
-    from pipeline.progress import _ProgressRelay
+    from pipeline.progress import StageMerge, _ProgressRelay
 
     relay = _ProgressRelay()
-    assert relay.feed("开始\n".encode()) == "开始\n".encode()
-    assert relay.feed("\rDenoising:   0% 0/8".encode()) == b""
-    shown = relay.poll()
-    assert b"0%" in shown and shown.endswith(b"\n"), shown
-    assert relay.feed("\rDenoising:  50% 4/8".encode()) == b""
-    time.sleep(0.3)
-    nxt = relay.poll()
-    assert b"50%" in nxt, nxt
+    assert relay.feed("开始\n".encode()) == ["开始"]
+    assert relay.feed(b"\rDenoising:  12%|x| 1/8 [00:02<00:18,  2.65s/it]\r") == [
+        "Denoising:  12%|x| 1/8 [00:02<00:18,  2.65s/it]"
+    ]
+    merge = StageMerge()
+    assert merge.update(0, 8) == (0, 8)
+    assert merge.update(8, 8) == (8, 8)
+    assert merge.update(0, 3) == (8, 11)
+    assert merge.update(3, 3) == (11, 11)
     with tempfile.TemporaryDirectory() as tmp:
         dest = Path(tmp) / "storyboard.json"
         install_storyboard(tmp, str(ROOT / "input" / "demo_storyboard.json"))

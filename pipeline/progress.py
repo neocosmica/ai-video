@@ -1,8 +1,7 @@
-"""把子进程输出实时打到终端，并复制进日志。
+"""子进程输出进日志；终端只保留必要的进度条。
 
-LTX、MusicGen 用 tqdm 在同一行上回车刷新。伪终端若再设成非阻塞，
-macOS 会把这个标志传到子进程，进度那一行经常写不出来。
-这里按行把每次刷新写到终端和日志，这样不等整段结束也能看到进度。
+视频每个分镜把 LTX 两段 Denoising（以及其它阶段条）合成一条进度。
+本机有 TTY 时，本进程 tqdm 仍用同行刷新，避免刷屏。
 """
 
 from __future__ import annotations
@@ -15,152 +14,193 @@ import select
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-_MIN_GAP = 0.25
+# Denoising:  12%|…| 1/8 [00:02<00:18,  2.65s/it]
+_TQDM = re.compile(
+    r"^(?P<desc>.+?):\s+(?P<pct>\d+)%.*? (?P<n>\d+)/(?P<total>\d+)\b"
+)
+_PHASE_START = re.compile(r"^\[(?P<label>[^\]]+)\]\s*\.\.\.\s*$")
+_ERRORISH = re.compile(
+    r"^(Traceback\b|\w*Error:|\w*Exception:|SystemExit:|FATAL)",
+    re.IGNORECASE,
+)
 
 
 class _ProgressRelay:
-    """把 tqdm 的回车刷新收成一行一行。普通换行立刻输出。"""
+    """把 PTY 字节拆成完整行（\\r / \\n 都算一行结束）。"""
 
     def __init__(self) -> None:
         self._dec = codecs.getincrementaldecoder("utf-8")("replace")
         self._buf = ""
-        self._held = ""
-        self._last = ""
-        self._last_t = 0.0
-        self._last_was_bar = False
 
-    def feed(self, data: bytes) -> bytes:
-        out: list[str] = []
-        text = self._dec.decode(data)
-        for ch in text:
-            if ch == "\r":
-                self._arm()
-                self._take(out, force=False)
-                continue
-            if ch == "\n":
-                self._arm()
-                self._take(out, force=True)
+    def feed(self, data: bytes) -> list[str]:
+        lines: list[str] = []
+        for ch in self._dec.decode(data):
+            if ch in "\r\n":
+                line = _ANSI.sub("", self._buf).strip()
+                self._buf = ""
+                if line:
+                    lines.append(line)
                 continue
             self._buf += ch
-        return "".join(out).encode("utf-8")
+        return lines
 
-    def poll(self) -> bytes:
-        out: list[str] = []
-        self._take(out, force=False)
-        self._take_buf(out, force=False)
-        return "".join(out).encode("utf-8")
-
-    def finish(self) -> bytes:
-        out: list[str] = []
-        tail = self._dec.decode(b"", final=True)
-        self._buf += tail
-        self._arm()
-        self._take(out, force=True)
-        return "".join(out).encode("utf-8")
-
-    def _arm(self) -> None:
+    def finish(self) -> list[str]:
+        self._buf += self._dec.decode(b"", final=True)
         line = _ANSI.sub("", self._buf).strip()
         self._buf = ""
-        if line:
-            self._held = line
+        return [line] if line else []
 
-    def _take(self, out: list[str], *, force: bool) -> None:
-        if not self._held or self._held == self._last:
-            self._held = ""
-            return
-        now = time.monotonic()
-        if not force and self._last_was_bar and now - self._last_t < _MIN_GAP:
-            return
-        out.append(self._held + "\n")
-        self._last = self._held
-        self._last_t = now
-        self._last_was_bar = not force
-        self._held = ""
 
-    def _take_buf(self, out: list[str], *, force: bool) -> None:
-        """当前行还没遇到回车时，也把它当作一条进度发出去。"""
-        line = _ANSI.sub("", self._buf).strip()
-        if not line or line == self._last:
+class StageMerge:
+    """把连续多段 n/total 进度合成一条绝对进度。"""
+
+    def __init__(self) -> None:
+        self.offset = 0
+        self.last_n = 0
+        self.last_total = 0
+        self.n = 0
+        self.total = 0
+
+    def update(self, n: int, total: int) -> tuple[int, int]:
+        if total <= 0:
+            return self.n, self.total
+        if self.last_total and n < self.last_n:
+            self.offset += self.last_total
+        elif self.last_total and total != self.last_total and n == 0 and self.last_n > 0:
+            self.offset += self.last_total
+        self.last_n = n
+        self.last_total = total
+        self.n = self.offset + n
+        self.total = self.offset + total
+        return self.n, self.total
+
+
+class _ShotBar:
+    """终端上只画一条合并后的进度；细节只进日志。"""
+
+    def __init__(self, label: str) -> None:
+        from tqdm import tqdm
+
+        self.merge = StageMerge()
+        cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+        self.bar = tqdm(
+            total=1,
+            desc=label,
+            unit="step",
+            file=sys.stderr,
+            dynamic_ncols=False,
+            ncols=min(100, max(40, cols)),
+            miniters=1,
+            mininterval=0.2,
+            leave=True,
+        )
+        self.bar.set_postfix_str("准备", refresh=True)
+
+    def handle(self, line: str) -> None:
+        if _ERRORISH.match(line) or line.startswith("  File "):
+            from tqdm import tqdm
+
+            tqdm.write(line, file=sys.stderr)
             return
-        now = time.monotonic()
-        if not force and self._last_was_bar and now - self._last_t < _MIN_GAP:
+        match = _TQDM.match(line)
+        if match:
+            n = int(match.group("n"))
+            total = int(match.group("total"))
+            done, overall = self.merge.update(n, total)
+            if self.bar.total != overall:
+                self.bar.total = max(1, overall)
+            self.bar.n = min(done, self.bar.total)
+            self.bar.set_postfix_str("", refresh=False)
+            self.bar.refresh()
             return
-        out.append(line + "\n")
-        self._last = line
-        self._last_t = now
-        self._last_was_bar = True
+        phase = _PHASE_START.match(line)
+        if phase:
+            label = phase.group("label").strip()
+            if label.startswith("estimate"):
+                return
+            short = label.split("(")[0].strip()
+            if len(short) > 18:
+                short = short[:18]
+            self.bar.set_postfix_str(short, refresh=True)
+
+    def close(self) -> None:
+        if self.merge.total:
+            self.bar.n = self.bar.total
+        self.bar.set_postfix_str("", refresh=False)
+        self.bar.close()
 
 
 class _LiveStream:
-    """给本进程的 tqdm 用：每次刷新都换成新的一行。"""
+    """非 TTY 时把 tqdm 回车刷新改成换行，方便落日志。"""
 
     def __init__(self, raw) -> None:
         self.raw = raw
-        self.relay = _ProgressRelay()
+        self._buf = ""
 
     def write(self, data: str) -> int:
-        payload = data.encode("utf-8") if isinstance(data, str) else data
-        self._emit(self.relay.feed(payload))
-        self._emit(self.relay.poll())
+        text = data if isinstance(data, str) else data.decode("utf-8", errors="replace")
+        for ch in text:
+            if ch == "\r":
+                line = _ANSI.sub("", self._buf).rstrip()
+                self._buf = ""
+                if line:
+                    self.raw.write(line + "\n")
+                continue
+            if ch == "\n":
+                line = _ANSI.sub("", self._buf).rstrip()
+                self._buf = ""
+                self.raw.write((line + "\n") if line else "\n")
+                continue
+            self._buf += ch
+        flush = getattr(self.raw, "flush", None)
+        if flush is not None:
+            flush()
         return len(data)
 
     def flush(self) -> None:
-        self._emit(self.relay.poll())
+        if self._buf:
+            line = _ANSI.sub("", self._buf).rstrip()
+            self._buf = ""
+            if line:
+                self.raw.write(line + "\n")
         flush = getattr(self.raw, "flush", None)
         if flush is not None:
             flush()
 
     def isatty(self) -> bool:
-        return True
+        return False
 
     def fileno(self) -> int:
         return self.raw.fileno()
-
-    def _emit(self, payload: bytes) -> None:
-        if not payload:
-            return
-        text = payload.decode("utf-8", errors="replace")
-        self.raw.write(text)
-        flush = getattr(self.raw, "flush", None)
-        if flush is not None:
-            flush()
 
 
 _BARS_INSTALLED = False
 
 
 def install_live_bars() -> None:
-    """本进程里的 tqdm（文生图、对白）每次刷新都另起一行。"""
+    """TTY：同行刷新；非 TTY：改成换行，避免进度条在日志里叠成一团。"""
     global _BARS_INSTALLED
     if _BARS_INSTALLED:
         return
     from tqdm import std as tqdm_std
 
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is not None:
-            try:
-                reconfigure(line_buffering=True)
-            except (OSError, ValueError):
-                pass
-
+    tty = bool(getattr(sys.stderr, "isatty", lambda: False)())
     original = tqdm_std.tqdm.__init__
 
     def __init__(self, *args, **kwargs):
-        file = kwargs.get("file", None)
-        if file is None:
-            kwargs["file"] = _LiveStream(sys.stderr)
-        elif not isinstance(file, _LiveStream) and file in (sys.stderr, sys.stdout):
-            kwargs["file"] = _LiveStream(file)
-        kwargs["miniters"] = 1
-        interval = kwargs.get("mininterval", 0.1)
-        if interval is None or interval > 0.3:
+        kwargs.setdefault("miniters", 1)
+        if kwargs.get("mininterval", 0.1) is None or kwargs.get("mininterval", 0.1) > 0.3:
             kwargs["mininterval"] = 0.2
-        if kwargs.get("ncols") is None:
+        if not tty:
+            file = kwargs.get("file")
+            if file is None:
+                kwargs["file"] = _LiveStream(sys.stderr)
+            elif not isinstance(file, _LiveStream) and file in (sys.stderr, sys.stdout):
+                kwargs["file"] = _LiveStream(file)
+        elif kwargs.get("ncols") is None:
             columns = shutil.get_terminal_size(fallback=(80, 24)).columns
             kwargs["ncols"] = min(100, max(40, columns))
         original(self, *args, **kwargs)
@@ -175,8 +215,9 @@ def run_tee(
     log: Path,
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
+    progress: str | None = None,
 ) -> int:
-    """运行命令。stdout/stderr 同时出现在终端和 log 里，返回退出码。"""
+    """运行命令。完整输出进 log；若给了 progress，终端只显示一条合并进度条。"""
     log.parent.mkdir(parents=True, exist_ok=True)
     child_env = os.environ.copy() if env is None else dict(env)
     child_env.setdefault("PYTHONUNBUFFERED", "1")
@@ -197,6 +238,7 @@ def run_tee(
         os.close(master)
         raise
     os.close(slave)
+    shot: _ShotBar | None = _ShotBar(progress) if progress else None
     try:
         with log.open("wb") as handle:
             header = ""
@@ -205,8 +247,10 @@ def run_tee(
             header += " ".join(cmd) + "\n\n"
             handle.write(header.encode("utf-8", errors="replace"))
             handle.flush()
-            _pump(master, proc, handle)
+            _pump(master, proc, handle, shot=shot)
     finally:
+        if shot is not None:
+            shot.close()
         if proc.poll() is None:
             proc.terminate()
             try:
@@ -245,30 +289,29 @@ def _prepare_pty(slave: int) -> None:
         return
 
 
-def _pump(master: int, proc: subprocess.Popen, handle) -> None:
+def _pump(master: int, proc: subprocess.Popen, handle, *, shot: _ShotBar | None) -> None:
     relay = _ProgressRelay()
     while True:
-        _emit(relay.poll(), handle)
         ready, _, _ = select.select([master], [], [], 0.2)
         if not ready:
             if proc.poll() is not None:
-                _drain(master, relay, handle)
+                _drain(master, relay, handle, shot=shot)
                 return
             continue
         try:
             chunk = os.read(master, 65536)
         except OSError:
             if proc.poll() is not None:
-                _emit(relay.finish(), handle)
+                _finish(relay, handle, shot=shot)
                 return
             continue
         if not chunk:
-            _emit(relay.finish(), handle)
+            _finish(relay, handle, shot=shot)
             return
-        _emit(relay.feed(chunk), handle)
+        _consume(chunk, relay, handle, shot=shot)
 
 
-def _drain(master: int, relay: _ProgressRelay, handle) -> None:
+def _drain(master: int, relay: _ProgressRelay, handle, *, shot: _ShotBar | None) -> None:
     while True:
         ready, _, _ = select.select([master], [], [], 0)
         if not ready:
@@ -279,21 +322,39 @@ def _drain(master: int, relay: _ProgressRelay, handle) -> None:
             break
         if not chunk:
             break
-        _emit(relay.feed(chunk), handle)
-    _emit(relay.finish(), handle)
+        _consume(chunk, relay, handle, shot=shot)
+    _finish(relay, handle, shot=shot)
 
 
-def _emit(payload: bytes, handle) -> None:
-    if not payload:
-        return
-    handle.write(payload)
+def _consume(chunk: bytes, relay: _ProgressRelay, handle, *, shot: _ShotBar | None) -> None:
+    handle.write(chunk)
     handle.flush()
-    # 先清掉文本层里还没写出的 print，再写原始字节，避免进度插到旧输出前面。
+    lines = relay.feed(chunk)
+    if shot is not None:
+        for line in lines:
+            shot.handle(line)
+        return
+    _emit_lines(lines)
+
+
+def _finish(relay: _ProgressRelay, handle, *, shot: _ShotBar | None) -> None:
+    lines = relay.finish()
+    if shot is not None:
+        for line in lines:
+            shot.handle(line)
+        return
+    _emit_lines(lines)
+
+
+def _emit_lines(lines: list[str]) -> None:
+    if not lines:
+        return
     sys.stdout.flush()
+    text = "".join(line + "\n" for line in lines)
     out = getattr(sys.stdout, "buffer", None)
     if out is not None:
-        out.write(payload)
+        out.write(text.encode("utf-8", errors="replace"))
         out.flush()
     else:
-        sys.stdout.write(payload.decode("utf-8", errors="replace"))
+        sys.stdout.write(text)
         sys.stdout.flush()

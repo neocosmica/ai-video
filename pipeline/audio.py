@@ -240,7 +240,7 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
         )
     if t5_dir is None or not (t5_dir / "model.safetensors").is_file():
         raise SystemExit("找不到 MusicGen 文本编码器 t5-base。请先运行 scripts/setup.sh。")
-    print(f"生成配乐（MusicGen small，约 {duration:.0f}s）：{prompt}")
+    print(f"配乐约 {duration:.0f}s：{prompt}")
     env = child_env()
     local_bin = str(Path.home() / ".local" / "bin")
     env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
@@ -265,7 +265,7 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
     ]
     _ = seed  # MusicGen-MLX CLI 暂不暴露 seed；保留变量便于以后接上
     log = out / "logs" / "bgm.log"
-    code = run_tee(cmd, log=log, env=env, cwd=settings.musicgen_dir)
+    code = run_tee(cmd, log=log, env=env, cwd=settings.musicgen_dir, progress="配乐")
     if code != 0 or not dest.exists():
         raise SystemExit(f"配乐失败，详见 {log}")
     return dest
