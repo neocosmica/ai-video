@@ -14,7 +14,7 @@ from pipeline.assemble import cmd_assemble
 from pipeline.audio import cmd_audio
 from pipeline.config import Settings
 from pipeline.images import cmd_images
-from pipeline.run import STAGES, cmd_run
+from pipeline.run import STAGES, cmd_produce, cmd_run
 from pipeline.screenplay import cmd_screenplay
 from pipeline.screenplay import extract_novel_dialogues
 from pipeline.util import ROOT, chunk_novel, extract_json
@@ -48,14 +48,15 @@ def cmd_doctor(_: argparse.Namespace) -> None:
     print(f"主 venv 目标：{main_venv_path()}")
     print(f"LTX venv 目标：{ltx_venv_path()}")
     print(f"MusicGen venv 目标：{musicgen_venv_path()}")
-    print("分镜：Cursor Agent 写 storyboard.json（本机不加载聊天 LLM）")
+    print("分镜：Agent 只写 storyboard.json；成片用 produce 一键跑完（本机不加载聊天 LLM）")
     print(f"文生图：{settings.image_model}，{settings.image_quantize}-bit，{settings.image_width}x{settings.image_height}")
     print(
-        f"图生视频：{settings.video_model}，{settings.video_width}x{settings.video_height}，"
-        f"{settings.video_frames} 帧 / {settings.video_fps} fps"
+        f"视频：{settings.video_model}，{settings.video_width}x{settings.video_height}，"
+        f"默认 {settings.video_frames} 帧 / {settings.video_fps} fps；"
+        f"有对白走 a2v（{settings.video_frames_min}–{settings.video_frames_max} 帧跟 TTS）"
     )
     print("提示词编码器：LTX 内置 Gemma 3 12B 4-bit（不是聊天用的 VLM）")
-    print(f"对白 TTS：{settings.tts_model}")
+    print(f"对白 TTS：{settings.tts_model}（先于视频，供 A2V 条件）")
     print(f"配乐：{settings.music_model}")
     print(f"HF 镜像：{os.environ.get('HF_ENDPOINT')}")
     print(f"PyPI 镜像：{os.environ.get('UV_INDEX_URL')}")
@@ -64,6 +65,15 @@ def cmd_doctor(_: argparse.Namespace) -> None:
     print(f"uv：{uv}（{'存在' if Path(uv).exists() or shutil.which('uv') else '缺失'}）")
     print(f"ffmpeg：{settings.ffmpeg}（{'存在' if settings.ffmpeg.exists() else '缺失'}）")
     print(f"LTX 代码：{settings.ltx_dir}（{'存在' if settings.ltx_dir.exists() else '缺失'}）")
+    from pipeline.hf_cache import resolve_snapshot
+
+    ltx_snap = resolve_snapshot(settings.video_model)
+    if ltx_snap is None:
+        print(f"LTX 权重缓存：未找到 {settings.video_model}")
+    else:
+        for name in ("audio_vae.safetensors", "vocoder.safetensors"):
+            path = ltx_snap / name
+            print(f"LTX A2V 依赖 {name}：{'有' if path.exists() else '缺（对白镜会失败，请补拉或重跑 setup）'}")
     print(f"MusicGen 代码：{settings.musicgen_dir}（{'存在' if settings.musicgen_dir.exists() else '缺失'}）")
     gen_py = settings.musicgen_dir / "generate.py"
     print(f"MusicGen generate.py：{'存在' if gen_py.exists() else '缺失'}")
@@ -118,6 +128,17 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     assert (ROOT / "scripts" / "apply_ltx_gemma_patch.py").exists(), "缺少 LTX 补丁脚本"
     assert (ROOT / "input" / "demo_storyboard.json").exists(), "缺少演示分镜"
     assert (ROOT / "input" / "novel.txt").exists(), "缺少演示小说"
+    from pipeline.run import STAGES, install_storyboard
+    from pipeline.util import frames_for_duration
+    import tempfile
+
+    assert STAGES == ("screenplay", "images", "audio", "videos", "assemble"), STAGES
+    assert frames_for_duration(2.0, 24, min_frames=25, max_frames=97) == 49
+    assert frames_for_duration(0.2, 24, min_frames=25, max_frames=97) == 25
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "storyboard.json"
+        install_storyboard(tmp, str(ROOT / "input" / "demo_storyboard.json"))
+        assert dest.exists(), "produce 应能把分镜拷进输出目录"
     for label, path in (
         ("main", main_venv_path()),
         ("ltx", ltx_venv_path()),
@@ -141,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--novel", default="input/novel.txt")
             p.add_argument("--max-shots", type=int, default=None)
 
-    screenplay = sub.add_parser("screenplay", help="校验 Agent 写好的分镜 JSON")
+    screenplay = sub.add_parser("screenplay", help="校验已写好的分镜 JSON")
     add_common(screenplay, novel=True)
     screenplay.set_defaults(func=cmd_screenplay)
 
@@ -163,8 +184,25 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(assemble)
     assemble.set_defaults(func=cmd_assemble)
 
-    run = sub.add_parser("run", help="从小说一路做到成片")
+    def add_storyboard(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--storyboard",
+            default=None,
+            help="外部分镜 JSON；会拷进 --out/storyboard.json（演示默认可用 input/demo_storyboard.json）",
+        )
+
+    produce = sub.add_parser(
+        "produce",
+        help="一键成片：分镜 → 校验 → 图 → 对白配乐 → A2V 视频 → final.mp4（不再需要 Agent）",
+    )
+    add_common(produce, novel=True)
+    add_storyboard(produce)
+    produce.add_argument("--only", default=None, help="只重做列出的镜头，用于 images 和 videos")
+    produce.set_defaults(func=cmd_produce, start="screenplay")
+
+    run = sub.add_parser("run", help="按阶段串跑（默认从 screenplay 起，等同 produce）")
     add_common(run, novel=True)
+    add_storyboard(run)
     run.add_argument("--from", dest="start", default="screenplay", choices=STAGES)
     run.add_argument("--only", default=None, help="只重做列出的镜头，用于 images 和 videos")
     run.set_defaults(func=cmd_run)

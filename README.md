@@ -1,26 +1,33 @@
 # 本地小说到竖屏短剧
 
-在 **Apple Silicon Mac**（推荐 16GB+ 统一内存）上，把小说做成竖屏短剧。图像、视频、对白、配乐都在本机算；分镜由 Cursor Agent 写 JSON，不加载聊天 LLM。
+在 **Apple Silicon Mac**（推荐 16GB+ 统一内存）上，把小说做成竖屏短剧。图像、视频、对白、配乐都在本机算；**只有分镜 JSON 由 Cursor Agent 写**，写好后用一条脚本跑到成片，中途不再依赖 Agent。
 
 ## 本机模型
 
 | 步骤 | 模型 | 说明 |
 |---|---|---|
 | 文生图 | FLUX.2 Klein 4B 4-bit | 竖屏静帧 + 参考图锁脸 |
-| 图生视频 | LTX-2.3 int4 distilled | 第一帧锁定，约 2 秒/镜；提示词编码器是 Gemma 3 12B 4-bit |
-| 对白 | Qwen3-TTS 1.7B CustomVoice 8-bit | 按性别选音色，按情绪写 instruct |
-| 配乐 | MusicGen small | 读英文 `music_prompt`，无人声器乐 |
+| 对白 | Qwen3-TTS 1.7B CustomVoice 8-bit | 先于视频；按性别选音色，按情绪写 instruct |
+| 图+音频生视频 | LTX-2.3 int4 distilled **a2v** | 有对白：静帧 + TTS wav 条件；空镜仍 I2V；帧数跟对白时长 |
+| 配乐 | MusicGen small | 读英文 `music_prompt`，无人声器乐；按时长轴估长 |
 
 首次 `setup.sh` 主要拉 **模型权重**（数十 GB）并安装 Python 依赖；`vendor/`（LTX、MusicGen 源码）和 `tools/`（ffmpeg）已在本仓库内，默认不再从 GitHub 克隆。请插电，保持网络畅通（默认走国内镜像）。
 
-## Agentic 链路
+## 工作流（两步）
 
-1. Agent 写 `storyboard.json`（人物 `gender`/`voice`，镜头 `emotion`，顶层英文 `music_prompt`）
-2. `screenplay` 校验（含引号对白覆盖检查）
-3. 参考图 / 静帧（Flux）
-4. 镜头视频（LTX）
-5. 对白 + 配乐（TTS / MusicGen）
-6. 混音、字幕、成片 `final.mp4`
+1. **Agent 只做这一步**：读小说，写 `input/demo_storyboard.json`（或 `output/<片名>/storyboard.json`）。人物填 `gender`/`voice`，镜头填 `emotion`，顶层英文 `music_prompt`。
+2. **一条脚本成片**（校验 → 图 → **对白+配乐** → **A2V/I2V 视频** → 混音字幕）：
+
+```bash
+./scripts/run.sh produce \
+  --storyboard input/demo_storyboard.json \
+  --novel input/novel.txt \
+  --out output/demo
+```
+
+成片在 `output/demo/final.mp4`。`produce` 会把分镜拷进输出目录，再串跑全部阶段；**不需要再逐步喊 Agent**。
+
+有对白的镜头：TTS → 写入 `video_frames` → `ltx-2-mlx a2v --distilled --audio … --image …`。无对白空镜：定长 I2V（`--no-audio`）。成片混音仍用 TTS 原轨 + BGM（A2V 片内音轨在 normalize 时剥掉，避免双轨）。
 
 女声常用 `Serena`（温柔）/ `Vivian`（偏亮）；男声常用 `Dylan` / `Uncle_Fu` / `Eric`。情绪例如 `calm` `warm` `sad` `bitter` `surprised`。
 
@@ -54,26 +61,29 @@ chmod +x scripts/setup.sh scripts/run.sh scripts/env.sh
 
 异常时先看 `./scripts/run.sh doctor`：确认三个 `.venv` 都指向 Caches、Metal 可用、LTX 补丁为「已打」。
 
-## 跑通演示（小说已带 `input/novel.txt`）
+## 换一部小说
+
+改 `input/` 下文本，让 Agent 重写分镜 JSON，再：
 
 ```bash
-mkdir -p output/demo
-cp input/demo_storyboard.json output/demo/storyboard.json
-./scripts/run.sh screenplay --out output/demo --novel input/novel.txt
-./scripts/run.sh run --from images --out output/demo
+./scripts/run.sh produce \
+  --storyboard output/<片名>/storyboard.json \
+  --novel input/<小说>.txt \
+  --out output/<片名>
 ```
 
-成片在 `output/demo/final.mp4`。
+若分镜已经在 `--out/storyboard.json`，可省略 `--storyboard`。
 
-换一部小说时：改 `input/` 下文本，让 Agent 重写对应 `output/<片名>/storyboard.json`，再 `screenplay` → `run --from images`。
-
-只重做声音：
+只重做声音（会重写 `video_frames`；若要口型跟新对白，需再跑 videos）：
 
 ```bash
 ./scripts/run.sh audio --out output/demo --force
+./scripts/run.sh videos --out output/demo --force
 ./scripts/run.sh assemble --out output/demo
 ```
 
+从中间阶段续跑仍可用 `run --from images|audio|videos|assemble`。
+
 ## 预期耗时（M4 Air 16GB）
 
-静帧几十秒到数分钟；视频一镜约数分钟到十几分钟；对白几秒到几十秒；配乐按秒数，MusicGen small 通常接近实时。插电，不要合盖。
+静帧几十秒到数分钟；对白很快；视频一镜约数分钟到十几分钟（a2v 与 distilled I2V 同量级）；配乐按秒数，MusicGen small 通常接近实时。插电，不要合盖。

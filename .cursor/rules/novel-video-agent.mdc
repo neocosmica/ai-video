@@ -5,34 +5,40 @@ alwaysApply: true
 
 # 小说 → 短剧
 
-分镜由你（Cursor Agent）直接写 `output/<片名>/storyboard.json`，不要下载或调用本机聊天 LLM / VLM。
+**你（Cursor Agent）只负责第一步：读小说，写分镜 JSON。** 写完后用一条脚本成片；不要逐步盯 images / audio / videos / assemble，也不要下载或调用本机聊天 LLM / VLM。
 
-本机只跑：
+本机只跑（全部由 `produce` 串起来）：
 - 文生图：FLUX.2 Klein 4B 4-bit（mflux）
-- 文+图生视频：LTX-2.3 int4 distilled（Gemma 3 12B 4-bit 仅作提示词编码器）
-- 对白：Qwen3-TTS 1.7B CustomVoice 8-bit（按人物性别选音色，按镜头 emotion 写 instruct）
-- 配乐：MusicGen small（读 storyboard 的英文 `music_prompt`）
+- 对白：Qwen3-TTS 1.7B CustomVoice 8-bit（**先于视频**；按人物性别选音色，按镜头 emotion 写 instruct）
+- 配乐：MusicGen small（读 storyboard 的英文 `music_prompt`；按对白估出的时间轴定长）
+- 视频：有对白 → LTX-2.3 int4 distilled **a2v**（静帧 + TTS wav）；空镜 → distilled I2V（`--no-audio`）。Gemma 3 12B 4-bit 仅作提示词编码器
 
 工作流：
-1. 读小说，写/改 `storyboard.json`
+1. 读小说，写/改分镜：演示写 `input/demo_storyboard.json`；其它片子写 `output/<片名>/storyboard.json`
 2. 人物填 `gender`（female/male）和可选 `voice`（女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric）
 3. 有对白的镜头填 `emotion`（calm/warm/sad/tense/bitter/nostalgic 等）
 4. 顶层写英文 `music_prompt`（无人声器乐）
-5. `./scripts/run.sh screenplay --out output/<片名>`（会校验引号对白是否全部落入 dialogue）
-6. `./scripts/run.sh run --from images --out output/<片名>`（含 audio 混音）
+5. **一条命令跑完全部剩余步骤**（校验 → 图 → 对白配乐 → A2V/I2V → 成片）：
 
-演示可直接：`cp input/demo_storyboard.json output/demo/storyboard.json`
+```bash
+./scripts/run.sh produce \
+  --storyboard input/demo_storyboard.json \
+  --novel input/novel.txt \
+  --out output/demo
+```
+
+分镜已在 `--out/storyboard.json` 时可省略 `--storyboard`。启动 `produce` 后不要再插手各阶段；失败再查 `doctor` / 日志。
 
 对白硬性规则：
 - 小说里所有「」/“”/"" 引号台词必须原样进入某个镜头的 `dialogue`，禁止漏句、合并丢掉后半句
 - 一句重要对白一个镜头；`speaker` 写中文名
 - 无对白的空镜可以 `dialogue: ""`，但不能因此挤掉原文台词
 
-不要重新拉取聊天用 Qwen。外貌只取原文可见特征；竖屏；每镜约 2 秒；`motion_prompt` 必须英文。
+不要重新拉取聊天用 Qwen。外貌只取原文可见特征；竖屏；有对白镜时长跟 TTS（约 1–4 秒），空镜约 2 秒；`motion_prompt` 必须英文。
 
 下载一律走国内镜像（`scripts/env.sh`）：HF→hf-mirror.com 且禁用 XET；PyPI→清华。`vendor/` 与 `tools/` 已入库，默认不从 GitHub 克隆；仅仓内缺失时才用 ghfast.top 回退。不要改回官方源傻等。
 
 运行时护栏：
 - `.venv` / `vendor/*/.venv` 指向 `~/Library/Caches/novel-video/venvs/`（由 setup.sh 装好）
-- 视频阶段直接调用 LTX venv 的 `ltx-2-mlx`；配乐直接调用 MusicGen venv 的 Python 跑 `generate.py`；禁止每镜 `uv run`
+- 视频阶段直接调用 LTX venv 的 `ltx-2-mlx`（`a2v` 或 `generate`）；配乐直接调用 MusicGen venv 的 Python 跑 `generate.py`；禁止每镜 `uv run`
 - 卡在「加载文生图」或 Gemma 之前、CPU≈0%：先 `doctor` 看 venv / LTX 标记，不要盲着重跑

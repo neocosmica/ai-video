@@ -8,7 +8,7 @@ from pipeline.config import Settings
 from pipeline.util import dump_json, has_cjk, load_json, resolve, stable_seed
 
 
-SCHEMA_HINT = """分镜不由本机 LLM 生成。请让 Cursor Agent 阅读小说后写入 storyboard.json。
+SCHEMA_HINT = """分镜不由本机 LLM 生成。请让 Cursor Agent 阅读小说后写入 storyboard.json（演示可写 input/demo_storyboard.json）。
 
 最小结构：
 {
@@ -40,7 +40,8 @@ SCHEMA_HINT = """分镜不由本机 LLM 生成。请让 Cursor Agent 阅读小�
 音色：女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric。情绪写在镜头上，影响 TTS instruct。
 约束：竖屏短剧，每镜约 2 秒；能少就少；motion_prompt 与 music_prompt 必须是英文。
 硬性要求：小说里所有引号对白（「」 “” ""）必须原样出现在某个镜头的 dialogue 里，一句重要对白一个镜头；不要合并丢掉后半句。
-写好后：./scripts/run.sh screenplay --out output/demo
+写好后一键成片（对白先于视频，有台词镜走 LTX a2v；不再需要 Agent）：
+./scripts/run.sh produce --storyboard input/demo_storyboard.json --novel input/novel.txt --out output/demo
 """
 
 # 中文弯引号、直角引号、直引号

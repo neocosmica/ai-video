@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -11,7 +12,7 @@ import soundfile as sf
 from pipeline.config import Settings
 from pipeline.mirrors import child_env
 from pipeline.runtime import ensure_runtime_layout, musicgen_python, musicgen_venv_path
-from pipeline.util import dump_json, load_json, resolve, stable_seed
+from pipeline.util import dump_json, frames_for_duration, load_json, resolve, stable_seed
 from pipeline.voices import (
     default_music_prompt,
     emotion_instruct,
@@ -52,6 +53,30 @@ def _save_mono_wav(path: Path, audio, sample_rate: int) -> None:
     if peak > 1.0:
         arr = arr / peak
     sf.write(str(path), arr, sample_rate)
+
+
+def wav_duration(path: Path) -> float:
+    info = sf.info(str(path))
+    if info.samplerate <= 0 or info.frames <= 0:
+        return 0.0
+    return float(info.frames) / float(info.samplerate)
+
+
+def pad_wav_to_duration(src: Path, dest: Path, duration_s: float) -> Path:
+    """A2V 要求音频不少于镜头时长；不足则尾部补静音。"""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    data, sample_rate = sf.read(str(src), always_2d=False)
+    arr = np.asarray(data, dtype=np.float32)
+    if arr.ndim > 1:
+        arr = arr.mean(axis=1)
+    need = max(1, int(math.ceil(max(0.0, float(duration_s)) * max(1, int(sample_rate)))))
+    if arr.shape[0] < need:
+        arr = np.concatenate([arr, np.zeros(need - arr.shape[0], dtype=np.float32)])
+    elif arr.shape[0] > need:
+        # 镜头被 max_frames 截断时，A2V 只吃前 need 采样；成片混音仍用原 wav
+        arr = arr[:need]
+    _save_mono_wav(dest, arr, int(sample_rate))
+    return dest
 
 
 def _generate_dialogue(settings: Settings, story: dict, out: Path, force: bool) -> list[dict]:
@@ -110,32 +135,63 @@ def _generate_dialogue(settings: Settings, story: dict, out: Path, force: bool) 
     return results
 
 
+def apply_shot_timings(settings: Settings, story: dict, out: Path) -> None:
+    """按对白 wav 写 audio_duration / video_frames，供 A2V 与配乐估长。"""
+    voice_dir = out / "audio" / "voice"
+    for shot in story["shots"]:
+        voice = voice_dir / f"{shot['id']}.wav"
+        line = str(shot.get("dialogue") or "").strip()
+        if line and voice.exists():
+            duration = wav_duration(voice)
+            frames = frames_for_duration(
+                duration,
+                settings.video_fps,
+                min_frames=settings.video_frames_min,
+                max_frames=settings.video_frames_max,
+            )
+            shot["audio_duration"] = round(duration, 3)
+            shot["video_frames"] = frames
+        else:
+            shot.pop("audio_duration", None)
+            shot["video_frames"] = int(settings.video_frames)
+
+
 def _estimate_timeline(settings: Settings, out: Path, story: dict) -> float:
     total = 0.0
+    fps = max(1, settings.video_fps)
+    voice_dir = out / "audio" / "voice"
     for shot in story["shots"]:
-        clip = out / "clips" / f"{shot['id']}.mp4"
-        if not clip.exists():
-            total += settings.video_frames / max(1, settings.video_fps)
+        frames = shot.get("video_frames")
+        if frames:
+            total += float(frames) / fps
             continue
-        proc = subprocess.run(
-            [
-                str(settings.ffprobe),
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(clip),
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        try:
-            total += max(0.1, float(proc.stdout.strip()))
-        except ValueError:
-            total += settings.video_frames / max(1, settings.video_fps)
+        voice = voice_dir / f"{shot['id']}.wav"
+        if voice.exists():
+            total += max(0.1, wav_duration(voice))
+            continue
+        clip = out / "clips" / f"{shot['id']}.mp4"
+        if clip.exists():
+            proc = subprocess.run(
+                [
+                    str(settings.ffprobe),
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(clip),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            try:
+                total += max(0.1, float(proc.stdout.strip()))
+                continue
+            except ValueError:
+                pass
+        total += settings.video_frames / fps
     return max(2.0, total)
 
 
@@ -206,6 +262,7 @@ def cmd_audio(args: argparse.Namespace) -> None:
         raise SystemExit(f"还没有分镜：{story_path}")
     story = load_json(story_path)
     voices = _generate_dialogue(settings, story, out, args.force)
+    apply_shot_timings(settings, story, out)
     music = _generate_music(settings, story, out, args.force)
     manifest = {
         "tts_model": settings.tts_model,
@@ -213,9 +270,10 @@ def cmd_audio(args: argparse.Namespace) -> None:
         "music": str(music),
         "music_prompt": str(story.get("music_prompt") or default_music_prompt(story.get("style", ""), story.get("title", ""))),
         "voices": voices,
+        "timeline_s": round(_estimate_timeline(settings, out, story), 2),
     }
     dump_json(out / "audio" / "manifest.json", manifest)
-    # 把推断出的音色写回人物表，方便 Agent 下次改
+    # 把推断出的音色写回人物表，方便下次改分镜
     by_name = {c["name"]: c for c in story.get("characters") or []}
     for item in voices:
         char = by_name.get(item["speaker"])
@@ -226,4 +284,8 @@ def cmd_audio(args: argparse.Namespace) -> None:
     if not story.get("music_prompt"):
         story["music_prompt"] = manifest["music_prompt"]
     dump_json(story_path, story)
-    print(f"音频就绪：对白 {len(voices)} 条，配乐 {music}")
+    timed = sum(1 for shot in story["shots"] if shot.get("audio_duration") is not None)
+    print(
+        f"音频就绪：对白 {len(voices)} 条（其中 {timed} 镜写入 video_frames），"
+        f"配乐 {music}，估长约 {manifest['timeline_s']}s"
+    )

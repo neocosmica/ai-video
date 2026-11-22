@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 
@@ -36,6 +37,23 @@ def snap(n: int, base: int) -> int:
 def snap_frames(n: int) -> int:
     k = max(1, round((int(n) - 1) / 8))
     return 8 * k + 1
+
+
+def frames_for_duration(
+    duration_s: float,
+    fps: int,
+    *,
+    min_frames: int = 25,
+    max_frames: int = 97,
+) -> int:
+    """按对白秒数算 LTX 帧数（8k+1），夹在 min/max 之间。"""
+    fps = max(1, int(fps))
+    raw = max(1, int(math.ceil(float(duration_s) * fps)))
+    lo = snap_frames(min_frames)
+    hi = snap_frames(max_frames)
+    if lo > hi:
+        lo, hi = hi, lo
+    return snap_frames(min(hi, max(lo, raw)))
 
 
 def has_cjk(text: str) -> bool:

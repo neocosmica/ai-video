@@ -239,6 +239,9 @@ snapshot_download(
         "spatial_upscaler_x2_v1_1_config.json",
         "vae_decoder.safetensors",
         "vae_encoder.safetensors",
+        # A2V 对白条件：编码要 audio_vae；_load_decoders 仍会打开 vocoder
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
         "connector.safetensors",
         "config.json",
         "embedded_config.json",
@@ -281,4 +284,4 @@ PY
 echo "环境就绪。Python=$UV_PYTHON  镜像：HF=$HF_ENDPOINT  PyPI=$UV_INDEX_URL  PythonInstall=$UV_PYTHON_INSTALL_MIRROR"
 echo "venv 缓存：$NOVEL_VIDEO_CACHE/venvs"
 echo "下一步：./scripts/run.sh doctor"
-echo "演示分镜：mkdir -p output/demo && cp input/demo_storyboard.json output/demo/storyboard.json"
+echo "演示成片：./scripts/run.sh produce --storyboard input/demo_storyboard.json --novel input/novel.txt --out output/demo"

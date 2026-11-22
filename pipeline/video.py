@@ -6,6 +6,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from pipeline.audio import pad_wav_to_duration
 from pipeline.config import Settings
 from pipeline.hf_cache import resolve_snapshot
 from pipeline.mirrors import child_env
@@ -21,8 +22,14 @@ from pipeline.util import dump_json, load_json, resolve, snap, snap_frames
 DEFAULT_GEMMA = "mlx-community/gemma-3-12b-it-4bit"
 
 
-def _prompt(shot: dict) -> str:
+def _prompt(shot: dict, *, with_speech: bool) -> str:
     motion = shot.get("motion_prompt") or "Slow cinematic push in"
+    if with_speech:
+        return (
+            f"{motion}. The on-screen speaker talks naturally with clear lip sync to the dialogue audio. "
+            "Keep the face, hair and clothes identical to the first frame. "
+            "Stable identity, natural mouth motion, no morphing, no scene change."
+        )
     return (
         f"{motion}. Keep the face, hair and clothes identical to the first frame. "
         "Stable identity, natural motion, no morphing, no scene change. "
@@ -83,6 +90,13 @@ def _resolve_model_arg(repo_or_path: str, *, label: str) -> str:
     return repo_or_path
 
 
+def _shot_frames(shot: dict, settings: Settings) -> int:
+    raw = shot.get("video_frames")
+    if raw is None:
+        return int(settings.video_frames)
+    return snap_frames(int(raw))
+
+
 def _command(
     settings: Settings,
     *,
@@ -95,12 +109,11 @@ def _command(
     frames: int,
     model: str,
     gemma: str,
+    audio: Path | None,
 ) -> list[str]:
-    # 直接跑 venv 里的入口，禁止每镜 `uv run`（会反复解析环境，偶发重建，再触发慢导入）
-    cmd = [
-        str(ltx_cli(settings.ltx_dir)),
-        "generate",
-        "--distilled",
+    # 直接跑 venv 里的入口，禁止每镜 `uv run`
+    cli = str(ltx_cli(settings.ltx_dir))
+    common_tail = [
         "--model",
         model,
         "--gemma",
@@ -124,8 +137,11 @@ def _command(
         str(seed),
         "-o",
         str(output),
-        "--no-audio",
     ]
+    if audio is not None:
+        cmd = [cli, "a2v", "--distilled", "--audio", str(audio), *common_tail]
+    else:
+        cmd = [cli, "generate", "--distilled", *common_tail, "--no-audio"]
     if settings.video_low_ram:
         cmd.append("--low-ram")
     return cmd
@@ -153,6 +169,13 @@ def _video_env(settings: Settings, *, offline: bool) -> dict[str, str]:
     return env
 
 
+def _prepare_a2v_audio(out: Path, shot: dict, voice: Path, frames: int, fps: int) -> Path:
+    """按镜头帧数裁/补对白，满足 A2V「音频不少于画面时长」。"""
+    need = frames / max(1, fps) + 0.05
+    dest = out / "audio" / "a2v" / f"{shot['id']}.wav"
+    return pad_wav_to_duration(voice, dest, need)
+
+
 def _run_once(
     settings: Settings,
     shot: dict,
@@ -166,11 +189,12 @@ def _run_once(
     model: str,
     gemma: str,
     offline: bool,
+    audio: Path | None,
 ) -> int:
     env = _video_env(settings, offline=offline)
     cmd = _command(
         settings,
-        prompt=_prompt(shot),
+        prompt=_prompt(shot, with_speech=audio is not None),
         image=image,
         output=output,
         seed=int(shot["seed"]),
@@ -179,12 +203,14 @@ def _run_once(
         frames=frames,
         model=model,
         gemma=gemma,
+        audio=audio,
     )
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("w", encoding="utf-8") as handle:
         handle.write(" ".join(cmd) + "\n\n")
         handle.flush()
-        print(f"启动 LTX CLI（日志 {log.name}）…", flush=True)
+        mode = "a2v" if audio is not None else "i2v"
+        print(f"启动 LTX CLI（{mode}，日志 {log.name}）…", flush=True)
         proc = subprocess.run(cmd, stdout=handle, stderr=subprocess.STDOUT, env=env)
     return proc.returncode
 
@@ -231,7 +257,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
     clips = out / "clips"
     clips.mkdir(parents=True, exist_ok=True)
     failures = 0
-    width, height, frames = settings.video_width, settings.video_height, settings.video_frames
+    width, height = settings.video_width, settings.video_height
     model = _resolve_model_arg(settings.video_model, label="LTX 权重")
     gemma = _resolve_model_arg(DEFAULT_GEMMA, label="Gemma")
     offline = Path(model).exists() and Path(gemma).exists()
@@ -248,8 +274,20 @@ def cmd_videos(args: argparse.Namespace) -> None:
             failures += 1
             print(f"跳过 {shot['id']}：没有静帧 {image}")
             continue
+        line = str(shot.get("dialogue") or "").strip()
+        voice = out / "audio" / "voice" / f"{shot['id']}.wav"
+        audio_for_ltx: Path | None = None
+        frames = _shot_frames(shot, settings)
+        if line:
+            if not voice.exists():
+                shot["video_error"] = "有对白但缺少 wav，请先跑 audio"
+                failures += 1
+                print(f"跳过 {shot['id']}：请先 ./scripts/run.sh audio --out {out}")
+                continue
+            audio_for_ltx = _prepare_a2v_audio(out, shot, voice, frames, settings.video_fps)
+        mode = "a2v+对白" if audio_for_ltx else "i2v 空镜"
         print(
-            f"生成镜头 {shot['id']}：{width}x{height}，{frames} 帧。"
+            f"生成镜头 {shot['id']}（{mode}）：{width}x{height}，{frames} 帧。"
             "这一步在 16GB 的 M4 Air 上通常要几分钟到几十分钟，机器会发热。"
         )
         _wait_memory_headroom()
@@ -265,6 +303,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
             model=model,
             gemma=gemma,
             offline=offline,
+            audio=audio_for_ltx,
         )
         # 被系统杀掉（负退出码）或 Gemma/connector 峰值 OOM：等内存后重试一次
         if code != 0 and (code < 0 or not dest.exists()):
@@ -285,12 +324,16 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 model=model,
                 gemma=gemma,
                 offline=offline,
+                audio=audio_for_ltx,
             )
-        if code < 0 and (width, height, frames) != (320, 576, snap_frames(25)):
+        small = (320, snap(576, 64), snap_frames(25))
+        if code < 0 and (width, height, frames) != small:
             print(f"{shot['id']} 仍被系统杀掉，改成 320x576、25 帧再试一次。")
-            width, height, frames = 320, snap(576, 64), snap_frames(25)
+            width, height, frames = small
             if dest.exists():
                 dest.unlink()
+            if audio_for_ltx is not None and voice.exists():
+                audio_for_ltx = _prepare_a2v_audio(out, shot, voice, frames, settings.video_fps)
             code = _run_once(
                 settings,
                 shot,
@@ -303,6 +346,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 model=model,
                 gemma=gemma,
                 offline=offline,
+                audio=audio_for_ltx,
             )
         if code != 0 or not dest.exists():
             shot["video_error"] = f"退出码 {code}，详见 logs/{shot['id']}.log"
@@ -311,6 +355,8 @@ def cmd_videos(args: argparse.Namespace) -> None:
             continue
         shot.pop("video_error", None)
         shot["video"] = str(dest)
+        shot["video_frames"] = frames
+        shot["video_mode"] = "a2v" if audio_for_ltx is not None else "i2v"
         print(f"完成 {dest}")
     dump_json(story_path, story)
     if failures:

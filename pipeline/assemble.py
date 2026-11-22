@@ -149,10 +149,13 @@ def _mix_soundtrack(
     *,
     out: Path,
     total: float,
-    voice_cues: list[tuple[float, Path]],
+    voice_cues: list[tuple[float, Path, float]],
     music: Path | None,
 ) -> Path:
-    """把对白按时间轴铺开，配乐循环；有对白时把配乐压低，输出 stereo aac。"""
+    """把对白按时间轴铺开，配乐循环；有对白时把配乐压低，输出 stereo aac。
+
+    voice_cues: (start_s, wav, max_duration_s) — max_duration 对齐镜头长度，避免串镜。
+    """
     mixed = out / "soundtrack.m4a"
     inputs: list[str] = [
         "-f",
@@ -164,11 +167,13 @@ def _mix_soundtrack(
     ]
     filters: list[str] = []
     voice_labels: list[str] = []
-    for index, (start, wav) in enumerate(voice_cues):
+    for index, (start, wav, max_dur) in enumerate(voice_cues):
         inputs += ["-i", str(wav)]
         delay_ms = max(0, int(round(start * 1000)))
+        trim = max(0.05, float(max_dur))
         filters.append(
             f"[{index + 1}:a]aformat=sample_rates=48000:channel_layouts=mono,"
+            f"atrim=0:{trim:.3f},asetpts=PTS-STARTPTS,"
             f"volume={settings.voice_volume},adelay={delay_ms}|{delay_ms},"
             f"aformat=channel_layouts=stereo[v{index}]"
         )
@@ -229,7 +234,7 @@ def cmd_assemble(args: argparse.Namespace) -> None:
     normalized = []
     cursor = 0.0
     cues = []
-    voice_cues: list[tuple[float, Path]] = []
+    voice_cues: list[tuple[float, Path, float]] = []
     for shot, path in clips:
         dest = normal_dir / f"{shot['id']}.mp4"
         print(f"整理 {shot['id']}")
@@ -242,7 +247,8 @@ def cmd_assemble(args: argparse.Namespace) -> None:
             cues.append((cursor, cursor + duration, text))
             voice = out / "audio" / "voice" / f"{shot['id']}.wav"
             if voice.exists():
-                voice_cues.append((cursor, voice))
+                # 成片仍用 TTS 原轨（A2V mp4 里的音会被 normalize 剥掉）；裁到本镜时长
+                voice_cues.append((cursor, voice, duration))
             else:
                 print(f"警告：{shot['id']} 有对白但没有旁白文件，请先跑 audio 阶段")
         cursor += duration

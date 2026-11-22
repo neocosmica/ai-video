@@ -20,6 +20,8 @@ class Settings:
     video_width: int = 384
     video_height: int = 640
     video_frames: int = 49
+    video_frames_min: int = 25
+    video_frames_max: int = 97
     video_fps: int = 24
     video_low_ram: bool = True
     max_shots: int = 8
@@ -48,6 +50,13 @@ class Settings:
         settings.video_width = snap(settings.video_width, 64)
         settings.video_height = snap(settings.video_height, 64)
         settings.video_frames = snap_frames(settings.video_frames)
+        settings.video_frames_min = snap_frames(settings.video_frames_min)
+        settings.video_frames_max = snap_frames(settings.video_frames_max)
+        if settings.video_frames_min > settings.video_frames_max:
+            settings.video_frames_min, settings.video_frames_max = (
+                settings.video_frames_max,
+                settings.video_frames_min,
+            )
         settings.ltx_dir = Path(settings.ltx_dir)
         settings.musicgen_dir = Path(settings.musicgen_dir)
         settings.ffmpeg = Path(settings.ffmpeg)
