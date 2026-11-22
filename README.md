@@ -26,11 +26,15 @@
 
 ## 国内镜像
 
-`scripts/env.sh` 默认：
+`scripts/env.sh` / `setup.sh` **一律走国内源，不回退海外官方地址**：
 
 - Hugging Face → `https://hf-mirror.com`（并禁用 XET，避免海外 CDN）
 - PyPI / uv → 清华 `pypi.tuna.tsinghua.edu.cn`
-- GitHub 克隆 → `ghfast.top` 前缀，**仅当仓内 `vendor/` 缺失时回退使用**
+- uv 托管 Python → npmmirror `cdn.npmmirror.com/binaries/python-build-standalone`
+- GitHub 克隆 → `ghfast.top` / `mirror.ghproxy.com` / `ghproxy.net`（按序尝试；**仅当仓内 `vendor/` 缺失时**）
+- ffmpeg 缺省用仓内 `tools/`；若缺失则经清华 Homebrew 镜像安装
+
+Python：**优先本机已有 3.14 / 3.13 / 3.12 / 3.11**（`requires-python >=3.11`，3.14 可用）；没有才从 npmmirror 安装。可用 `NOVEL_VIDEO_PYTHON=3.14` 强制指定。
 
 ## 新机器部署
 
@@ -43,10 +47,10 @@ chmod +x scripts/setup.sh scripts/run.sh scripts/env.sh
 
 `setup.sh` 会：
 
-- 使用仓内 `vendor/ltx-2-mlx`、`vendor/musicgen-mlx`、`tools/ffmpeg`（缺了才回退下载/克隆）
+- 使用仓内 `vendor/ltx-2-mlx`、`vendor/musicgen-mlx`、`tools/ffmpeg`（缺了才从国内镜像下载/克隆）
 - 把主 / LTX / MusicGen 的 `.venv` 装到 `~/Library/Caches/novel-video/venvs/`，项目里只留符号链接
 - 确认 LTX 已带 Gemma/connector **分阶段加载**改动（16GB 机器必需）
-- 预拉模型权重到本机 Hugging Face 缓存（权重不入库）
+- 预拉模型权重到本机 Hugging Face 缓存（权重不入库，走 hf-mirror）
 
 异常时先看 `./scripts/run.sh doctor`：确认三个 `.venv` 都指向 Caches、Metal 可用、LTX 补丁为「已打」。
 
