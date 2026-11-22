@@ -1,6 +1,8 @@
-# 本机虚拟环境与安装产物
+# 本机虚拟环境与安装产物（含指向 Caches 的符号链接）
+.venv
 .venv/
 .venv-*/
+**/.venv
 **/.venv/
 **/.venv-*/
 **/__pycache__/
@@ -37,8 +39,3 @@ huggingface/
 *.ot
 *.npz.index
 *.npz.data-*
-
-# venv 符号链接（文件或目录）
-.venv
-**/.venv
-**/.venv-*/
