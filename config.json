@@ -1,0 +1,20 @@
+{
+  "image_model": "flux2-klein-4b",
+  "image_quantize": 4,
+  "image_steps": 4,
+  "image_width": 576,
+  "image_height": 1024,
+  "portrait_width": 768,
+  "portrait_height": 1024,
+  "video_model": "dgrauet/ltx-2.3-mlx-q4",
+  "video_width": 384,
+  "video_height": 640,
+  "video_frames": 49,
+  "video_fps": 24,
+  "video_low_ram": true,
+  "max_shots": 8,
+  "tts_model": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit",
+  "music_model": "facebook/musicgen-small",
+  "voice_volume": 1.35,
+  "music_volume": 0.22
+}

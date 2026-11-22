@@ -1,0 +1,26 @@
+---
+description: 小说到竖屏短剧的 agentic 分镜与本机生成边界
+alwaysApply: true
+---
+
+# 小说 → 短剧
+
+分镜由你（Cursor Agent）直接写 `output/<片名>/storyboard.json`，不要下载或调用本机聊天 LLM / VLM。
+
+本机只跑：
+- 文生图：FLUX.2 Klein 4B 4-bit（mflux）
+- 文+图生视频：LTX-2.3 int4 distilled（Gemma 3 12B 4-bit 仅作提示词编码器）
+- 对白：Qwen3-TTS 1.7B CustomVoice 8-bit（按人物性别选音色，按镜头 emotion 写 instruct）
+- 配乐：MusicGen small（读 storyboard 的英文 `music_prompt`）
+
+工作流：
+1. 读小说，写/改 `storyboard.json`
+2. 人物填 `gender`（female/male）和可选 `voice`（女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric）
+3. 有对白的镜头填 `emotion`（calm/warm/sad/tense/bitter/nostalgic 等）
+4. 顶层写英文 `music_prompt`（无人声器乐）
+5. `./scripts/run.sh screenplay --out output/<片名>`
+6. `./scripts/run.sh run --from images --out output/<片名>`（含 audio 混音）
+
+不要重新拉取聊天用 Qwen。外貌只取原文可见特征；竖屏；每镜约 2 秒；`motion_prompt` 必须英文。
+
+下载一律走国内镜像（`scripts/env.sh`）：HF→hf-mirror.com 且禁用 XET；PyPI→清华；GitHub→ghfast.top。不要改回官方源傻等。
