@@ -76,6 +76,9 @@ def _use_step_bar(desc: str) -> None:
             self._time_steps = tqdm(
                 range(self.init_time_step, self.num_inference_steps),
                 desc=label,
+                miniters=1,
+                mininterval=0.2,
+                file=sys.stderr,
             )
         return self._time_steps
 

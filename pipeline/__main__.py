@@ -135,6 +135,19 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     assert STAGES == ("screenplay", "images", "audio", "videos", "assemble"), STAGES
     assert frames_for_duration(2.0, 24, min_frames=25, max_frames=97) == 49
     assert frames_for_duration(0.2, 24, min_frames=25, max_frames=97) == 25
+    import time
+
+    from pipeline.progress import _ProgressRelay
+
+    relay = _ProgressRelay()
+    assert relay.feed("开始\n".encode()) == "开始\n".encode()
+    assert relay.feed("\rDenoising:   0% 0/8".encode()) == b""
+    shown = relay.poll()
+    assert b"0%" in shown and shown.endswith(b"\n"), shown
+    assert relay.feed("\rDenoising:  50% 4/8".encode()) == b""
+    time.sleep(0.3)
+    nxt = relay.poll()
+    assert b"50%" in nxt, nxt
     with tempfile.TemporaryDirectory() as tmp:
         dest = Path(tmp) / "storyboard.json"
         install_storyboard(tmp, str(ROOT / "input" / "demo_storyboard.json"))
@@ -215,6 +228,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    from pipeline.progress import install_live_bars
+
+    install_live_bars()
     parser = build_parser()
     args = parser.parse_args()
     args.func(args)

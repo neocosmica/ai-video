@@ -143,9 +143,14 @@ def _nag_for_states(nag: NAGGuidance | None, audio_state: LatentState | None) ->
 
 
 def _step_timed(estimator: StepEstimator, step_idx: int, video_x: mx.array, audio_x: mx.array | None) -> None:
-    """Feed one completed step to the estimator, syncing only for the step it times."""
-    if estimator.wants_sync:
-        mx.eval(video_x) if audio_x is None else mx.eval(video_x, audio_x)
+    """Wait until this step's GPU work finishes, then update the estimator.
+
+    The tqdm bar advances only after the loop body returns. ``mx.async_eval``
+    schedules the step and returns immediately, so without a sync here the bar
+    races to 100% while the device is still computing. Syncing every step also
+    drops the graph before the next iteration.
+    """
+    mx.eval(video_x) if audio_x is None else mx.eval(video_x, audio_x)
     estimator.step_done(step_idx)
 
 
