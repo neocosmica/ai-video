@@ -1,0 +1,183 @@
+{
+  "title": "第七次上传",
+  "style": "硬科幻短剧，火星火卫二穹顶基地内景，冷白舱内灯与穹顶外橙红沙尘对比，金属质感，浅景深，真实皮肤质感，人脸清晰对焦，电影感竖屏构图",
+  "music_prompt": "Cold ambient sci-fi underscore, deep sub bass drone, sparse metallic pulses, distant wind against a dome, faint analog radio static, lonely and bittersweet, slow build, instrumental only, no vocals, cinematic",
+  "characters": [
+    {
+      "id": "chenshu",
+      "name": "陈述",
+      "gender": "male",
+      "voice": "Uncle_Fu",
+      "appearance": "三十岁上下的男性，黑色短发，肤色偏白，深灰色基地工装，神情疲惫而克制"
+    },
+    {
+      "id": "suli",
+      "name": "苏黎",
+      "gender": "female",
+      "voice": "Vivian",
+      "appearance": "二十多岁的女性，黑色长发束在脑后，脸很干净苍白，穿灰色防护服，仿生载体的虹膜偏浅灰、在冷光下不会收缩"
+    }
+  ],
+  "shots": [
+    {
+      "id": "s001",
+      "characters": ["chenshu"],
+      "location": "火卫二穹顶基地第七区观察窗前",
+      "image_prompt": "中景，陈述侧身站在弧形观察窗前，一只手刚离开墙上的除霜器面板，窗外橙红沙尘翻涌，远处塔灯被沙尘磨成一团模糊的橙色光斑，一辆结满薄霜的运输车停在气闸前，车壳像刚从冰里捞出来，冷白舱内光勾出他的侧脸轮廓",
+      "motion_prompt": "Locked-off camera, he lowers his hand from the panel and stares out through the frosted window, sand drifts slowly across the glass, no zoom no dolly",
+      "speaker": "",
+      "dialogue": "",
+      "emotion": "calm"
+    },
+    {
+      "id": "s002",
+      "characters": ["suli"],
+      "location": "穹顶基地气闸内侧",
+      "image_prompt": "近景胸像，苏黎站在气闸内侧，双手把灰色防护服的头盔面罩摘下抱在胸前，白色泄压蒸汽还贴着她的肩膀散开，防护服表面挂着未化的薄霜，脸很干净苍白，冷白灯从顶上落下，眼神平静几乎没有起伏，背景气闸门缝透出一线橙红光",
+      "motion_prompt": "Locked-off camera, she lifts the helmet off and vapor drifts past her shoulders, subtle breathing motion only, no zoom no push-in",
+      "speaker": "",
+      "dialogue": "",
+      "emotion": "calm"
+    },
+    {
+      "id": "s003",
+      "characters": ["suli"],
+      "location": "第七区记忆读取台",
+      "image_prompt": "近景正面胸像，苏黎人脸清晰对焦，站在金属读取台前，右手两指把一枚小银色记忆芯片推过台面，芯片边缘的编号被反复擦过、磨得发亮，嘴唇微微张开正在说话，背景成排冷白柜体和橙红窗光",
+      "motion_prompt": "Locked-off camera, she pushes the small silver chip across the counter with two fingers while speaking, face stays sharp and centered, no zoom no focus rack",
+      "speaker": "苏黎",
+      "dialogue": "这是第七次了。",
+      "emotion": "calm"
+    },
+    {
+      "id": "s004",
+      "characters": ["chenshu", "suli"],
+      "location": "第七区记忆读取台",
+      "image_prompt": "大特写，台面上的银色记忆芯片，芯片边缘一串被反复擦拭的编号磨得发亮反光，陈述的指尖停在芯片上方没有立刻去接，前景苏黎的手压在台面边缘，浅景深中只有芯片编号清晰，冷白顶灯斜切出金属高光",
+      "motion_prompt": "Locked-off camera, his fingertip hovers and does not pick the chip up, tiny shift of the chip catching the light, no zoom no dolly",
+      "speaker": "",
+      "dialogue": "",
+      "emotion": "tense"
+    },
+    {
+      "id": "s005",
+      "characters": ["chenshu"],
+      "location": "第七区记忆读取台屏幕前",
+      "image_prompt": "中近景，陈述侧身低头把芯片插进读卡槽，手指还停在槽口，他面前的老式读取屏亮起一段模糊影像：火星的暗红沙地、一台旧式收音机的旋钮、细密跳动的波形噪点，屏幕蓝光反映在他的下颌和手背上，舱内冷白灯被压暗",
+      "motion_prompt": "Locked-off camera, he slides the chip into the slot and the screen lights up with grainy red-sand footage and a radio waveform, faint flicker on the screen, no zoom no push-in",
+      "speaker": "",
+      "dialogue": "",
+      "emotion": "calm"
+    },
+    {
+      "id": "s006",
+      "characters": ["chenshu"],
+      "location": "第七区记忆读取台，读取屏前",
+      "image_prompt": "近景正面胸像，陈述人脸清晰对焦，头微微抬起，眼睛仍垂向屏幕，嘴唇张开正在发问，表情克制而警觉，屏幕蓝光从下方映在下颌，背景是模糊的红色沙地影像和跳动的波形",
+      "motion_prompt": "Locked-off camera, he glances up from the screen and asks the question with clear lip motion, tiny head lift, no zoom no dolly",
+      "speaker": "陈述",
+      "dialogue": "你确定要刷新记忆？",
+      "emotion": "tense"
+    },
+    {
+      "id": "s007",
+      "characters": ["suli"],
+      "location": "第七区记忆读取台",
+      "image_prompt": "近景胸像略带侧角度，苏黎人脸清晰对焦，双手撑在金属台面边缘微微前倾，嘴唇张开正在说话，眼睛直视对面，冷白灯在瞳孔里形成两道细窄反光，神情执拗",
+      "motion_prompt": "Locked-off camera, she leans slightly forward and speaks with clear lip motion, eyes fixed forward, no zoom no push-in",
+      "speaker": "苏黎",
+      "dialogue": "我要把它找回来。上传那天，我少拷了一段。",
+      "emotion": "tense"
+    },
+    {
+      "id": "s008",
+      "characters": ["suli"],
+      "location": "第七区记忆读取台",
+      "image_prompt": "大特写一只眼睛，苏黎在冷白灯下的浅灰虹膜纹理清晰、瞳孔边缘锐利，虹膜本身没有收缩却有一瞬极轻微的收缩，睫毛根根分明，眼角带着防护服压出的细红印，背景橙红窗光虚化成一片暖色，画面安静得像一次故障",
+      "motion_prompt": "Locked-off camera, extreme close-up of her eye, the pupil contracts a tiny fraction and holds, no zoom no push-in no focus rack",
+      "speaker": "",
+      "dialogue": "",
+      "emotion": "tense"
+    },
+    {
+      "id": "s009",
+      "characters": ["chenshu"],
+      "location": "第七区记忆读取台",
+      "image_prompt": "近景正面胸像，陈述人脸清晰对焦，抬起眼睛越过屏幕直视对面，嘴唇张开正在说话，表情冷硬而克制，屏幕的光停在他脸的一侧，冷白灯与橙红窗光在鼻梁上分成两半",
+      "motion_prompt": "Locked-off camera, he speaks quietly and holds a steady stare, minimal facial movement, no zoom no rack focus",
+      "speaker": "陈述",
+      "dialogue": "那是别人的记忆。你确定要偷别人记忆？",
+      "emotion": "tense"
+    },
+    {
+      "id": "s010",
+      "characters": [],
+      "location": "火卫二穹顶外，沙暴中的航线",
+      "image_prompt": "远景空镜，穹顶外漫天橙红沙暴，一艘小型补给船被风压推得偏离航道，船体轮廓在尘雾里发虚，尾焰在沙尘里拉出一道很淡的细线，远处穹顶的塔灯只剩一点模糊的橙色，画面底部露出穹顶金属骨架的一角",
+      "motion_prompt": "Locked-off camera, the supply ship drifts off its course through blowing sand, its exhaust trail thins and fades into the dust, no zoom no dolly",
+      "speaker": "",
+      "dialogue": "",
+      "emotion": "tense"
+    },
+    {
+      "id": "s011",
+      "characters": ["suli"],
+      "location": "第七区记忆读取台",
+      "image_prompt": "手部大特写，苏黎的手整个按在那枚银色记忆芯片上，指节因为用力泛白，指腹边缘有防护服手套压出的红痕，芯片只剩一道银边露在掌心外，台面金属映出模糊的橙红光，背景她的身体虚成一片灰",
+      "motion_prompt": "Locked-off camera, her hand presses down on the small chip, knuckles whitening, fingers tremble very slightly, no zoom no push-in",
+      "speaker": "",
+      "dialogue": "",
+      "emotion": "sad"
+    },
+    {
+      "id": "s012",
+      "characters": ["suli"],
+      "location": "第七区记忆读取台",
+      "image_prompt": "近景侧脸，苏黎脸颊清晰对焦，一只手仍按在芯片上，微微低头又抬眼，嘴唇张开正在说话，眼眶发红但没有泪，身后观察窗外橙红沙尘贴着玻璃掠过，冷白顶灯在她侧脸压出一道硬边",
+      "motion_prompt": "Locked-off camera, she speaks with her hand still on the chip, faint tremor in her jaw and fingers, no zoom no dolly",
+      "speaker": "苏黎",
+      "dialogue": "他是我父亲。他死在地球那天，我在火星。",
+      "emotion": "sad"
+    },
+    {
+      "id": "s013",
+      "characters": ["suli"],
+      "location": "第七区记忆读取台",
+      "image_prompt": "特写，苏黎正面胸像偏近，视线越过台面望向读取屏上那段噪点影像，嘴唇张开正在说最后半句，眼神里带着几乎称得上恳求的固执，冷白灯从侧上方切进瞳孔，背景红沙影像虚化成一片暗红",
+      "motion_prompt": "Locked-off camera, she speaks softly while looking past the counter at the grainy screen, one slow blink, no zoom no push-in",
+      "speaker": "苏黎",
+      "dialogue": "我只想再看一次他唱歌的样子。",
+      "emotion": "nostalgic"
+    },
+    {
+      "id": "s014",
+      "characters": ["chenshu"],
+      "location": "第七区记忆读取台",
+      "image_prompt": "中近景，陈述低头把芯片从读卡槽里退出来，两指捏着芯片边缘轻轻放回台面，读取屏的光随之暗了一格，他的手停在台面上没有收回，背景冷白柜体和橙红窗光在他肩后分开",
+      "motion_prompt": "Locked-off camera, he eases the chip out of the slot and sets it back on the counter, his hand stays resting there, no zoom no dolly",
+      "speaker": "",
+      "dialogue": "",
+      "emotion": "calm"
+    },
+    {
+      "id": "s015",
+      "characters": ["chenshu"],
+      "location": "第七区记忆读取台",
+      "image_prompt": "面部特写，陈述静静看着对面的她，很久没有开口，屏幕的冷光斜斜落在他半张脸上，另一半沉在暗处，像一场不属于火星的日落，眼底有疲惫也有松动，嘴唇闭合",
+      "motion_prompt": "Locked-off camera, he holds her gaze in silence, a slow breath, the screen glow flickers faintly on his cheek, no zoom no push-in",
+      "speaker": "",
+      "dialogue": "",
+      "emotion": "calm"
+    },
+    {
+      "id": "s016",
+      "characters": ["suli"],
+      "location": "第七区记忆读取台",
+      "image_prompt": "眼部大特写略带正面，苏黎抬起眼直视镜头，浅灰瞳孔里碎着两颗冷白灯的小太阳，睫毛清晰，前景虚化处是台面上的银色芯片，背景橙红沙尘缓慢流动，神情由脆弱转为决绝，嘴唇微张正在说最后一句",
+      "motion_prompt": "Locked-off camera, she lifts her eyes to the lens and speaks the final line, extremely subtle head motion, no zoom no push-in",
+      "speaker": "苏黎",
+      "dialogue": "那你就照着我说的，把它重新写一遍吧。",
+      "emotion": "bitter"
+    }
+  ]
+}
