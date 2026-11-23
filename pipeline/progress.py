@@ -260,15 +260,27 @@ def run_tee(
     progress: str | None = None,
     plan: Sequence[int] | None = None,
     desc: str | None = None,
+    on_line=None,
+    on_start=None,
 ) -> int:
     """运行命令。完整输出进 log；若给了 progress，终端只显示一条合并进度条。
 
     ``plan``：各段步数（分母一开始就固定）；``desc``：只统计这种 tqdm。
+    ``on_start(pid)``：子进程起来后回调一次；``on_line(line)``：每收到一行
+    去掉 ANSI 后的完整行回调一次（webui 用它推进阶段游标）。
     """
     log.parent.mkdir(parents=True, exist_ok=True)
     child_env = os.environ.copy() if env is None else dict(env)
     child_env.setdefault("PYTHONUNBUFFERED", "1")
-    master, slave = pty.openpty()
+    use_pty = hasattr(os, "openpty") and sys.platform != "win32"
+    if use_pty:
+        try:
+            master, slave = pty.openpty()
+        except OSError:
+            # 某些容器/受限环境没有可用 PTY；退回普通管道
+            use_pty = False
+    if not use_pty:
+        return _run_tee_plain(cmd, log=log, env=child_env, cwd=cwd, on_line=on_line, on_start=on_start)
     try:
         _prepare_pty(slave)
         proc = subprocess.Popen(
@@ -278,12 +290,18 @@ def run_tee(
             stderr=slave,
             env=child_env,
             cwd=str(cwd) if cwd is not None else None,
+            start_new_session=True,
             close_fds=True,
         )
     except Exception:
         os.close(slave)
         os.close(master)
         raise
+    if on_start is not None:
+        try:
+            on_start(proc.pid)
+        except Exception:
+            pass
     os.close(slave)
     shot: _ShotBar | None = _ShotBar(progress, plan=plan, desc=desc) if progress else None
     try:
@@ -294,7 +312,7 @@ def run_tee(
             header += " ".join(cmd) + "\n\n"
             handle.write(header.encode("utf-8", errors="replace"))
             handle.flush()
-            _pump(master, proc, handle, shot=shot)
+            _pump(master, proc, handle, shot=shot, on_line=on_line)
     finally:
         if proc.poll() is None:
             proc.terminate()
@@ -306,6 +324,59 @@ def run_tee(
         if shot is not None:
             shot.close(success=proc.returncode == 0)
         os.close(master)
+    return proc.returncode if proc.returncode is not None else proc.wait()
+
+
+def _run_tee_plain(
+    cmd: list[str],
+    *,
+    log: Path,
+    env: dict[str, str],
+    cwd: Path | None = None,
+    on_line=None,
+    on_start=None,
+) -> int:
+    """无 PTY 环境（受限容器）的退化版：不画进度条，只落日志 + 回调行。"""
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        cwd=str(cwd) if cwd is not None else None,
+        start_new_session=True,
+    )
+    if on_start is not None:
+        try:
+            on_start(proc.pid)
+        except Exception:
+            pass
+    relay = _ProgressRelay()
+    with log.open("wb") as handle:
+        header = ""
+        if cwd is not None:
+            header += f"cwd={cwd}\n"
+        header += " ".join(cmd) + "\n\n"
+        handle.write(header.encode("utf-8", errors="replace"))
+        handle.flush()
+        assert proc.stdout is not None
+        for raw in iter(lambda: proc.stdout.readline(), b""):
+            handle.write(raw)
+            handle.flush()
+            for line in relay.feed(raw):
+                if on_line is not None:
+                    try:
+                        on_line(line)
+                    except Exception:
+                        pass
+                _emit_lines([line])
+        for line in relay.finish():
+            if on_line is not None:
+                try:
+                    on_line(line)
+                except Exception:
+                    pass
+    proc.wait()
     return proc.returncode if proc.returncode is not None else proc.wait()
 
 
@@ -336,29 +407,29 @@ def _prepare_pty(slave: int) -> None:
         return
 
 
-def _pump(master: int, proc: subprocess.Popen, handle, *, shot: _ShotBar | None) -> None:
+def _pump(master: int, proc: subprocess.Popen, handle, *, shot: _ShotBar | None, on_line=None) -> None:
     relay = _ProgressRelay()
     while True:
         ready, _, _ = select.select([master], [], [], 0.2)
         if not ready:
             if proc.poll() is not None:
-                _drain(master, relay, handle, shot=shot)
+                _drain(master, relay, handle, shot=shot, on_line=on_line)
                 return
             continue
         try:
             chunk = os.read(master, 65536)
         except OSError:
             if proc.poll() is not None:
-                _finish(relay, handle, shot=shot)
+                _finish(relay, handle, shot=shot, on_line=on_line)
                 return
             continue
         if not chunk:
-            _finish(relay, handle, shot=shot)
+            _finish(relay, handle, shot=shot, on_line=on_line)
             return
-        _consume(chunk, relay, handle, shot=shot)
+        _consume(chunk, relay, handle, shot=shot, on_line=on_line)
 
 
-def _drain(master: int, relay: _ProgressRelay, handle, *, shot: _ShotBar | None) -> None:
+def _drain(master: int, relay: _ProgressRelay, handle, *, shot: _ShotBar | None, on_line=None) -> None:
     while True:
         ready, _, _ = select.select([master], [], [], 0)
         if not ready:
@@ -369,14 +440,22 @@ def _drain(master: int, relay: _ProgressRelay, handle, *, shot: _ShotBar | None)
             break
         if not chunk:
             break
-        _consume(chunk, relay, handle, shot=shot)
-    _finish(relay, handle, shot=shot)
+        _consume(chunk, relay, handle, shot=shot, on_line=on_line)
+    _finish(relay, handle, shot=shot, on_line=on_line)
 
 
-def _consume(chunk: bytes, relay: _ProgressRelay, handle, *, shot: _ShotBar | None) -> None:
+def _consume(chunk: bytes, relay: _ProgressRelay, handle, *, shot: _ShotBar | None, on_line=None) -> None:
     handle.write(chunk)
     handle.flush()
     lines = relay.feed(chunk)
+    if not lines:
+        return
+    if on_line is not None:
+        try:
+            for line in lines:
+                on_line(line)
+        except Exception:
+            pass
     if shot is not None:
         for line in lines:
             shot.handle(line)
@@ -384,8 +463,16 @@ def _consume(chunk: bytes, relay: _ProgressRelay, handle, *, shot: _ShotBar | No
     _emit_lines(lines)
 
 
-def _finish(relay: _ProgressRelay, handle, *, shot: _ShotBar | None) -> None:
+def _finish(relay: _ProgressRelay, handle, *, shot: _ShotBar | None, on_line=None) -> None:
     lines = relay.finish()
+    if not lines:
+        return
+    if on_line is not None:
+        try:
+            for line in lines:
+                on_line(line)
+        except Exception:
+            pass
     if shot is not None:
         for line in lines:
             shot.handle(line)

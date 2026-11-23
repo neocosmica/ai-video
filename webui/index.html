@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小说 → 竖屏短剧 · 控制台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>📖 小说 → 竖屏短剧</h1>
+  <span class="sub">本地控制台 · 图像 / 配音 / 视频 / 配乐 全在本机算</span>
+  <span id="conn" class="conn">● 连接中…</span>
+</header>
+
+<main class="layout">
+  <!-- 左列：新建任务 -->
+  <section class="col" id="col-new">
+    <div class="card">
+      <h2>① 填写小说片段</h2>
+      <div class="row">
+        <label>片名</label>
+        <input id="title" placeholder="例：雨夜重逢" />
+      </div>
+      <div class="row">
+        <label>小说文件</label>
+        <div class="fileline">
+          <input id="novel-path" list="novel-list" placeholder="input/xxx_novel.txt" />
+          <button id="novel-load" class="ghost">载入</button>
+          <datalist id="novel-list"></datalist>
+        </div>
+      </div>
+      <div class="row">
+        <label>或直接粘贴片段 <span class="hint">（保存为上面的文件）</span></label>
+        <textarea id="novel-text" rows="9" placeholder="把小说片段粘到这里；引号台词会原样进入对白。&#10;留空则只使用上面已载入的文件。"></textarea>
+      </div>
+      <div class="row split">
+        <label>分镜文件（可选）</label>
+        <div class="fileline">
+          <input id="storyboard-path" list="sb-list" placeholder="input/xxx_storyboard.json" />
+          <button id="storyboard-edit" class="ghost">打开编辑器</button>
+          <datalist id="sb-list"></datalist>
+        </div>
+      </div>
+      <div class="row">
+        <label>输出目录</label>
+        <input id="out-dir" placeholder="output/xxx" />
+      </div>
+      <div class="row">
+        <label>执行阶段</label>
+        <div class="stages" id="stage-picks"></div>
+      </div>
+      <div class="row inline">
+        <label class="check"><input type="checkbox" id="force"> 强制重做已有产物（--force）</label>
+        <label class="check">只重做镜头 <input id="only-shots" placeholder="s003,s004 留空=全部" style="width:150px"/></label>
+      </div>
+      <div class="actions">
+        <button id="start-btn" class="primary">🚀 启动任务</button>
+        <span id="budget-info" class="hint"></span>
+      </div>
+      <div id="start-error" class="error" hidden></div>
+    </div>
+
+    <div class="card" id="sb-editor-card" hidden>
+      <h2>分镜编辑器 <span id="sb-path-label" class="mono hint"></span></h2>
+      <div class="sb-toolbar">
+        <button id="sb-save" class="primary">保存</button>
+        <button id="sb-validate" class="ghost">硬校验（--strict）</button>
+        <button id="sb-close" class="ghost">关闭</button>
+        <span id="sb-msg" class="hint"></span>
+      </div>
+      <div id="sb-summary" class="sb-summary"></div>
+      <div id="sb-shots" class="sb-shots"></div>
+    </div>
+  </section>
+
+  <!-- 右列：任务与进度 -->
+  <section class="col" id="col-tasks">
+    <div class="card">
+      <h2>② 任务与进度</h2>
+      <div id="task-list" class="task-list"><div class="empty">还没有任务。左侧启动一个。</div></div>
+    </div>
+    <div class="card" id="task-detail-card" hidden>
+      <h2 id="task-detail-title">任务</h2>
+      <div class="overall">
+        <div class="overall-bar"><div id="overall-fill" class="overall-fill"></div></div>
+        <span id="overall-pct" class="mono">0%</span>
+        <span id="overall-stage" class="hint"></span>
+      </div>
+      <div class="stage-track" id="stage-track"></div>
+      <div id="live-items" class="live-items"></div>
+      <div class="actions">
+        <button id="task-stop" class="danger">⏹ 停止</button>
+        <button id="task-rerun-failed" class="ghost">↻ 重跑失败阶段</button>
+        <span id="task-meta" class="hint"></span>
+      </div>
+      <pre id="log" class="log"></pre>
+    </div>
+    <div class="card" id="shots-card" hidden>
+      <h2>③ 镜头产物 <span id="shots-out-label" class="mono hint"></span></h2>
+      <div class="actions" style="margin:0 0 10px">
+        <label class="check"><input type="checkbox" id="auto-refresh" checked> 自动刷新（5s）</label>
+        <span id="final-badge" class="badge" hidden>🎬 final.mp4 已生成</span>
+      </div>
+      <div id="shots-grid" class="shots-grid"></div>
+    </div>
+  </section>
+</main>
+
+<template id="shot-card-tpl">
+  <div class="shot-card">
+    <div class="shot-preview"></div>
+    <div class="shot-body">
+      <div class="shot-id mono"></div>
+      <div class="shot-dialogue"></div>
+      <div class="shot-status"></div>
+      <div class="shot-progress"><div class="shot-progress-fill"></div></div>
+      <div class="shot-progress-text mono hint"></div>
+      <div class="shot-audio"></div>
+      <div class="shot-actions"></div>
+    </div>
+  </div>
+</template>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -24,6 +24,7 @@ from pipeline.screenplay import (
 )
 from pipeline.util import ROOT, chunk_novel, extract_json, resolve
 from pipeline.video import cmd_videos
+from pipeline.web import cmd_web
 
 
 def cmd_doctor(_: argparse.Namespace) -> None:
@@ -482,6 +483,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="检查本机环境")
     doctor.set_defaults(func=cmd_doctor)
+    web = sub.add_parser(
+        "web",
+        help="启动本地网页控制台：填小说、起任务、看进度、重跑单个阶段（不加载模型）",
+    )
+    web.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
+    web.add_argument("--port", type=int, default=8790, help="监听端口（默认 8790）")
+    web.set_defaults(func=cmd_web)
     test = sub.add_parser("selftest", help="检查不依赖模型的逻辑")
     test.set_defaults(func=cmd_selftest)
     return parser
