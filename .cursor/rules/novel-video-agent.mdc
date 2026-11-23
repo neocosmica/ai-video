@@ -14,27 +14,62 @@ alwaysApply: true
 - 视频：有对白 → LTX-2.3 int4 distilled **a2v**（静帧 + TTS wav）；空镜 → distilled I2V（`--no-audio`）。Gemma 3 12B 4-bit 仅作提示词编码器
 
 工作流：
-1. 读小说，写/改分镜：演示写 `input/demo_storyboard.json`；其它片子写 `output/<片名>/storyboard.json`
+0. **先拿单镜上限**（只读总内存配置，秒级；记下帧数 / 秒数 / 台词字数额度）：
+
+```bash
+./scripts/run.sh budget --out output/scifi
+```
+
+1. 读小说，写/改分镜：演示写 `input/demo_storyboard.json`；其它片子写 `input/<片名>_storyboard.json`（`produce --storyboard` 会拷进输出目录）。超额度对白按标点拆成相邻多镜，**不许删字压短**；每镜换景别/角度。
 2. 人物填 `gender`（female/male）和可选 `voice`（女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric）
 3. 有对白的镜头填 `emotion`（calm/warm/sad/tense/bitter/nostalgic 等）
 4. 顶层写英文 `music_prompt`（无人声器乐）
-5. **一条命令跑完全部剩余步骤**（校验 → 图 → 对白配乐 → A2V/I2V → 成片）：
+5. **硬校验**（超额度失败并给出可照抄的拆法）：
+
+```bash
+./scripts/run.sh screenplay --strict \
+ --storyboard input/scifi_storyboard.json \
+ --novel input/scifi_novel.txt \
+ --out output/scifi
+```
+
+逐镜打印「N 字 ≈ X 秒」。台词照小说写，语速语气由原文和 emotion 决定，
+镜头长度跟着配音走；`--strict` 只强迫把超长对白拆镜，不让你删字。
+
+6. 一条命令跑完全部剩余步骤（校验 → 图 → 对白 → A2V/I2V → 配乐 → 成片）：
 
 ```bash
 ./scripts/run.sh produce \
-  --storyboard input/demo_storyboard.json \
-  --novel input/novel.txt \
-  --out output/demo
+ --storyboard input/scifi_storyboard.json \
+ --novel input/scifi_novel.txt \
+ --out output/scifi
 ```
 
-分镜已在 `--out/storyboard.json` 时可省略 `--storyboard`。启动 `produce` 后不要再插手各阶段；失败再查 `doctor` / 日志。
+分镜已在 `--out/storyboard.json` 时可省略 `--storyboard`。输出目录已有分镜时默认不覆盖（audio 可能已自动拆过镜），要覆盖得加 `--force`。启动 `produce` 后不要再插手各阶段；失败再查 `doctor` / 日志。
 
-对白硬性规则：
-- 小说里所有「」/“”/"" 引号台词必须原样进入某个镜头的 `dialogue`，禁止漏句、合并丢掉后半句
+**启动后立刻把这条终端调到前台**（用户要能自己看进度，不用来问）。取终端记录目录里最新的、命令是 `produce` 的那份，读文件头拿 `pid:`，再 `open_resource` 打开 `vscode-terminal:/<pid>`：
+
+```bash
+cd "/Users/wangxinyu/.cursor/projects/Users-wangxinyu-ai/terminals" && ls -t *.txt | head -3
+```
+
+- 记录文件要跑起来几秒后才生成，稍等再找；找不到就让用户在终端列表里点标题含 produce 的那条。
+- 用户说「看进展 / 打开终端」时同样这么做，不要重起进程。
+
+汇报进展时读终端记录尾部 + `ls -lt output/<片名>/frames`，按 `screenplay → images → audio → videos → music → assemble` 判断当前阶段，并把最新静帧贴给用户。
+
+对白规则：
+- **台词按小说原样写。不要为了控制时长去改写、删字、压短台词，也不要在 emotion 里写「快说／放慢」之类的语速要求**——配音的语速和语气由原文内容和 `emotion` 决定，管线不会为了塞进镜头去调
+- 小说里所有「」/“”/"" 引号台词必须原样出现在某个镜头的 `dialogue`，允许跨相邻镜头连续覆盖，但禁止漏句、删字
 - 一句重要对白一个镜头；`speaker` 写中文名
 - 无对白的空镜可以 `dialogue: ""`，但不能因此挤掉原文台词
+- 一镜里塞了整段独白时，可以按语义在标点处分成相邻几个镜头，让运镜跟得上；每镜写独立的 `image_prompt` 和英文 `motion_prompt`（换景别或角度），否则几段视频像卡带。这是为了画面节奏，不是为了时长
 
-不要重新拉取聊天用 Qwen。外貌只取原文可见特征；竖屏；有对白镜时长跟 TTS（约 1–4 秒），空镜约 2 秒；`motion_prompt` 必须英文。
+镜头长度怎么定：audio 阶段先用 Qwen3-TTS 按原文合成（只念一次，语速自然），拿到实测时长后镜头跟着这个长度走。
+若一句超出单镜上限，会在句中停顿处自动切成相邻子镜头 `s007_p1/_p2`（同一次配音，语调连贯；复用 `frames/s007.png`，不重跑文生图），字幕跟着切点走；
+若一口气念完没有停顿可切，就**保留原样、让这一镜变长**。任何情况下都不会重念或改语速来迁就时长。
+
+不要重新拉取聊天用 Qwen。外貌只取原文可见特征；竖屏；有对白镜时长跟着 TTS；空镜约 2 秒；`motion_prompt` 必须英文。
 
 下载一律走国内镜像（`scripts/env.sh`）：HF→hf-mirror.com 且禁用 XET；PyPI→清华。`vendor/` 与 `tools/` 已入库，默认不从 GitHub 克隆；仅仓内缺失时才用 ghfast.top 回退。不要改回官方源傻等。
 
