@@ -16,7 +16,7 @@ const STAGE_LABELS = {
 
 const state = {
   tasks: [],
-  projects: { novels: [], storyboards: [], outputs: [] },
+  projects: { projects: [], novels: [], storyboards: [] },
   selectedTaskId: null,
   logOffset: 0,
   followLog: true,
@@ -27,6 +27,10 @@ const state = {
   sbPath: "",
   polling: null,
 };
+
+function projectName() {
+  return $("#project-name").value.trim();
+}
 
 // ---------------------------------------------------------------- utilities
 function esc(text) {
@@ -80,9 +84,11 @@ function setConn(on) {
 }
 
 function renderDatalists() {
-  $("#novel-list").innerHTML = state.projects.novels
+  $("#project-list").innerHTML = (state.projects.projects || [])
+    .map((p) => `<option value="${esc(p.name)}">${esc(p.path)}${p.legacy ? "（旧布局）" : ""}</option>`).join("");
+  $("#novel-list").innerHTML = (state.projects.novels || [])
     .map((n) => `<option value="${esc(n.path)}">${esc(n.name)}</option>`).join("");
-  $("#sb-list").innerHTML = state.projects.storyboards
+  $("#sb-list").innerHTML = (state.projects.storyboards || [])
     .map((n) => `<option value="${esc(n.path)}">${esc(n.name)}</option>`).join("");
 }
 
@@ -103,12 +109,22 @@ function renderStagePicks() {
   }
 }
 
-function syncOutDir() {
-  const name = $("#title").value.trim() || $("#novel-path").value.trim().replace(/^.*\//, "").replace(/\.txt$/, "").replace(/_novel$/, "");
-  if (name && !$("#out-dir").value.startsWith("output/")) {
-    $("#out-dir").value = `output/${name}`;
-  } else if (name) {
-    $("#out-dir").value = `output/${name}`;
+// 选项目 → 自动补 novel / storyboard / 项目文件夹；也支持从小说路径倒推项目名
+function syncProject() {
+  const novelVal = $("#novel-path").value.trim();
+  let name = projectName();
+  if (!name && novelVal) {
+    const m = novelVal.match(/^projects\/([^/]+)\//);
+    if (m) name = m[1];
+  }
+  if (name) {
+    if (!$("#project-name").value.trim()) $("#project-name").value = name;
+    const base = `projects/${name}`;
+    if (!$("#out-dir").value.trim() || $("#out-dir").value.startsWith("output/")) {
+      $("#out-dir").value = base;
+    }
+    if (!$("#novel-path").value.trim()) $("#novel-path").value = `${base}/novel.txt`;
+    if (!$("#storyboard-path").value.trim()) $("#storyboard-path").value = `${base}/storyboard.json`;
   }
   state.currentOut = $("#out-dir").value.trim();
 }
@@ -124,7 +140,7 @@ async function loadNovel() {
     });
     $("#novel-text").value = data.content;
     toast(`已载入 ${path}（${data.content.length} 字）`);
-    syncOutDir();
+    syncProject();
   } catch (err) {
     toast(`载入失败：${err.message}`, true);
   }
@@ -133,6 +149,7 @@ async function loadNovel() {
 async function startTask() {
   const payload = {
     title: $("#title").value.trim(),
+    name: projectName(),
     novel: $("#novel-path").value.trim(),
     novel_text: $("#novel-text").value.trim(),
     storyboard: $("#storyboard-path").value.trim(),
@@ -141,6 +158,10 @@ async function startTask() {
     only: $("#only-shots").value.trim(),
     force: $("#force").checked,
   };
+  if (!payload.name && !payload.out) {
+    toast("先填项目名（或项目文件夹）", true);
+    return;
+  }
   if (!payload.novel && !payload.novel_text) {
     toast("请先载入小说或直接粘贴片段", true);
     return;
@@ -485,7 +506,7 @@ async function renderShots() {
   // 1) 拉产物清单
   let media = null;
   try {
-    // 只编码非路径分隔符，后端 safe_path 接受 output/xxx 形式
+    // 只编码非路径分隔符，后端 safe_path 接受 projects/xxx 形式
     media = await api(`/api/media?out=${out.split("/").map(encodeURIComponent).join("/")}`);
     mediaCache = media;
   } catch (err) {
@@ -670,7 +691,9 @@ async function openStoryboardEditor() {
   let path = $("#storyboard-path").value.trim();
   const out = $("#out-dir").value.trim() || state.currentOut;
   if (!path && out) path = `${out}/storyboard.json`;
-  if (!path) { toast("先填分镜文件路径或输出目录", true); return; }
+  const name = projectName() || (out ? out.split("/").pop() : "");
+  if (!path && name) path = `projects/${name}/storyboard.json`;
+  if (!path) { toast("先填项目名、分镜文件路径或项目文件夹", true); return; }
   let sb;
   try {
     const data = await api("/api/storyboard/read", {
@@ -682,7 +705,7 @@ async function openStoryboardEditor() {
   } catch (err) {
     // 新建一个空骨架
     sb = {
-      title: $("#title").value.trim() || "新片",
+      title: $("#title").value.trim() || name || "新片",
       style: "写实华语短剧，自然肤色，电影感光线，浅景深",
       music_prompt: "English instrumental BGM, no vocals",
       characters: [],
@@ -829,8 +852,13 @@ async function loadBudget() {
 }
 
 function bind() {
-  $("#title").addEventListener("input", syncOutDir);
-  $("#novel-path").addEventListener("change", syncOutDir);
+  $("#project-name").addEventListener("input", syncProject);
+  $("#project-name").addEventListener("change", syncProject);
+  $("#title").addEventListener("input", () => {
+    // 片名没单独填时，顺手当作项目名
+    if (!projectName()) syncProject();
+  });
+  $("#novel-path").addEventListener("change", syncProject);
   $("#novel-load").addEventListener("click", loadNovel);
   $("#start-btn").addEventListener("click", startTask);
   $("#storyboard-edit").addEventListener("click", openStoryboardEditor);

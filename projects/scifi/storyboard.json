@@ -2,20 +2,28 @@
   "title": "第七次记忆",
   "style": "写实华语科幻短剧，火星基地冷色调，自然肤色，电影感光线，浅景深，竖屏构图",
   "music_prompt": "Melancholic ambient electronic instrumental, sparse piano notes over soft synth pads, lonely sci-fi atmosphere, slow tempo, no vocals",
+  "novel": "/Users/wangxinyu/ai视频/projects/scifi/novel.txt",
+  "max_shots": 16,
+  "dialogue_char_limit": 21,
+  "shot_max_seconds": 9.04,
+  "truncated": false,
+  "dialogue_lines": 7,
   "characters": [
     {
       "id": "chenshu",
       "name": "陈述",
       "gender": "male",
-      "voice": "Dylan",
-      "appearance": "成年男性，火卫二基地第七区记忆站技师，屏幕冷光下的脸"
+      "appearance": "成年男性，火卫二基地第七区记忆站技师，屏幕冷光下的脸",
+      "seed": 497654778,
+      "voice": "Dylan"
     },
     {
       "id": "suli",
       "name": "苏黎",
       "gender": "female",
-      "voice": "Serena",
-      "appearance": "成年女性，灰色防护服，摘下面罩后脸很干净"
+      "appearance": "成年女性，灰色防护服，摘下面罩后脸很干净",
+      "seed": 1055399806,
+      "voice": "Serena"
     }
   ],
   "shots": [
@@ -27,7 +35,8 @@
       "motion_prompt": "Slow cinematic push in toward the dome through swirling dust, fine particles drifting across the frame",
       "speaker": "",
       "dialogue": "",
-      "emotion": ""
+      "seed": 1287099486,
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s001.mp4"
     },
     {
       "id": "s002",
@@ -39,7 +48,8 @@
       "motion_prompt": "Hand switches off the defroster panel, then slow dolly toward the frosted transport vehicle outside the window",
       "speaker": "",
       "dialogue": "",
-      "emotion": ""
+      "seed": 632394976,
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s002.mp4"
     },
     {
       "id": "s003",
@@ -51,7 +61,8 @@
       "motion_prompt": "White steam disperses softly, she lifts off her helmet visor, subtle handheld sway",
       "speaker": "",
       "dialogue": "",
-      "emotion": ""
+      "seed": 2539154688,
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s003.mp4"
     },
     {
       "id": "s004",
@@ -64,7 +75,9 @@
       "motion_prompt": "Chip slides slowly across the metal tabletop toward camera, shallow depth of field",
       "speaker": "苏黎",
       "dialogue": "这是第七次了。",
-      "emotion": "calm"
+      "seed": 3926238191,
+      "emotion": "calm",
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s004.mp4"
     },
     {
       "id": "s005",
@@ -76,7 +89,8 @@
       "motion_prompt": "Macro shot, fingers turn the chip showing the worn serial number, insert it into the reader slot, screen glow rises",
       "speaker": "",
       "dialogue": "",
-      "emotion": ""
+      "seed": 3232855061,
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s005.mp4"
     },
     {
       "id": "s006",
@@ -86,7 +100,8 @@
       "motion_prompt": "Vintage screen flicker with static noise, red sand shimmering, humming silhouette swaying slightly, signal cuts off abruptly",
       "speaker": "",
       "dialogue": "",
-      "emotion": ""
+      "seed": 2106687798,
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s006.mp4"
     },
     {
       "id": "s007",
@@ -98,7 +113,9 @@
       "motion_prompt": "Slow turn of head toward her, subtle eye movement, ambient screen light shifting",
       "speaker": "陈述",
       "dialogue": "你确定要刷新记忆？",
-      "emotion": "calm"
+      "seed": 4002436690,
+      "emotion": "calm",
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s007.mp4"
     },
     {
       "id": "s008",
@@ -110,7 +127,9 @@
       "motion_prompt": "She holds a steady gaze, slight forward lean, camera slowly pushes in",
       "speaker": "苏黎",
       "dialogue": "我要把它找回来。上传那天，我少拷了一段。",
-      "emotion": "tense"
+      "seed": 4286724344,
+      "emotion": "tense",
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s008.mp4"
     },
     {
       "id": "s009",
@@ -122,7 +141,8 @@
       "motion_prompt": "Extreme close-up of her eye, pupil contracts subtly, cold light reflection trembling",
       "speaker": "",
       "dialogue": "",
-      "emotion": ""
+      "seed": 3185445137,
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s009.mp4"
     },
     {
       "id": "s010",
@@ -134,7 +154,9 @@
       "motion_prompt": "Static locked shot, his gaze fixed on her, faint screen flicker in background",
       "speaker": "陈述",
       "dialogue": "那是别人的记忆。你确定要偷别人记忆？",
-      "emotion": "tense"
+      "seed": 1995080999,
+      "emotion": "tense",
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s010.mp4"
     },
     {
       "id": "s011",
@@ -144,7 +166,8 @@
       "motion_prompt": "Supply ship drifting slowly off course, faint engine trail gradually fading through blowing dust",
       "speaker": "",
       "dialogue": "",
-      "emotion": ""
+      "seed": 1585693432,
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s011.mp4"
     },
     {
       "id": "s012",
@@ -156,7 +179,8 @@
       "motion_prompt": "Static close-up, fingers slowly tightening over the chip, knuckles whitening",
       "speaker": "",
       "dialogue": "",
-      "emotion": ""
+      "seed": 1129164090,
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s012.mp4"
     },
     {
       "id": "s013",
@@ -168,7 +192,9 @@
       "motion_prompt": "She looks down at the chip, slow subtle rise of chest before speaking, camera drifts closer",
       "speaker": "苏黎",
       "dialogue": "他是我父亲。他死在地球那天，我在火星。",
-      "emotion": "sad"
+      "seed": 1489261399,
+      "emotion": "sad",
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s013.mp4"
     },
     {
       "id": "s013b",
@@ -180,7 +206,9 @@
       "motion_prompt": "She slowly raises her eyes toward him, slight chin lift, holding back tears, gentle push in",
       "speaker": "苏黎",
       "dialogue": "我只想再看一次他唱歌的样子。",
-      "emotion": "sad"
+      "seed": 4173931689,
+      "emotion": "sad",
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s013b.mp4"
     },
     {
       "id": "s014",
@@ -192,7 +220,8 @@
       "motion_prompt": "He slides the chip back across the table, long silent stare, warm screen light flickering across his face",
       "speaker": "",
       "dialogue": "",
-      "emotion": ""
+      "seed": 4027645107,
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s014.mp4"
     },
     {
       "id": "s015",
@@ -204,7 +233,9 @@
       "motion_prompt": "She lifts her gaze into the cold light, reflections splitting into two tiny suns in her pupils, slow push in",
       "speaker": "苏黎",
       "dialogue": "那你就照着我说的，把它重新写一遍吧。",
-      "emotion": "bitter"
+      "seed": 826404659,
+      "emotion": "bitter",
+      "video": "/Users/wangxinyu/ai视频/output/scifi/clips/s015.mp4"
     }
   ]
 }

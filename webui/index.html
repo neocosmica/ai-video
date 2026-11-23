@@ -23,28 +23,35 @@
         <input id="title" placeholder="例：雨夜重逢" />
       </div>
       <div class="row">
-        <label>小说文件</label>
+        <label>项目 <span class="hint">（每个项目一个文件夹 projects/<片名>/）</span></label>
         <div class="fileline">
-          <input id="novel-path" list="novel-list" placeholder="input/xxx_novel.txt" />
+          <input id="project-name" list="project-list" placeholder="例：demo（已有项目可从下拉选）" />
+          <datalist id="project-list"></datalist>
+        </div>
+      </div>
+      <div class="row">
+        <label>小说文件 <span class="hint">（默认 <项目文件夹>/novel.txt）</span></label>
+        <div class="fileline">
+          <input id="novel-path" list="novel-list" placeholder="projects/xxx/novel.txt" />
           <button id="novel-load" class="ghost">载入</button>
           <datalist id="novel-list"></datalist>
         </div>
       </div>
       <div class="row">
-        <label>或直接粘贴片段 <span class="hint">（保存为上面的文件）</span></label>
+        <label>或直接粘贴片段 <span class="hint">（保存到项目文件夹 novel.txt）</span></label>
         <textarea id="novel-text" rows="9" placeholder="把小说片段粘到这里；引号台词会原样进入对白。&#10;留空则只使用上面已载入的文件。"></textarea>
       </div>
       <div class="row split">
-        <label>分镜文件（可选）</label>
+        <label>分镜文件（可选） <span class="hint">（默认 <项目文件夹>/storyboard.json）</span></label>
         <div class="fileline">
-          <input id="storyboard-path" list="sb-list" placeholder="input/xxx_storyboard.json" />
+          <input id="storyboard-path" list="sb-list" placeholder="projects/xxx/storyboard.json" />
           <button id="storyboard-edit" class="ghost">打开编辑器</button>
           <datalist id="sb-list"></datalist>
         </div>
       </div>
       <div class="row">
-        <label>输出目录</label>
-        <input id="out-dir" placeholder="output/xxx" />
+        <label>项目文件夹 <span class="hint">（小说、分镜、成片都在这里）</span></label>
+        <input id="out-dir" placeholder="projects/xxx" />
       </div>
       <div class="row">
         <label>执行阶段</label>

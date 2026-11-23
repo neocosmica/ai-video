@@ -15,18 +15,34 @@
 
 ### 1. 输入输出约定
 
+**每个项目一个独立文件夹，所有和这部片相关的内容都在里面**；全部项目放在根目录的 `projects/` 下：
+
+```
+projects/
+  demo/            # 一个项目 = 一个文件夹
+    novel.txt        # 小说
+    storyboard.json  # 分镜（produce 也会把外部分镜拷到这里）
+    final.mp4        # 成片
+    frames/ clips/ audio/ ...   # 流水线产物
+  scifi/
+    ...
+```
+
 | 用途 | 路径 |
 |---|---|
-| 小说 | `input/<片名>_novel.txt` |
-| 分镜 | `input/<片名>_storyboard.json` |
-| 输出 | `output/<片名>/`（成片 `final.mp4`） |
+| 项目文件夹 | `projects/<片名>/` |
+| 小说 | `projects/<片名>/novel.txt` |
+| 分镜 | `projects/<片名>/storyboard.json` |
+| 成片 | `projects/<片名>/final.mp4` |
+
+新建项目：`./scripts/run.sh projects --new <片名>`。CLI 全部子命令都支持 `--project <片名>`，等价于 `--out projects/<片名>` 并自动补 novel/storyboard 默认路径。
 
 首次部署：`./scripts/setup.sh` → `./scripts/run.sh doctor` → `./scripts/run.sh selftest`。
 
 ### 2. 先拿单镜上限
 
 ```bash
-./scripts/run.sh budget --out output/<片名>
+./scripts/run.sh budget --project <片名>
 ```
 
 记下：
@@ -93,10 +109,7 @@
 ### 5. 硬校验
 
 ```bash
-./scripts/run.sh screenplay --strict \
-  --storyboard input/<片名>_storyboard.json \
-  --novel input/<片名>_novel.txt \
-  --out output/<片名>
+./scripts/run.sh screenplay --strict --project <片名>
 ```
 
 失败则按提示拆镜，直到通过。
@@ -104,13 +117,10 @@
 ### 6. 成片
 
 ```bash
-./scripts/run.sh produce \
-  --storyboard input/<片名>_storyboard.json \
-  --novel input/<片名>_novel.txt \
-  --out output/<片名>
+./scripts/run.sh produce --project <片名>
 ```
 
-输出目录已有分镜时默认不覆盖；要覆盖加 `--force`。启动后不要逐步干预；失败查 `./scripts/run.sh doctor`。
+项目文件夹里已有分镜时默认不覆盖；要覆盖加 `--force`。启动后不要逐步干预；失败查 `./scripts/run.sh doctor`。
 
 **启动后立刻把这条终端调到前台**：取终端记录目录里最新的、命令是 `produce` 的那份文件，读文件头 `pid:`，再打开 `vscode-terminal:/<pid>`，用户要能自己看进度。用户说「看进展 / 打开终端」时同样这么做，不要重起进程。
 

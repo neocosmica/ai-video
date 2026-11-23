@@ -2,8 +2,11 @@
 
 不跑成片、不加载模型，秒级返回：
 
-    ./scripts/run.sh screenplay --out output/<片名> --novel input/<小说>.txt \\
-        --storyboard input/<片名>.json
+    ./scripts/run.sh screenplay --out projects/<片名> --novel projects/<片名>/novel.txt
+
+或直接用项目名（novel / storyboard 自动取该文件夹）：
+
+    ./scripts/run.sh screenplay --project <片名>
 
 超长台词只提示、不报错：audio 阶段会自动在静音处切段。想少一次返工就照提示先拆好。
 """
@@ -19,7 +22,7 @@ from pipeline.config import Settings
 from pipeline.util import dump_json, has_cjk, load_json, resolve, snap_frames, stable_seed
 
 
-SCHEMA_HINT = """分镜不由本机 LLM 生成。请让 Cursor Agent 阅读小说后写入 storyboard.json（演示可写 input/demo_storyboard.json）。
+SCHEMA_HINT = """分镜不由本机 LLM 生成。请让 Cursor Agent 阅读小说后写入 projects/<片名>/storyboard.json（演示见 projects/demo/）。
 
 最小结构：
 {
@@ -55,11 +58,11 @@ SCHEMA_HINT = """分镜不由本机 LLM 生成。请让 Cursor Agent 阅读小�
 对白硬性要求：小说里所有引号对白（「」 “” ""）必须原样出现在某个镜头的 dialogue 里，
 允许跨相邻镜头连续覆盖，禁止漏句删字。
 写分镜前先拿单镜上限（只读总内存配置，秒级）：
-./scripts/run.sh budget --out output/xxx
+./scripts/run.sh budget --out projects/xxx
 写完用 --strict 硬校验（超额度会给出可照抄的拆法，不许删字）：
-./scripts/run.sh screenplay --strict --storyboard input/xxx_storyboard.json --novel input/xxx.txt --out output/xxx
+./scripts/run.sh screenplay --strict --project xxx
 然后一句话成片：
-./scripts/run.sh produce --storyboard input/xxx_storyboard.json --novel input/xxx.txt --out output/xxx
+./scripts/run.sh produce --project xxx
 （audio 阶段按实测配音定镜头长度，必要时在句中停顿处自动切段，绝不静默截台词。）
 """
 
@@ -426,6 +429,13 @@ def cmd_screenplay(args: argparse.Namespace) -> None:
         linked = str(load_json(story_path).get("novel") or "").strip()
         if linked:
             novel = Path(linked)
+    # 还没有？项目文件夹里就放着小说（novel.txt 优先），自动找同一部的
+    if (novel is None or not novel.exists()) and story_path.exists():
+        from pipeline.projects import novel_candidates
+
+        for cand in novel_candidates(story_path):
+            novel = cand
+            break
     validate_or_explain(
         story_path,
         novel if novel and novel.exists() else None,

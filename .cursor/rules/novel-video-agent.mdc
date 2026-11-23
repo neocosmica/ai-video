@@ -17,20 +17,17 @@ alwaysApply: true
 0. **先拿单镜上限**（只读总内存配置，秒级；记下帧数 / 秒数 / 台词字数额度）：
 
 ```bash
-./scripts/run.sh budget --out output/scifi
+./scripts/run.sh budget --project scifi
 ```
 
-1. 读小说，写/改分镜：演示写 `input/demo_storyboard.json`；其它片子写 `input/<片名>_storyboard.json`（`produce --storyboard` 会拷进输出目录）。超额度对白按标点拆成相邻多镜，**不许删字压短**；每镜换景别/角度。
+1. 读小说，写/改分镜：每个项目一个独立文件夹 `projects/<片名>/`（小说 `novel.txt`、分镜 `storyboard.json`、成片产物都在里面；演示见 `projects/demo/`）。超额度对白按标点拆成相邻多镜，**不许删字压短**；每镜换景别/角度。
 2. 人物填 `gender`（female/male）和可选 `voice`（女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric）
 3. 有对白的镜头填 `emotion`（calm/warm/sad/tense/bitter/nostalgic 等）
 4. 顶层写英文 `music_prompt`（无人声器乐）
 5. **硬校验**（超额度失败并给出可照抄的拆法）：
 
 ```bash
-./scripts/run.sh screenplay --strict \
- --storyboard input/scifi_storyboard.json \
- --novel input/scifi_novel.txt \
- --out output/scifi
+./scripts/run.sh screenplay --strict --project scifi
 ```
 
 逐镜打印「N 字 ≈ X 秒」。台词照小说写，语速语气由原文和 emotion 决定，
@@ -39,13 +36,10 @@ alwaysApply: true
 6. 一条命令跑完全部剩余步骤（校验 → 图 → 对白 → A2V/I2V → 配乐 → 成片）：
 
 ```bash
-./scripts/run.sh produce \
- --storyboard input/scifi_storyboard.json \
- --novel input/scifi_novel.txt \
- --out output/scifi
+./scripts/run.sh produce --project scifi
 ```
 
-分镜已在 `--out/storyboard.json` 时可省略 `--storyboard`。输出目录已有分镜时默认不覆盖（audio 可能已自动拆过镜），要覆盖得加 `--force`。启动 `produce` 后不要再插手各阶段；失败再查 `doctor` / 日志。
+分镜已在 `projects/<片名>/storyboard.json` 时可省略 `--storyboard`。项目文件夹已有分镜时默认不覆盖（audio 可能已自动拆过镜），要覆盖得加 `--force`。启动 `produce` 后不要再插手各阶段；失败再查 `doctor` / 日志。
 
 **启动后立刻把这条终端调到前台**（用户要能自己看进度，不用来问）。取终端记录目录里最新的、命令是 `produce` 的那份，读文件头拿 `pid:`，再 `open_resource` 打开 `vscode-terminal:/<pid>`：
 
@@ -56,7 +50,7 @@ cd "/Users/wangxinyu/.cursor/projects/Users-wangxinyu-ai/terminals" && ls -t *.t
 - 记录文件要跑起来几秒后才生成，稍等再找；找不到就让用户在终端列表里点标题含 produce 的那条。
 - 用户说「看进展 / 打开终端」时同样这么做，不要重起进程。
 
-汇报进展时读终端记录尾部 + `ls -lt output/<片名>/frames`，按 `screenplay → images → audio → videos → music → assemble` 判断当前阶段，并把最新静帧贴给用户。
+汇报进展时读终端记录尾部 + `ls -lt projects/<片名>/frames`，按 `screenplay → images → audio → videos → music → assemble` 判断当前阶段，并把最新静帧贴给用户。
 
 对白规则：
 - **台词按小说原样写。不要为了控制时长去改写、删字、压短台词，也不要在 emotion 里写「快说／放慢」之类的语速要求**——配音的语速和语气由原文内容和 `emotion` 决定，管线不会为了塞进镜头去调

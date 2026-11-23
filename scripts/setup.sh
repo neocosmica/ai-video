@@ -311,4 +311,4 @@ PY
 echo "环境就绪。Python=$UV_PYTHON  镜像：HF=$HF_ENDPOINT  PyPI=$UV_INDEX_URL  PythonInstall=$UV_PYTHON_INSTALL_MIRROR"
 echo "venv 缓存：$NOVEL_VIDEO_CACHE/venvs"
 echo "下一步：./scripts/run.sh doctor"
-echo "演示成片：./scripts/run.sh produce --storyboard input/demo_storyboard.json --novel input/novel.txt --out output/demo"
+echo "演示成片：./scripts/run.sh produce --project demo"

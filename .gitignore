@@ -11,8 +11,14 @@
 .python-version
 .DS_Store
 
-# 流水线产物：分镜图、视频、音频、成片、日志
-output/
+# 项目文件夹：只入库小说、分镜、project.json；产物（图/视频/音频/成片/日志）不入库
+projects/**
+!projects/
+!projects/*/
+!projects/*/novel.txt
+!projects/*/storyboard.json
+!projects/*/project.json
+projects/webui/
 
 # 编辑器 / 缓存
 .idea/

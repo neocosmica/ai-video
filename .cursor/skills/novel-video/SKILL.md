@@ -20,14 +20,19 @@ disable-model-invocation: true
 
 ### 1. 准备输入
 
-- 小说：`input/<片名>_novel.txt`（或用户指定路径）
-- 分镜目标：`input/<片名>_storyboard.json`
-- 输出：`output/<片名>/`
+每个项目一个独立文件夹，这部片的东西全在里面；全部项目在根目录 `projects/` 下：
+
+- 项目文件夹：`projects/<片名>/`
+- 小说：`projects/<片名>/novel.txt`（或用户指定路径）
+- 分镜目标：`projects/<片名>/storyboard.json`
+- 成片：`projects/<片名>/final.mp4`
+
+新建项目文件夹：`./scripts/run.sh projects --new <片名>`。CLI 各命令也可用 `--project <片名>` 一次补齐这些路径。
 
 ### 2. 先拿单镜上限（必做）
 
 ```bash
-./scripts/run.sh budget --out output/<片名>
+./scripts/run.sh budget --project <片名>
 ```
 
 记下输出里的：
@@ -131,10 +136,7 @@ disable-model-invocation: true
 ### 5. 硬校验
 
 ```bash
-./scripts/run.sh screenplay --strict \
-  --storyboard input/<片名>_storyboard.json \
-  --novel input/<片名>_novel.txt \
-  --out output/<片名>
+./scripts/run.sh screenplay --strict --project <片名>
 ```
 
 失败时按提示拆镜重写，再跑直到通过。
@@ -142,13 +144,10 @@ disable-model-invocation: true
 ### 6. 一键成片
 
 ```bash
-./scripts/run.sh produce \
-  --storyboard input/<片名>_storyboard.json \
-  --novel input/<片名>_novel.txt \
-  --out output/<片名>
+./scripts/run.sh produce --project <片名>
 ```
 
-成片在 `output/<片名>/final.mp4`。输出目录已有分镜时默认不覆盖（audio 可能已自动拆过镜），要覆盖加 `--force`。启动后不要再插手各阶段；失败再查 `./scripts/run.sh doctor`。
+成片在 `projects/<片名>/final.mp4`。项目文件夹已有分镜时默认不覆盖（audio 可能已自动拆过镜），要覆盖加 `--force`。启动后不要再插手各阶段；失败再查 `./scripts/run.sh doctor`。
 
 ### 7. 一定要把运行的终端调到前台（必做）
 
@@ -180,7 +179,7 @@ cd "/Users/wangxinyu/.cursor/projects/Users-wangxinyu-ai/terminals" && ls -t *.t
 
 ```bash
 tail -30 "/Users/wangxinyu/.cursor/projects/Users-wangxinyu-ai/terminals/<pid>.txt"
-ls -lt output/<片名>/frames | head
+ls -lt projects/<片名>/frames | head
 ```
 
 - 阶段顺序固定是 `screenplay → images → audio → videos → music → assemble`，当前在哪个 `== stage ==` 就看最后出现的那一个。

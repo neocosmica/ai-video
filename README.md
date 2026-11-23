@@ -13,25 +13,40 @@
 
 首次 `setup.sh` 主要拉 **模型权重**（数十 GB）并安装 Python 依赖；`vendor/`（LTX、MusicGen 源码）和 `tools/`（ffmpeg）已在本仓库内，默认不再从 GitHub 克隆。请插电，保持网络畅通（默认走国内镜像）。
 
+## 项目路径约定
+
+**每个项目一个独立文件夹，这部片的小说、分镜、产物全在里面**；全部项目放在根目录 `projects/` 下：
+
+```
+projects/
+  demo/            # 一个项目 = 一个文件夹
+    novel.txt        # 小说
+    storyboard.json  # 分镜
+    final.mp4        # 成片
+    frames/ clips/ audio/ ...   # 流水线产物
+  scifi/
+    ...
+```
+
+新建：`./scripts/run.sh projects --new <片名>`；列出：`./scripts/run.sh projects`。
+CLI 全部子命令支持 `--project <片名>`，等价于 `--out projects/<片名>` 并自动取该文件夹里的 `novel.txt` / `storyboard.json`。
+
 ## 工作流
 
 0. **先拿单镜上限**（只读本机总内存配置，按经验 token 预算表 + 当前分辨率现算；不读系统实时状态）：
 
 ```bash
-./scripts/run.sh budget --out output/scifi
+./scripts/run.sh budget --project scifi
 ```
 
 输出「N 帧 ≈ S 秒」和「台词约 C 字」。超额度对白必须拆成相邻多镜，**不许删字压短**。
 经验值：16 GB→3120 tokens（384×640 下 97 帧）、32 GB→6720 tokens（217 帧）；更高内存顶到 241 帧。
 
-1. **Agent 只做这一步**：读小说，写 `input/<片名>_storyboard.json`。人物填 `gender`/`voice`，镜头填 `emotion`，顶层英文 `music_prompt`。**台词按小说原样写**；超过额度 C 的对白按标点拆镜（每镜换景别/角度）。
+1. **Agent 只做这一步**：读小说，写 `projects/<片名>/storyboard.json`（小说放同文件夹 `novel.txt`）。人物填 `gender`/`voice`，镜头填 `emotion`，顶层英文 `music_prompt`。**台词按小说原样写**；超过额度 C 的对白按标点拆镜（每镜换景别/角度）。
 2. **硬校验**（秒级，不加载模型；`--strict` 超额度会失败并给出可照抄的拆法）：
 
 ```bash
-./scripts/run.sh screenplay --strict \
-  --storyboard input/scifi_storyboard.json \
-  --novel input/scifi_novel.txt \
-  --out output/scifi
+./scripts/run.sh screenplay --strict --project scifi
 ```
 
 逐镜打印「N 字 ≈ X 秒」。台词该多长就写多长——语速和语气由原文与 `emotion` 决定，
@@ -40,14 +55,11 @@
 3. **一条脚本成片**（校验 → 图 → 对白 → **A2V/I2V 视频** → **配乐** → 混音字幕）：
 
 ```bash
-./scripts/run.sh produce \
-  --storyboard input/scifi_storyboard.json \
-  --novel input/scifi_novel.txt \
-  --out output/scifi
+./scripts/run.sh produce --project scifi
 ```
 
-成片在 `output/<片名>/final.mp4`。`produce` 会把分镜拷进输出目录，再串跑全部阶段；**不需要再逐步喊 Agent**。
-输出目录已有分镜时默认不覆盖（audio 可能已自动拆过镜），要覆盖请加 `--force`。
+成片在 `projects/<片名>/final.mp4`。`produce` 会把外部分镜拷进项目文件夹，再串跑全部阶段；**不需要再逐步喊 Agent**。
+项目文件夹里已有分镜时默认不覆盖（audio 可能已自动拆过镜），要覆盖请加 `--force`。
 
 有对白的镜头：TTS → 写入 `video_frames` → `ltx-2-mlx a2v --distilled --audio … --image …`。无对白空镜：定长 I2V（`--no-audio`）。成片混音仍用 TTS 原轨 + BGM（A2V 片内音轨在 normalize 时剥掉，避免双轨）。
 
@@ -85,11 +97,11 @@
 ./scripts/run.sh web --port 8790        # 浏览器打开 http://127.0.0.1:8790
 ```
 
-- **① 填写小说片段**：粘贴片段（自动存成 `input/<片名>_novel.txt`）或载入已有 txt；可顺手打开分镜编辑器改 `storyboard.json`，内置 `--strict` 硬校验（给出可照抄的拆镜方案）。
+- **① 填写小说片段**：填项目名（或从下拉选已有项目），粘贴片段（自动存成 `projects/<片名>/novel.txt`）或载入已有 txt；可顺手打开分镜编辑器改 `storyboard.json`，内置 `--strict` 硬校验（给出可照抄的拆镜方案）。
 - **② 起任务**：勾选要跑的阶段（校验分镜 → 静帧 → 配音 → 视频 → 配乐 → 合成），等价于 `run --from …`；支持 `--force` 与「只重做某些镜头」。
 - **③ 看进度**：三档粒度——总进度条（各阶段按权重合成，显示「正在：视频生成」等）；进行中条目逐条显示 `n/total` 和剩余时间（解析子进程 tqdm 输出，视频每镜的两段 Denoising 8+3 步会合并成一条）；镜头网格里每张卡自己也有小进度条。日志实时滚动，出错行标红。
 - **④ 重跑步骤**：任务失败后可一键「从最早失败阶段续跑」；镜头网格里逐镜预览**静帧、视频、配音试听**（`<audio>` 播放 `audio/voice/*.wav`），单独重跑某一镜的图或视频；产物每 5 秒自动刷新（可关）。
-- 任务历史存 `output/webui/state.json`，重启服务不丢（中断的任务会标记为「中断」）。
+- 任务历史存 `projects/webui/state.json`，重启服务不丢（中断的任务会标记为「中断」）。
 - 局限：本界面不加载模型也不写分镜内容——分镜仍由你/Agent 按第 3 节写好；`web` 进程必须跑在装好依赖的 Mac 上（和 `produce` 同机）。
 
 ## 国内镜像
@@ -124,31 +136,28 @@ chmod +x scripts/setup.sh scripts/run.sh scripts/env.sh
 
 ## 换一部小说
 
-改 `input/` 下文本，让 Agent 重写分镜 JSON，再：
+改项目文件夹里的 `novel.txt`，让 Agent 重写分镜 JSON，再：
 
 ```bash
-./scripts/run.sh produce \
-  --storyboard output/<片名>/storyboard.json \
-  --novel input/<小说>.txt \
-  --out output/<片名>
+./scripts/run.sh produce --project <片名>
 ```
 
-若分镜已经在 `--out/storyboard.json`，可省略 `--storyboard`。
+若分镜已经在项目文件夹的 `storyboard.json`，可省略 `--storyboard`。
 
 只重做声音（`audio` 重写 `video_frames`；若要口型跟新对白，需再跑 videos）：
 
 ```bash
-./scripts/run.sh audio --out output/demo --force
-./scripts/run.sh videos --out output/demo --force
-./scripts/run.sh music --out output/demo       # 镜头定长后重算配乐长度
-./scripts/run.sh assemble --out output/demo
+./scripts/run.sh audio --project demo --force
+./scripts/run.sh videos --project demo --force
+./scripts/run.sh music --project demo       # 镜头定长后重算配乐长度
+./scripts/run.sh assemble --project demo
 ```
 
 只调混音/配乐音量，不必重做画面：
 
 ```bash
-./scripts/run.sh music --out output/demo --force   # 只改音量时可省略 --force
-./scripts/run.sh assemble --out output/demo --force
+./scripts/run.sh music --project demo --force   # 只改音量时可省略 --force
+./scripts/run.sh assemble --project demo --force
 ```
 
 从中间阶段续跑仍可用 `run --from images|audio|videos|assemble`。

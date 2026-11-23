@@ -14,6 +14,7 @@ from pipeline.assemble import cmd_assemble
 from pipeline.audio import cmd_audio, cmd_music
 from pipeline.config import Settings
 from pipeline.images import cmd_images
+from pipeline.projects import cmd_projects
 from pipeline.run import STAGES, cmd_produce, cmd_run
 from pipeline.screenplay import cmd_screenplay
 from pipeline.screenplay import (
@@ -148,7 +149,11 @@ def cmd_budget(args: argparse.Namespace) -> None:
         from pipeline.budget import format_budget_report
 
     print(format_budget_report(detail))
-    if getattr(args, "out", None):
+    if getattr(args, "project", None):
+        from pipeline.projects import project_dir
+
+        print(f"\n项目文件夹：{project_dir(args.project)}（本命令不写文件，只供后续 produce 使用）")
+    elif getattr(args, "out", None):
         out = resolve(args.out)
         out.mkdir(parents=True, exist_ok=True)
         print(f"\n输出目录：{out}（本命令不写文件，只供后续 produce 使用）")
@@ -443,8 +448,8 @@ def cmd_selftest(_: argparse.Namespace) -> None:
 
     assert resolve_snapshot("") is None
     assert (ROOT / "scripts" / "apply_ltx_gemma_patch.py").exists(), "缺少 LTX 补丁脚本"
-    assert (ROOT / "input" / "demo_storyboard.json").exists(), "缺少演示分镜"
-    assert (ROOT / "input" / "novel.txt").exists(), "缺少演示小说"
+    assert (ROOT / "projects" / "demo" / "storyboard.json").exists(), "缺少演示分镜"
+    assert (ROOT / "projects" / "demo" / "novel.txt").exists(), "缺少演示小说"
     from pipeline.run import STAGES, install_storyboard
     from pipeline.util import frames_for_duration
 
@@ -480,8 +485,37 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     assert over.update(2, 2) == (2, 2)
     with tempfile.TemporaryDirectory() as tmp:
         dest = Path(tmp) / "storyboard.json"
-        install_storyboard(tmp, str(ROOT / "input" / "demo_storyboard.json"))
+        install_storyboard(tmp, str(ROOT / "projects" / "demo" / "storyboard.json"))
         assert dest.exists(), "produce 应能把分镜拷进输出目录"
+
+    # 项目文件夹约定：--project 补默认路径、命名守卫、清单与 novel 猜测
+    from pipeline.projects import (
+        apply_project_defaults,
+        check_name,
+        list_projects,
+        novel_candidates,
+    )
+
+    ns = argparse.Namespace(project="demo", out=None, novel=None, storyboard=None)
+    apply_project_defaults(ns)
+    assert ns.out == "projects/demo", ns.out
+    assert ns.novel == "projects/demo/novel.txt", ns.novel
+    assert ns.storyboard == "projects/demo/storyboard.json", ns.storyboard
+    ns2 = argparse.Namespace(project="demo", out="output/demo", novel=None, storyboard=None)
+    apply_project_defaults(ns2)
+    assert ns2.out == "projects/demo", ns2.out
+    ns3 = argparse.Namespace(project="demo", out="somewhere/else", novel=None, storyboard=None)
+    apply_project_defaults(ns3)
+    assert ns3.out == "somewhere/else", ns3.out
+    try:
+        check_name("../escape")
+        raise AssertionError("项目名不应接受路径分隔符")
+    except SystemExit:
+        pass
+    cands = novel_candidates(ROOT / "projects" / "demo" / "storyboard.json")
+    assert cands and cands[0] == ROOT / "projects" / "demo" / "novel.txt", cands
+    names = {item["name"] for item in list_projects()}
+    assert "demo" in names and "scifi" in names, names
     for label, path in (
         ("main", main_venv_path()),
         ("ltx", ltx_venv_path()),
@@ -499,17 +533,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     def add_common(p: argparse.ArgumentParser, novel: bool = False) -> None:
         p.add_argument("--config", default=None, help="配置文件，默认项目里的 config.json")
-        p.add_argument("--out", default="output/demo", help="这一部片子的输出目录")
+        p.add_argument(
+            "--project",
+            default=None,
+            help="项目名：等价于 --out projects/<名>，novel/storyboard 也默认取该项目文件夹",
+        )
+        p.add_argument("--out", default=None, help="这一部片子的输出目录（默认 projects/<片名>）")
         p.add_argument("--force", action="store_true", help="重做已有的分镜、静帧和镜头")
         if novel:
-            p.add_argument("--novel", default="input/novel.txt")
+            p.add_argument("--novel", default=None, help="小说路径（默认 <项目文件夹>/novel.txt）")
             p.add_argument("--max-shots", type=int, default=None)
 
     def add_storyboard(p: argparse.ArgumentParser) -> None:
         p.add_argument(
             "--storyboard",
             default=None,
-            help="外部分镜 JSON；会拷进 --out/storyboard.json（演示默认可用 input/demo_storyboard.json）",
+            help="外部分镜 JSON；会拷进 --out/storyboard.json（缺省取 <项目文件夹>/storyboard.json）",
         )
 
     screenplay = sub.add_parser(
@@ -582,8 +621,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="按本机总内存查 token 预算表，现算单镜最长帧数 / 台词额度（不加载模型）",
     )
     budget.add_argument("--config", default=None, help="配置文件，默认项目里的 config.json")
+    budget.add_argument("--project", default=None, help="项目名：打印 projects/<片名> 供后续 produce 使用")
     budget.add_argument("--out", default=None, help="片子输出目录（可选，仅打印路径）")
     budget.set_defaults(func=cmd_budget)
+
+    projects = sub.add_parser(
+        "projects",
+        help="列出 projects/ 下的全部项目（--new 新建一个项目文件夹）",
+    )
+    projects.add_argument("--new", default=None, help="新建项目文件夹 projects/<片名>/")
+    projects.add_argument("--title", default=None, help="项目标题（写进 project.json）")
+    projects.set_defaults(func=cmd_projects)
 
     doctor = sub.add_parser("doctor", help="检查本机环境")
     doctor.set_defaults(func=cmd_doctor)
@@ -605,6 +653,9 @@ def main() -> None:
     install_live_bars()
     parser = build_parser()
     args = parser.parse_args()
+    from pipeline.projects import apply_project_defaults
+
+    apply_project_defaults(args)
     args.func(args)
 
 

@@ -5,10 +5,11 @@
     ./scripts/run.sh web --port 8790          # 浏览器打开 http://127.0.0.1:8790
 
 职责边界（与 AGENTS.md 一致）：本地不加载聊天 LLM，分镜仍由人工/Agent 写好
-`input/<片名>_storyboard.json`；本界面负责填写小说、维护分镜、起任务、
+`projects/<片名>/storyboard.json`；本界面负责填写小说、维护分镜、起任务、
 看实时进度、对失败步骤单独重跑。
 
-任务记录写入 `output/webui/state.json`，重启服务不丢历史。
+每个项目一个独立文件夹 `projects/<片名>/`（小说、分镜、产物都在里面）；
+任务记录写入 `projects/webui/state.json`，重启服务不丢历史。
 """
 
 from __future__ import annotations
@@ -30,10 +31,15 @@ from pipeline.mirrors import apply_mirrors
 
 apply_mirrors()
 
+from pipeline.projects import (
+    PROJECTS_DIRNAME,
+    novel_candidates,
+    project_dir,
+)
 from pipeline.util import ROOT, resolve
 
 WEB_DIR = ROOT / "webui"
-STATE_DIR = ROOT / "output" / "webui"
+STATE_DIR = ROOT / PROJECTS_DIRNAME / "webui"
 STATE_PATH = STATE_DIR / "state.json"
 LOG_TAIL_LINES = 4000  # 内存里每任务保留的日志行数
 HISTORY = 30  # state.json 里最多保留多少条任务记录
@@ -627,7 +633,8 @@ def parse_stage_progress(line: str, job: Job) -> None:
 # ---------------------------------------------------------------------------
 
 
-def list_projects() -> dict:
+def list_input_files() -> dict:
+    """旧布局的 input/ 文件（分镜编辑器的备选清单；新项目不再写这里）。"""
     novels: list[dict] = []
     storyboards: list[dict] = []
     input_dir = ROOT / "input"
@@ -636,21 +643,24 @@ def list_projects() -> dict:
             novels.append({"name": path.stem, "path": str(path.relative_to(ROOT)).replace("\\", "/")})
         for path in sorted(input_dir.glob("*.json")):
             storyboards.append({"name": path.stem, "path": str(path.relative_to(ROOT)).replace("\\", "/")})
-    outputs: list[dict] = []
-    output_dir = ROOT / "output"
-    if output_dir.is_dir():
-        for child in sorted(output_dir.iterdir()):
-            if not child.is_dir() or child.name == "webui":
-                continue
-            outputs.append(
-                {
-                    "name": child.name,
-                    "path": str(child.relative_to(ROOT)).replace("\\", "/"),
-                    "has_final": (child / "final.mp4").exists(),
-                    "has_storyboard": (child / "storyboard.json").exists(),
-                }
-            )
-    return {"novels": novels, "storyboards": storyboards, "outputs": outputs}
+    return {"novels": novels, "storyboards": storyboards}
+
+
+def _all_projects() -> dict:
+    """项目清单 + 旧布局文件（兼容选择器），供 /api/state 一次拉全。"""
+    from pipeline.projects import list_projects as scan_projects
+
+    projects = scan_projects()
+    legacy = list_input_files()
+    novels = legacy["novels"]
+    storyboards = legacy["storyboards"]
+    for item in projects:
+        if item.get("novel"):
+            novels.append({"name": f"{item['name']}/novel", "path": item["novel"]})
+        sb = f"{item['path']}/storyboard.json"
+        if item.get("has_storyboard"):
+            storyboards.append({"name": f"{item['name']}/storyboard", "path": sb})
+    return {"projects": projects, "novels": novels, "storyboards": storyboards}
 
 
 _SAFE_PATH = re.compile(r"^[\w\-./\u4e00-\u9fff]+$")
@@ -693,6 +703,7 @@ def validate_storyboard(path_str: str, *, strict: bool) -> dict:
     """借用 pipeline.screenplay 的逻辑做秒级校验（不加载模型）。"""
     src = safe_path(path_str)
     from pipeline.config import Settings
+    from pipeline.projects import strip_storyboard_suffix
     from pipeline.screenplay import (
         assert_dialogue_coverage,
         dialogue_char_limit,
@@ -710,8 +721,13 @@ def validate_storyboard(path_str: str, *, strict: bool) -> dict:
         if cand.exists():
             novel_path = cand
     if novel_path is None:
-        stem = re.sub(r"_?storyboard$", "", src.stem)
-        for cand_name in (f"input/{stem}_novel.txt", f"input/{stem}.txt"):
+        # 优先同一项目文件夹里的小说；兼容旧布局 input/<片名>_novel.txt
+        for cand in novel_candidates(src):
+            novel_path = cand
+            break
+    if novel_path is None:
+        stem = strip_storyboard_suffix(src.stem)
+        for cand_name in (f"{PROJECTS_DIRNAME}/{stem}/novel.txt", f"input/{stem}_novel.txt", f"input/{stem}.txt"):
             cand = ROOT / cand_name
             if cand.exists():
                 novel_path = cand
@@ -835,7 +851,7 @@ class _Handler(BaseHTTPRequestHandler):
     }
 
     def _serve_media(self, rel: str) -> None:
-        """只读地暴露项目目录下的产物（output/ 与 input/）。"""
+        """只读地暴露项目目录下的产物（projects/ 与旧 input/、output/）。"""
         try:
             path = safe_path(rel)
         except (ValueError, FileNotFoundError):
@@ -902,7 +918,7 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/state":
                 self._json(
                     {
-                        "projects": list_projects(),
+                        "projects": _all_projects(),
                         "tasks": [j.snapshot() for j in all_jobs()],
                         "server_time": time.time(),
                     }
@@ -970,7 +986,8 @@ class _Handler(BaseHTTPRequestHandler):
     def create_task(self, data: dict) -> dict:
         title = str(data.get("title") or "").strip()
         name = str(data.get("name") or "").strip() or _slugify(title)
-        out = str(data.get("out") or "").strip() or f"output/{_slugify(name)}"
+        # 新任务一律落在项目文件夹 projects/<片名>/
+        out = str(data.get("out") or "").strip() or f"{PROJECTS_DIRNAME}/{_slugify(name)}"
         novel = str(data.get("novel") or "").strip()
         storyboard = str(data.get("storyboard") or "").strip()
         only = str(data.get("only") or "").strip() or None
@@ -981,15 +998,15 @@ class _Handler(BaseHTTPRequestHandler):
         # 前端勾选顺序不可靠；统一按流水线顺序传给 CLI（run --from 依赖它）
         stages = [s for s in STAGES if s in set(stages)]
 
-        # 粘贴的小说片段先落盘
+        # 粘贴的小说片段先落盘到项目文件夹
         novel_text = str(data.get("novel_text") or "").strip()
         if novel_text:
-            novel = novel or f"input/{name}_novel.txt"
+            novel = novel or f"{project_dir(name).relative_to(ROOT)}/novel.txt"
             write_text(novel, novel_text.rstrip() + "\n")
-        # 粘贴的分镜 JSON 先落盘
+        # 粘贴的分镜 JSON 先落盘到项目文件夹
         sb_data = data.get("storyboard_data")
         if isinstance(sb_data, dict) and sb_data.get("shots"):
-            storyboard = storyboard or f"input/{name}_storyboard.json"
+            storyboard = storyboard or f"{project_dir(name).relative_to(ROOT)}/storyboard.json"
             write_storyboard(storyboard, sb_data)
 
         cmd, log_path = build_pipeline_cmd(
