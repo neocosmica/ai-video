@@ -47,6 +47,10 @@ class _StepBar:
         if total <= 0:
             return
         if self._bar is None or self._total != total:
+            # 分母只会变小不变大（新分母更小 = 换了一段更短的总量）；
+            # 变大说明上游把局部块长当成了总长，直接忽略，避免进度回跳。
+            if self._bar is not None and total > (self._total or 0):
+                return
             self.close()
             self._bar = tqdm(total=total, desc=self._desc, unit="tok")
             self._total = total
@@ -269,7 +273,9 @@ class MusicGen(BaseGenModel):
             if self._progress_callback is not None:
                 self._progress_callback(generated_tokens, tokens_to_generate)
             else:
-                bar.update(step, tokens_to_generate)
+                # 按整段总长汇报：分块时每块的 tokens_to_generate 不同，
+                # 直接用会把进度条分母换成当前块的长度（1503→2106 越换越大）。
+                bar.update(min(generated_tokens, total_gen_len), total_gen_len)
 
         if prompt_tokens is not None:
             assert max_prompt_len >= prompt_tokens.shape[-1], \

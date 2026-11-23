@@ -345,6 +345,99 @@ def cmd_selftest(_: argparse.Namespace) -> None:
             # 空镜段必须能听到配乐（早期 bug 会掉到 -50 dB 量级）
             assert open_ > -35.0, f"空镜段配乐几乎听不见：{open_:.1f} dB"
 
+    # ---- assemble：合规流零重编码 / 探测失败必须硬报错 ----
+    from pipeline.assemble import _duration, _normalize, _streams_info
+
+    if (ROOT / "tools" / "ffprobe").exists():
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # 1) 合规流（分辨率/帧率/像素格式全对、无音轨）→ 走流复制分支
+            good = tmp_path / "good.mp4"
+            subprocess.run(
+                [
+                    str(ROOT / "tools" / "ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=gray:s=384x640:r=24:d=1",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", str(good),
+                ],
+                check=True,
+            )
+            settings_asm = _Settings.load()
+            settings_asm.ffmpeg = ROOT / "tools" / "ffmpeg"
+            settings_asm.ffprobe = ROOT / "tools" / "ffprobe"
+            info = _streams_info(settings_asm.ffprobe, good)
+            assert info["width"] == 384 and info["height"] == 640, info
+            assert not info["has_audio"] and abs(info["fps"] - 24.0) < 0.1, info
+            copied = tmp_path / "copied.mp4"
+            _normalize(settings_asm, good, copied)
+            assert copied.exists()
+            # 流复制不重编码，体积应与源接近（重编码会差数倍）
+            src_size = good.stat().st_size
+            dst_size = copied.stat().st_size
+            assert 0.5 < dst_size / max(1, src_size) < 2.0, (src_size, dst_size)
+            # 2) 带音轨的流 → 必须重编码剥轨
+            withaudio = tmp_path / "withaudio.mp4"
+            subprocess.run(
+                [
+                    str(ROOT / "tools" / "ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=gray:s=384x640:r=24:d=1",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-shortest", str(withaudio),
+                ],
+                check=True,
+            )
+            stripped = tmp_path / "stripped.mp4"
+            _normalize(settings_asm, withaudio, stripped)
+            assert not _streams_info(settings_asm.ffprobe, stripped)["has_audio"]
+            # 3) 探测失败必须抛 SystemExit，不许静默回退假时长
+            broken = tmp_path / "broken.mp4"
+            broken.write_bytes(b"not a video")
+            try:
+                _duration(settings_asm.ffprobe, broken)
+                raise AssertionError("探测失败应抛 SystemExit，而不是回退默认时长")
+            except SystemExit:
+                pass
+
+    # ---- MusicGen 进度条：分块生成分母不再越换越大 ----
+    import importlib.util as _ilu
+
+    _mg_path = ROOT / "vendor" / "musicgen-mlx" / "audiocraft_mlx" / "models" / "musicgen.py"
+    if _mg_path.exists():
+        spec = _ilu.spec_from_file_location("_mg_musicgen_selftest", _mg_path)
+        mg_mod = _ilu.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mg_mod)
+        except Exception:
+            mg_mod = None
+        if mg_mod is not None and hasattr(mg_mod, "_StepBar"):
+            bar = mg_mod._StepBar("MusicGen")
+            updates: list[tuple[int, int]] = []
+
+            class _FakeTqdm:
+                def __init__(self, *, total, desc, unit):
+                    updates.append(("new", total))
+
+                def refresh(self):
+                    pass
+
+                def close(self):
+                    pass
+
+            original_tqdm = mg_mod.tqdm
+            mg_mod.tqdm = _FakeTqdm
+            try:
+                bar.update(500, 1503)
+                assert updates == [("new", 1503)], updates
+                bar.update(1000, 1503)
+                # 分母试图变大（分块生成的下一块更长）：必须被忽略，不换条
+                bar.update(0, 2106)
+                assert updates == [("new", 1503)], updates
+                # 正常推进仍在同一条上
+                bar.update(1200, 1503)
+                assert updates == [("new", 1503)], updates
+            finally:
+                mg_mod.tqdm = original_tqdm
+
     from pipeline.hf_cache import resolve_snapshot
     from pipeline.runtime import main_venv_path, musicgen_venv_path, ltx_venv_path
 

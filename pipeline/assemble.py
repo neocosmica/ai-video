@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 from pathlib import Path
 
@@ -37,17 +38,101 @@ def _duration(ffprobe: Path, clip: Path) -> float:
     try:
         return max(0.1, float(proc.stdout.strip()))
     except ValueError:
-        return 2.0
+        # 时间轴全靠这个数：探测失败绝不能静默回退假值，否则字幕/混音整体漂移
+        raise SystemExit(
+            f"无法探测 {clip} 的时长（ffprobe 退出码 {proc.returncode}）。\n"
+            f"stderr：{(proc.stderr or '').strip()[-500:]}\n"
+            "请检查该镜头文件是否损坏（可删掉 clips/ 下对应文件后重跑 videos）。"
+        )
 
 
-def _has_audio(ffprobe: Path, clip: Path) -> bool:
+def _streams_info(ffprobe: Path, clip: Path) -> dict:
+    """一次 probe 拿全部流信息：有无音轨、分辨率、帧率、像素格式。"""
     proc = subprocess.run(
-        [str(ffprobe), "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", str(clip)],
+        [
+            str(ffprobe),
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_streams",
+            str(clip),
+        ],
         text=True,
         capture_output=True,
         check=False,
     )
-    return bool(proc.stdout.strip())
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        raise SystemExit(
+            f"无法探测 {clip} 的流信息（ffprobe 退出码 {proc.returncode}）。\n"
+            "请检查该镜头文件是否损坏（可删掉 clips/ 下对应文件后重跑 videos）。"
+        )
+    info = {"has_audio": False, "width": 0, "height": 0, "fps": 0.0, "pix_fmt": ""}
+    for stream in data.get("streams", []):
+        if stream.get("codec_type") == "video" and not info["width"]:
+            info["width"] = int(stream.get("width") or 0)
+            info["height"] = int(stream.get("height") or 0)
+            rate = str(stream.get("avg_frame_rate") or "0/1")
+            try:
+                num, _, den = rate.partition("/")
+                info["fps"] = float(num) / max(1e-6, float(den or 1))
+            except ValueError:
+                info["fps"] = 0.0
+            info["pix_fmt"] = str(stream.get("pix_fmt") or "")
+        elif stream.get("codec_type") == "audio" and not info["has_audio"]:
+            info["has_audio"] = True
+    return info
+
+
+def _normalize(settings: Settings, src: Path, dest: Path) -> None:
+    """统一到目标分辨率/帧率。参数已合规且不带音轨时直接流复制，避免一次多余重编码。"""
+    scale = (
+        f"scale={settings.video_width}:{settings.video_height}:force_original_aspect_ratio=decrease,"
+        f"pad={settings.video_width}:{settings.video_height}:(ow-iw)/2:(oh-ih)/2,fps={settings.video_fps}"
+    )
+    info = _streams_info(settings.ffprobe, src)
+    compliant = (
+        not info["has_audio"]
+        and info["width"] == settings.video_width
+        and info["height"] == settings.video_height
+        and info["fps"] == float(settings.video_fps)
+        and info["pix_fmt"] == "yuv420p"
+    )
+    if compliant:
+        # 参数已合规：流复制零损耗，也给后面烧字幕留最好的源
+        _run(
+            [
+                str(settings.ffmpeg),
+                "-y",
+                "-i",
+                str(src),
+                "-c:v",
+                "copy",
+                "-an",
+                str(dest),
+            ]
+        )
+        return
+    _run(
+        [
+            str(settings.ffmpeg),
+            "-y",
+            "-i",
+            str(src),
+            "-vf",
+            scale,
+            "-c:v",
+            "libx264",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-an",
+            str(dest),
+        ]
+    )
 
 
 def _wav_seconds(settings: Settings, path: Path) -> float:
@@ -70,47 +155,6 @@ def _wav_seconds(settings: Settings, path: Path) -> float:
         return max(0.0, float(proc.stdout.strip()))
     except ValueError:
         return 0.0
-
-
-def _normalize(settings: Settings, src: Path, dest: Path) -> None:
-    scale = (
-        f"scale={settings.video_width}:{settings.video_height}:force_original_aspect_ratio=decrease,"
-        f"pad={settings.video_width}:{settings.video_height}:(ow-iw)/2:(oh-ih)/2,fps={settings.video_fps}"
-    )
-    if _has_audio(settings.ffprobe, src):
-        _run(
-            [
-                str(settings.ffmpeg),
-                "-y",
-                "-i",
-                str(src),
-                "-vf",
-                scale,
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-an",
-                str(dest),
-            ]
-        )
-        return
-    _run(
-        [
-            str(settings.ffmpeg),
-            "-y",
-            "-i",
-            str(src),
-            "-vf",
-            scale,
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-an",
-            str(dest),
-        ]
-    )
 
 
 def _font_size(width: int) -> int:
@@ -342,6 +386,8 @@ def cmd_assemble(args: argparse.Namespace) -> None:
             fonts,
             "-c:v",
             "libx264",
+            "-crf",
+            "18",
             "-pix_fmt",
             "yuv420p",
             "-c:a",
