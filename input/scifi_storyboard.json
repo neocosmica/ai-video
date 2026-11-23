@@ -31,9 +31,11 @@
     },
     {
       "id": "s002",
-      "characters": ["chenshu"],
+      "characters": [
+        "chenshu"
+      ],
       "location": "第七区记忆站观察窗前",
-      "image_prompt": "中景，陈述站在观察窗前关掉除霜器，透过玻璃望向停在气闸前的运输车，车身结着一层薄霜，室内冷光",
+      "image_prompt": "中景，陈述站在观察窗前关掉除霜器，透过玻璃望向停在气闸前的运输车，侧脸清晰，室内冷光，车身结着一层薄霜",
       "motion_prompt": "Hand switches off the defroster panel, then slow dolly toward the frosted transport vehicle outside the window",
       "speaker": "",
       "dialogue": "",
@@ -41,9 +43,11 @@
     },
     {
       "id": "s003",
-      "characters": ["suli"],
+      "characters": [
+        "suli"
+      ],
       "location": "气闸通道",
-      "image_prompt": "中景，气压门咬合开启，泄出的白汽散开，穿灰色防护服的女人走进来摘下面罩，露出干净的脸",
+      "image_prompt": "中景，气压门咬合开启，泄出的白汽散开，穿灰色防护服的女人走进来摘下面罩，露出干净清晰的脸",
       "motion_prompt": "White steam disperses softly, she lifts off her helmet visor, subtle handheld sway",
       "speaker": "",
       "dialogue": "",
@@ -51,9 +55,12 @@
     },
     {
       "id": "s004",
-      "characters": ["suli", "chenshu"],
+      "characters": [
+        "suli",
+        "chenshu"
+      ],
       "location": "记忆站操作台",
-      "image_prompt": "近景，台面上方，灰色防护服女人的手把一枚银色记忆芯片推向对面的陈述",
+      "image_prompt": "近景，苏黎站在操作台后，手把一枚银色记忆芯片推向对面的陈述，面部清晰，嘴唇微张似要开口",
       "motion_prompt": "Chip slides slowly across the metal tabletop toward camera, shallow depth of field",
       "speaker": "苏黎",
       "dialogue": "这是第七次了。",
@@ -61,7 +68,9 @@
     },
     {
       "id": "s005",
-      "characters": ["chenshu"],
+      "characters": [
+        "chenshu"
+      ],
       "location": "记忆站操作台",
       "image_prompt": "特写，陈述的手指捏着银色芯片边缘，芯片编号被反复擦得发亮，他将芯片插入读卡槽，屏幕亮起",
       "motion_prompt": "Macro shot, fingers turn the chip showing the worn serial number, insert it into the reader slot, screen glow rises",
@@ -81,9 +90,11 @@
     },
     {
       "id": "s007",
-      "characters": ["chenshu"],
+      "characters": [
+        "chenshu"
+      ],
       "location": "记忆站操作台",
-      "image_prompt": "近景，陈述侧头看向对面的女人，屏幕冷光映在他脸上",
+      "image_prompt": "近景，陈述侧头看向对面的女人，屏幕冷光映在他脸上，面部清晰，嘴唇微张似要说话",
       "motion_prompt": "Slow turn of head toward her, subtle eye movement, ambient screen light shifting",
       "speaker": "陈述",
       "dialogue": "你确定要刷新记忆？",
@@ -91,9 +102,11 @@
     },
     {
       "id": "s008",
-      "characters": ["suli"],
+      "characters": [
+        "suli"
+      ],
       "location": "记忆站操作台",
-      "image_prompt": "近景，苏黎站在操作台另一侧直视陈述，面容平静而坚决，冷光下脸很干净",
+      "image_prompt": "近景，苏黎站在操作台另一侧直视陈述，面容平静而坚决，冷光下脸很干净，嘴唇微张似要开口",
       "motion_prompt": "She holds a steady gaze, slight forward lean, camera slowly pushes in",
       "speaker": "苏黎",
       "dialogue": "我要把它找回来。上传那天，我少拷了一段。",
@@ -101,7 +114,9 @@
     },
     {
       "id": "s009",
-      "characters": ["suli"],
+      "characters": [
+        "suli"
+      ],
       "location": "记忆站操作台",
       "image_prompt": "特写，苏黎的眼睛，瞳孔在冷光下轻轻收缩了一下",
       "motion_prompt": "Extreme close-up of her eye, pupil contracts subtly, cold light reflection trembling",
@@ -111,9 +126,11 @@
     },
     {
       "id": "s010",
-      "characters": ["chenshu"],
+      "characters": [
+        "chenshu"
+      ],
       "location": "记忆站操作台",
-      "image_prompt": "中近景，陈述隔着操作台看向苏黎，神情严肃，背景是暗下去的屏幕",
+      "image_prompt": "中近景，陈述隔着操作台看向苏黎，神情严肃，面部清晰，嘴唇微张，背景是暗下去的屏幕",
       "motion_prompt": "Static locked shot, his gaze fixed on her, faint screen flicker in background",
       "speaker": "陈述",
       "dialogue": "那是别人的记忆。你确定要偷别人记忆？",
@@ -131,7 +148,9 @@
     },
     {
       "id": "s012",
-      "characters": ["suli"],
+      "characters": [
+        "suli"
+      ],
       "location": "记忆站操作台",
       "image_prompt": "特写，苏黎的手按在银色芯片上，指节泛白",
       "motion_prompt": "Static close-up, fingers slowly tightening over the chip, knuckles whitening",
@@ -141,9 +160,11 @@
     },
     {
       "id": "s013",
-      "characters": ["suli"],
+      "characters": [
+        "suli"
+      ],
       "location": "记忆站操作台",
-      "image_prompt": "近景，苏黎低头看着台面上的芯片，眼神低垂，冷光落在灰色防护服肩头",
+      "image_prompt": "近景，苏黎目光低垂看向台面上的芯片，面部清晰可见，嘴唇微张，冷光落在灰色防护服肩头",
       "motion_prompt": "She looks down at the chip, slow subtle rise of chest before speaking, camera drifts closer",
       "speaker": "苏黎",
       "dialogue": "他是我父亲。他死在地球那天，我在火星。",
@@ -151,9 +172,11 @@
     },
     {
       "id": "s013b",
-      "characters": ["suli"],
+      "characters": [
+        "suli"
+      ],
       "location": "记忆站操作台",
-      "image_prompt": "特写，苏黎缓缓抬起眼望向陈述，眼中含着隐忍的泪光",
+      "image_prompt": "特写，苏黎缓缓抬起眼望向陈述，眼中含着隐忍的泪光，面部清晰，嘴唇微张",
       "motion_prompt": "She slowly raises her eyes toward him, slight chin lift, holding back tears, gentle push in",
       "speaker": "苏黎",
       "dialogue": "我只想再看一次他唱歌的样子。",
@@ -161,9 +184,11 @@
     },
     {
       "id": "s014",
-      "characters": ["chenshu"],
+      "characters": [
+        "chenshu"
+      ],
       "location": "记忆站操作台",
-      "image_prompt": "中景，陈述把芯片从读卡槽退出放回台面，看着她很久没有说话，屏幕的光落在他脸上像另一种日落",
+      "image_prompt": "中景，陈述把芯片从读卡槽退出放回台面，看着她很久没有说话，面部清晰，屏幕的光落在他脸上像另一种日落",
       "motion_prompt": "He slides the chip back across the table, long silent stare, warm screen light flickering across his face",
       "speaker": "",
       "dialogue": "",
@@ -171,9 +196,11 @@
     },
     {
       "id": "s015",
-      "characters": ["suli"],
+      "characters": [
+        "suli"
+      ],
       "location": "记忆站操作台",
-      "image_prompt": "特写，苏黎抬起眼，冷光在她瞳孔里碎成两颗小太阳",
+      "image_prompt": "特写，苏黎抬起眼望向镜头方向，冷光在她瞳孔里碎成两颗小太阳，面部清晰，嘴唇微张似要开口",
       "motion_prompt": "She lifts her gaze into the cold light, reflections splitting into two tiny suns in her pupils, slow push in",
       "speaker": "苏黎",
       "dialogue": "那你就照着我说的，把它重新写一遍吧。",
