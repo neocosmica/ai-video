@@ -483,6 +483,29 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     assert over.update(2, 2) == (2, 2)
     assert over.update(0, 2) == (2, 2)
     assert over.update(2, 2) == (2, 2)
+
+    # 进度引擎：权重和、步内上升、过期 leave 不压下一镜
+    from pipeline.progress_model import STAGE_WEIGHTS, ProgressEngine, build_plan
+
+    demo_steps = build_plan(ROOT / "projects" / "demo")
+    assert abs(sum(s["weight"] for s in demo_steps) - sum(STAGE_WEIGHTS.values())) < 1e-3
+    eng = ProgressEngine(str(ROOT / "projects" / "demo"), task_id="selftest")
+    eng.feed_line("分镜静帧 s001")
+    eng.feed_line("静帧 s001:  50%|████| 2/4 [00:20<00:20, 10s/it]")
+    snap1 = eng.snapshot()
+    assert snap1["overall_pct"] < 20, snap1["overall_pct"]
+    s001 = next(s for s in snap1["steps"] if s["id"] == "images:s001")
+    assert s001["pct"] == 50.0 and s001["status"] == "running"
+    eng.feed_line("静帧 s001: 100%|████| 4/4 [00:40<00:00, 10s/it]")
+    eng.feed_line("分镜静帧 s002")
+    eng.feed_line("静帧 s002:  50%|████| 2/4 [00:20<00:20, 10s/it]")
+    o_mid = eng.snapshot()["overall_pct"]
+    eng.feed_line("静帧 s001: 100%|████| 4/4 [00:40<00:00, 10s/it]")  # 过期 leave
+    snap2 = eng.snapshot()
+    s002 = next(s for s in snap2["steps"] if s["id"] == "images:s002")
+    assert s002["status"] == "running" and s002["pct"] >= 50.0
+    assert snap2["overall_pct"] >= o_mid
+
     with tempfile.TemporaryDirectory() as tmp:
         dest = Path(tmp) / "storyboard.json"
         install_storyboard(tmp, str(ROOT / "projects" / "demo" / "storyboard.json"))

@@ -31,24 +31,22 @@
   <!-- 项目工作区：选定项目后显示 -->
   <section class="col" id="workspace" hidden>
     <div class="card">
-      <h2><button id="back-to-projects" class="ghost" title="返回项目选择">← 项目</button>
-        <span id="current-project-name" class="mono"></span>
-        <span class="hint">小说 / 分镜 / 成片 / 任务历史都在 projects/<片名>/</span></h2>
+      <h2><button id="back-to-projects" class="ghost" title="返回项目列表">← 项目</button>
+        <span id="current-project-name" class="mono"></span></h2>
       <div class="row">
         <label>片名</label>
         <input id="title" placeholder="例：雨夜重逢" />
       </div>
       <div class="row">
-        <label>小说文件 <span class="hint">（默认 <项目文件夹>/novel.txt）</span></label>
+        <label>小说文件 <span class="hint">（打开项目自动载入；默认 <项目文件夹>/novel.txt）</span></label>
         <div class="fileline">
           <input id="novel-path" list="novel-list" placeholder="projects/xxx/novel.txt" />
-          <button id="novel-load" class="ghost">载入</button>
           <datalist id="novel-list"></datalist>
         </div>
       </div>
       <div class="row">
-        <label>或直接粘贴片段 <span class="hint">（保存到项目文件夹 novel.txt）</span></label>
-        <textarea id="novel-text" rows="9" placeholder="把小说片段粘到这里；引号台词会原样进入对白。&#10;留空则只使用上面已载入的文件。"></textarea>
+        <label>小说正文 <span class="hint">（可直接改；启动任务时写回 novel.txt）</span></label>
+        <textarea id="novel-text" rows="9" placeholder="打开项目后自动载入。也可在此粘贴/修改；引号台词会原样进入对白。"></textarea>
       </div>
       <div class="row split">
         <label>分镜文件（可选） <span class="hint">（默认 <项目文件夹>/storyboard.json）</span></label>
@@ -63,7 +61,7 @@
         <div class="stages" id="stage-picks"></div>
       </div>
       <div class="row inline">
-        <label class="check"><input type="checkbox" id="force"> 强制重做已有产物（--force）</label>
+        <label class="check"><input type="checkbox" id="force"> 强制重做（先清空产物再生成）</label>
         <label class="check">只重做镜头 <input id="only-shots" placeholder="s003,s004 留空=全部" style="width:150px"/></label>
       </div>
       <div class="actions">
@@ -88,7 +86,7 @@
         <span id="overall-stage" class="hint"></span>
       </div>
       <div class="stage-track" id="stage-track"></div>
-      <div id="live-items" class="live-items"></div>
+      <div id="live-items" class="live-items" aria-label="完整步骤进度"></div>
       <div class="actions">
         <button id="task-stop" class="danger">⏹ 停止</button>
         <button id="task-rerun-failed" class="ghost">↻ 重跑失败阶段</button>
@@ -98,17 +96,27 @@
     </div>
   </section>
 
-  <!-- 底部：镜头产物，横跨左右两栏（属于当前项目） -->
+  <!-- 底部：成片 + 镜头产物，横跨左右两栏（属于当前项目） -->
   <div class="card" id="shots-card" hidden>
     <h2>③ 镜头产物 <span id="shots-out-label" class="mono hint"></span></h2>
     <div class="actions" style="margin:0 0 10px">
       <label class="check"><input type="checkbox" id="auto-refresh" checked> 自动刷新（5s）</label>
-      <span id="final-badge" class="badge" hidden>🎬 final.mp4 已生成</span>
+      <span id="final-badge" class="badge success" hidden>🎬 final.mp4</span>
+    </div>
+    <div id="final-wrap" class="final-wrap" hidden>
+      <div class="final-head">
+        <span class="final-title">成片预览</span>
+        <a id="final-download" class="ghost final-link" href="#" download>下载 final.mp4</a>
+        <span id="final-meta" class="hint mono"></span>
+      </div>
+      <video id="final-player" class="final-player" controls playsinline preload="metadata"></video>
     </div>
     <div id="shots-grid" class="shots-grid"></div>
   </div>
 
-  <!-- 分镜编辑器：浮层 -->
+</main>
+
+  <!-- 分镜编辑器：挂在 layout 外，避免占网格行；整卡弹性，镜头列表吃满剩余高度 -->
   <div class="card" id="sb-editor-card" hidden>
     <h2>分镜编辑器 <span id="sb-path-label" class="mono hint"></span></h2>
     <div class="sb-toolbar">
@@ -120,7 +128,6 @@
     <div id="sb-summary" class="sb-summary"></div>
     <div id="sb-shots" class="sb-shots"></div>
   </div>
-</main>
 
 <template id="shot-card-tpl">
   <div class="shot-card">

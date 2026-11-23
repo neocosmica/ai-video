@@ -74,9 +74,13 @@ def _use_step_bar(desc: str) -> None:
     def time_steps(self):
         if self._time_steps is None:
             label = getattr(Config, "_novel_step_desc", "") or None
+            # initial/total 按完整去噪步数计：img2img 从半程起跑时，条也要从 2/4 走到 4/4，
+            # 不要变成 1/2→2/2，否则网页上看起来总在 50% 就结束。
             self._time_steps = tqdm(
                 range(self.init_time_step, self.num_inference_steps),
                 desc=label,
+                initial=self.init_time_step,
+                total=self.num_inference_steps,
                 miniters=1,
                 mininterval=0.2,
                 file=sys.stderr,

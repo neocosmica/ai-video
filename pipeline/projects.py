@@ -82,6 +82,126 @@ def artifacts_sub(out: str | Path, *parts: str) -> Path:
     return artifacts_dir(out).joinpath(*parts)
 
 
+# --force 清产物时保留：任务历史
+_KEEP_WORK_NAMES = frozenset({"webui"})
+# 各阶段对应的 work/ 子路径（相对 work/）与项目顶层文件
+_STAGE_WORK_DIRS = {
+    "images": ("frames", "characters"),
+    "audio": ("audio/voice", "audio/a2v"),
+    "videos": ("clips",),
+    "music": (),
+    "assemble": ("normalized",),
+}
+_STAGE_WORK_FILES = {
+    "audio": ("audio/manifest.json",),
+    "music": ("audio/bgm.wav", "audio/music.wav", "logs/bgm.log"),
+    "assemble": ("concat.txt", "joined.mp4", "subs.ass", "soundtrack.m4a", "final.mp4"),
+}
+_STAGE_ROOT_FILES = {
+    "assemble": ("final.mp4",),
+}
+
+
+def _parse_only_ids(only: str | None) -> set[str] | None:
+    if not only:
+        return None
+    ids = {s.strip() for s in only.replace("，", ",").split(",") if s.strip()}
+    return ids or None
+
+
+def _rm_path(path: Path, removed: list[str], root: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        rel = str(path.relative_to(root))
+    except ValueError:
+        rel = str(path)
+    if path.is_dir():
+        import shutil
+
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+    removed.append(rel)
+
+
+def _rm_shot_files(folder: Path, ids: set[str], removed: list[str], root: Path) -> None:
+    if not folder.is_dir():
+        return
+    for path in list(folder.iterdir()):
+        if not path.is_file():
+            continue
+        stem = path.stem
+        # s001 / s001-retry / s001_p1
+        base = stem.split("-")[0].split("_")[0]
+        if stem in ids or base in ids:
+            _rm_path(path, removed, root)
+
+
+def clear_artifacts(
+    out: str | Path,
+    *,
+    stages: list[str] | tuple[str, ...] | None = None,
+    only: str | None = None,
+) -> list[str]:
+    """--force 启动前清掉过程产物，避免旧帧/旧镜头掺进新片。
+
+    不删除：novel.txt、storyboard.json、project.json、work/webui/（任务历史）。
+    ``only`` 有值时只清这些镜头 id 对应的帧/音/视频文件。
+    """
+    base = Path(out) if Path(out).is_absolute() else ROOT / out
+    work = artifacts_dir(base)
+    removed: list[str] = []
+    only_ids = _parse_only_ids(only)
+    selected = [s for s in (stages or ()) if s and s != "screenplay"]
+    if not selected:
+        selected = ["images", "audio", "videos", "music", "assemble"]
+
+    if only_ids:
+        if "images" in selected:
+            _rm_shot_files(work / "frames", only_ids, removed, base)
+        if "audio" in selected:
+            _rm_shot_files(work / "audio" / "voice", only_ids, removed, base)
+            _rm_shot_files(work / "audio" / "a2v", only_ids, removed, base)
+        if "videos" in selected:
+            _rm_shot_files(work / "clips", only_ids, removed, base)
+            _rm_shot_files(work / "logs", only_ids, removed, base)
+            _rm_shot_files(work / "normalized", only_ids, removed, base)
+        if "assemble" in selected:
+            for name in _STAGE_ROOT_FILES.get("assemble", ()):
+                _rm_path(base / name, removed, base)
+            for name in ("joined.mp4", "concat.txt", "subs.ass", "soundtrack.m4a", "final.mp4"):
+                _rm_path(work / name, removed, base)
+        return removed
+
+    # 全量：勾了几乎整条流水线时，直接清空 work/（保留 webui）+ 顶层 final.mp4
+    heavy = {"images", "audio", "videos", "music", "assemble"}
+    if heavy.issubset(set(selected)) and work.is_dir():
+        for child in list(work.iterdir()):
+            if child.name in _KEEP_WORK_NAMES or child.name.startswith("."):
+                continue
+            _rm_path(child, removed, base)
+        for name in _STAGE_ROOT_FILES.get("assemble", ()):
+            _rm_path(base / name, removed, base)
+        return removed
+
+    for stage in selected:
+        for rel in _STAGE_WORK_DIRS.get(stage, ()):
+            _rm_path(work.joinpath(*rel.split("/")), removed, base)
+        for rel in _STAGE_WORK_FILES.get(stage, ()):
+            _rm_path(work.joinpath(*rel.split("/")), removed, base)
+        for name in _STAGE_ROOT_FILES.get(stage, ()):
+            _rm_path(base / name, removed, base)
+        if stage == "videos":
+            # 镜头日志跟着视频走
+            logs = work / "logs"
+            if logs.is_dir():
+                for path in list(logs.iterdir()):
+                    if path.is_file() and path.suffix == ".log" and path.name.startswith("s"):
+                        _rm_path(path, removed, base)
+    return removed
+
+
 def strip_storyboard_suffix(stem: str) -> str:
     return re.sub(r"_?storyboard$", "", stem, flags=re.IGNORECASE)
 

@@ -93,6 +93,15 @@ def cmd_run(args: argparse.Namespace) -> None:
     end_idx = STAGES.index(until) + 1 if until else len(STAGES)
     selected = list(STAGES[STAGES.index(start) : end_idx])
     from pipeline.live import clear_live, mark_stage
+    from pipeline.projects import clear_artifacts
+
+    # --force：先清对应产物，再跑；否则旧帧/旧镜头会混进新片
+    if bool(getattr(args, "force", False)):
+        removed = clear_artifacts(out, stages=selected, only=getattr(args, "only", None))
+        if removed:
+            print(f"--force：已清除 {len(removed)} 项产物（保留 novel/storyboard/work/webui）")
+        else:
+            print("--force：没有可清除的旧产物")
 
     _install_live_hooks(out, selected)
     exit_code = 0

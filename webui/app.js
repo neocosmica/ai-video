@@ -63,36 +63,91 @@ function toast(msg, bad = false) {
 }
 
 // ---------------------------------------------------------------- projects
+let refreshInFlight = false;
+let refreshQueued = false;
+
 async function refreshState() {
+  // 合并并发刷新：SSE 狂推 change 时不要叠一堆 /api/state，避免偶发失败把连接灯打闪
+  if (refreshInFlight) {
+    refreshQueued = true;
+    return;
+  }
+  refreshInFlight = true;
   try {
     const q = state.project ? `?project=${encodeURIComponent(state.project)}` : "";
     const data = await api(`/api/state${q}`);
     state.projects = data.projects || [];
     state.novels = data.novels || [];
     state.storyboards = data.storyboards || [];
-    if (state.project) state.tasks = data.tasks || [];
+    if (state.project) {
+      // 合并任务：保留本地已通过进度 SSE 拿到的更新 seq，避免 4s 全量刷新把条打回去
+      const prevById = Object.create(null);
+      for (const t of state.tasks || []) prevById[t.id] = t;
+      state.tasks = (data.tasks || []).map((t) => {
+        const old = prevById[t.id];
+        if (!old?.progress) return t;
+        const oldSeq = Number(old.progress.seq) || 0;
+        const newSeq = Number(t.progress?.seq) || 0;
+        if (oldSeq > newSeq) {
+          return { ...t, progress: old.progress, stages: old.stages?.length ? old.stages : t.stages };
+        }
+        return t;
+      });
+    }
     setConn(true);
     renderProjects();
     renderDatalists();
     renderTasks();
-    // 刷新后同步当前打开的任务详情（进度条/逐镜进度），否则只更新列表不更新面板
+    // 列表刷新不覆盖进度 SSE；只同步按钮等元数据
     if (state.selectedTaskId) {
       const job = state.tasks.find((t) => t.id === state.selectedTaskId);
       if (job) {
-        renderStages(job);
         $("#task-stop").disabled = job.status !== "running";
+        // 若尚无进度 SSE 数据，用 state 里的 progress 渲染一次
+        if (job.progress && (Number(job.progress.seq) || 0) >= appliedProgressSeq) {
+          appliedProgressSeq = Number(job.progress.seq) || appliedProgressSeq;
+          renderStages(job);
+        }
       }
     }
     renderShotsIfVisible();
   } catch (err) {
     setConn(false);
+  } finally {
+    refreshInFlight = false;
+    if (refreshQueued) {
+      refreshQueued = false;
+      setTimeout(refreshState, 400);
+    }
   }
 }
 
+// 连接灯：已连接立刻亮；未连接延迟确认，避免 SSE 重连/瞬时请求失败高频闪
+let connShown = null; // null | true | false
+let connOffTimer = null;
+
 function setConn(on) {
-  const el = $("#conn");
-  el.className = "conn " + (on ? "on" : "off");
-  el.textContent = on ? "● 已连接" : "● 未连接（服务未启动？）";
+  if (on) {
+    if (connOffTimer) {
+      clearTimeout(connOffTimer);
+      connOffTimer = null;
+    }
+    if (connShown === true) return;
+    connShown = true;
+    const el = $("#conn");
+    el.className = "conn on";
+    el.textContent = "● 已连接";
+    return;
+  }
+  if (connShown === false || connOffTimer) return;
+  connOffTimer = setTimeout(() => {
+    connOffTimer = null;
+    if (connShown === false) return;
+    connShown = false;
+    const el = $("#conn");
+    el.className = "conn off";
+    el.textContent = "● 未连接（服务未启动？）";
+  }, 2500);
 }
 
 let projectsSig = "";
@@ -183,10 +238,12 @@ async function openProject(name, path, { autoSelectRunning = true } = {}) {
   $("#col-tasks").hidden = false;
   $("#shots-card").hidden = false;
   $("#task-detail-card").hidden = true;
-  $("#current-project-name").textContent = `${state.currentOut}/`;
+  $("#current-project-name").textContent = name || state.currentOut;
   $("#title").value = name;
-  $("#novel-path").value = state.novels.some((n) => n.path === `${state.currentOut}/novel.txt`)
-    ? `${state.currentOut}/novel.txt` : "";
+  // 默认路径固定到项目 novel.txt；有没有文件由自动载入决定
+  const defaultNovel = `${state.currentOut}/novel.txt`;
+  const known = (state.novels || []).find((n) => n.path === defaultNovel || n.path.startsWith(`${state.currentOut}/`));
+  $("#novel-path").value = known?.path || defaultNovel;
   $("#novel-text").value = "";
   $("#storyboard-path").value = `${state.currentOut}/storyboard.json`;
   clearShotCards();
@@ -199,6 +256,12 @@ async function openProject(name, path, { autoSelectRunning = true } = {}) {
     });
   } catch {}
   await refreshState();
+  // refresh 后 novels 清单可能更全，再对齐一次默认路径并自动载入正文
+  if (!(state.novels || []).some((n) => n.path === $("#novel-path").value.trim())) {
+    const again = (state.novels || []).find((n) => n.path === defaultNovel) || (state.novels || []).find((n) => n.path.startsWith(`${state.currentOut}/`));
+    $("#novel-path").value = again?.path || defaultNovel;
+  }
+  await loadNovel({ quiet: true });
   renderShots();
   scheduleShotsAutoRefresh();
   // 有运行中的任务就自动打开详情，避免重开网页后还要再点一次才看得到进度
@@ -241,9 +304,13 @@ function renderStagePicks() {
   }
 }
 
-async function loadNovel() {
+async function loadNovel({ quiet = false } = {}) {
   const path = $("#novel-path").value.trim();
-  if (!path) { toast("先填小说文件路径", true); return; }
+  if (!path) {
+    $("#novel-text").value = "";
+    if (!quiet) toast("没有小说路径", true);
+    return;
+  }
   try {
     const data = await api("/api/file/read", {
       method: "POST",
@@ -251,9 +318,11 @@ async function loadNovel() {
       body: JSON.stringify({ path }),
     });
     $("#novel-text").value = data.content;
-    toast(`已载入 ${path}（${data.content.length} 字）`);
+    if (!quiet) toast(`已载入 ${path}（${data.content.length} 字）`);
   } catch (err) {
-    toast(`载入失败：${err.message}`, true);
+    $("#novel-text").value = "";
+    // 打开项目时文件还不存在：安静失败，留给用户粘贴
+    if (!quiet) toast(`载入失败：${err.message}`, true);
   }
 }
 
@@ -335,13 +404,16 @@ function statusLabel(status) {
 }
 
 // ---------------------------------------------------------------- task detail
+let progressEs = null;
+let appliedProgressSeq = -1;
+
 async function selectTask(id) {
   state.selectedTaskId = id;
   state.logOffset = 0;
   state.followLog = true;
   stageTrackSig = "";
   liveItemsSig = "";
-  // 新任务新日志：清掉上一个任务的日志，别让旧失败信息挂在下面
+  appliedProgressSeq = -1;
   $("#log").textContent = "";
   const job = state.tasks.find((t) => t.id === id);
   if (!job) return;
@@ -353,65 +425,101 @@ async function selectTask(id) {
   $("#shots-out-label").textContent = job.out;
   state.currentOut = job.out;
   state.currentStoryboard = `${job.out}/storyboard.json`;
+  connectProgress(id);
   startLogPolling(id);
   renderTasks();
   renderShotsIfVisible();
+}
+
+function connectProgress(taskId) {
+  if (progressEs) {
+    try { progressEs.close(); } catch {}
+    progressEs = null;
+  }
+  if (!taskId) return;
+  const es = new EventSource(`/api/progress/${encodeURIComponent(taskId)}`);
+  progressEs = es;
+  const apply = (payload) => {
+    if (state.selectedTaskId !== taskId) return;
+    const prog = payload?.progress || payload;
+    if (!prog || typeof prog !== "object") return;
+    const seq = Number(prog.seq) || 0;
+    if (seq < appliedProgressSeq) return;
+    appliedProgressSeq = seq;
+    const job = state.tasks.find((t) => t.id === taskId);
+    if (!job) return;
+    job.progress = prog;
+    if (Array.isArray(prog.stages) && prog.stages.length) {
+      job.stages = prog.stages.map((s) => ({
+        key: s.key,
+        label: s.label || STAGE_LABELS[s.key] || s.key,
+        status: s.status || "pending",
+        pct: s.pct,
+        weight: s.weight,
+      }));
+    }
+    if (prog.current_stage !== undefined) job.current_stage = prog.current_stage;
+    if (prog.status && prog.status !== "running") {
+      // 引擎终态；任务级 status 仍以 /api/state 为准，这里只刷新 UI
+    }
+    renderStages(job);
+    $("#task-stop").disabled = job.status !== "running";
+  };
+  es.addEventListener("progress", (ev) => {
+    try { apply(JSON.parse(ev.data)); } catch {}
+  });
+  es.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      if (data.event === "progress" || data.progress) apply(data);
+    } catch {}
+  };
+  es.addEventListener("end", () => {
+    if (progressEs === es) {
+      try { es.close(); } catch {}
+      progressEs = null;
+    }
+  });
+  es.onerror = () => {
+    // 浏览器会自动重连；连接灯由全局 /api/events 管，这里不抢
+  };
 }
 
 let stageTrackSig = "";
 
 function renderStages(job) {
   const wrap = $("#stage-track");
-  const sig = JSON.stringify([(job.stages || []).map((s) => [s.key, s.status])]);
+  const stages = job.stages || [];
+  const sig = JSON.stringify(stages.map((s) => [s.key, s.status, s.pct]));
   if (sig !== stageTrackSig) {
     stageTrackSig = sig;
-    wrap.innerHTML = (job.stages || []).map((s) => {
+    wrap.innerHTML = stages.map((s) => {
       const cls = s.status === "done" ? "done" : s.status === "running" ? "running" : s.status === "failed" ? "failed" : "";
       const icon = s.status === "done" ? "✓" : s.status === "running" ? "⏳" : s.status === "failed" ? "✕" : "·";
-      return `<div class="stage-step ${cls}">${icon} ${STAGE_LABELS[s.key] || s.key}</div>`;
+      const pct = typeof s.pct === "number" ? ` ${Math.min(100, s.pct).toFixed(0)}%` : "";
+      return `<div class="stage-step ${cls}">${icon} ${STAGE_LABELS[s.key] || s.label || s.key}<span class="stage-pct mono">${pct}</span></div>`;
     }).join("");
   }
   renderOverall(job);
   renderLiveItems(job);
 }
 
-// STAGE_WEIGHTS 与后端 pipeline/web.py 保持一致
-const STAGE_WEIGHTS = {
-  screenplay: 0.02, images: 0.18, audio: 0.10, videos: 0.60, music: 0.05, assemble: 0.05,
-};
-
 function renderOverall(job) {
   const fill = $("#overall-fill");
   const pctEl = $("#overall-pct");
   const stageEl = $("#overall-stage");
-  let pct = 0;
+  const prog = job.progress || {};
+  let pct = typeof prog.overall_pct === "number" ? prog.overall_pct : 0;
+  if (job.status === "success") pct = 100;
   let currentLabel = "";
-  for (const s of job.stages || []) {
-    const w = STAGE_WEIGHTS[s.key] || 0.1;
-    if (s.status === "done") pct += w * 100;
-    else if (s.status === "running") {
-      const sp = job.progress?.stage_pct?.[s.key];
-      let inner;
-      if (typeof sp === "number" && sp > 0) {
-        inner = Math.min(99, sp);
-      } else {
-        // 后端没给 stage_pct 时，用当前条目的 pct 凑一个阶段内进度，避免整段卡在 ~3%
-        const run = (job.progress?.items || []).find((i) => i.status === "running");
-        if (run && typeof run.pct === "number" && run.pct > 0) inner = Math.min(99, run.pct);
-        else if (run && run.total > 1) inner = Math.min(99, 100 * (run.step || 0) / run.total);
-        else inner = job.progress?.current ? 8 : 2;
-      }
-      pct += w * inner;
-      currentLabel = `正在：${STAGE_LABELS[s.key] || s.key}`;
-    }
-  }
-  if (job.status === "success") { pct = 100; currentLabel = "完成"; }
-  if (job.status === "failed") currentLabel = "失败（可点「重跑失败阶段」）";
-  if (job.status === "interrupted") currentLabel = "已中断";
+  if (job.status === "success") currentLabel = "完成";
+  else if (job.status === "failed") currentLabel = "失败（可点「重跑失败阶段」）";
+  else if (job.status === "interrupted") currentLabel = "已中断";
+  else if (prog.current) currentLabel = `正在：${prog.current}`;
+  else if (job.current_stage) currentLabel = `正在：${STAGE_LABELS[job.current_stage] || job.current_stage}`;
   const pctText = `${Math.min(100, pct).toFixed(1)}%`;
   const width = `${Math.min(100, pct).toFixed(1)}%`;
   const fillCls = "overall-fill " + (job.status === "success" ? "done" : job.status === "failed" ? "failed" : "");
-  // 值没变不写 DOM：进度条每 1.2s 刷新一次，重写会打断 CSS 过渡动画
   if (fill.style.width !== width) fill.style.width = width;
   if (fill.className !== fillCls) fill.className = fillCls;
   if (pctEl.textContent !== pctText) pctEl.textContent = pctText;
@@ -430,28 +538,55 @@ let liveItemsSig = "";
 
 function renderLiveItems(job) {
   const wrap = $("#live-items");
-  const items = job.progress?.items || [];
-  // 任务已结束就清空；进行中只保留「正在跑」的条，完成/未开始的不挂着占位
-  if (job.status !== "running") {
-    if (liveItemsSig !== "ended") { liveItemsSig = "ended"; wrap.innerHTML = ""; }
-    return;
-  }
-  const shown = items.filter((i) => i.status === "running").slice(0, 3);
-  const sig = JSON.stringify(shown.map((i) => [i.id, i.status, i.step, i.total, i.pct, i.eta_s]));
+  const prog = job.progress || {};
+  const steps = Array.isArray(prog.steps) ? prog.steps : [];
+  const currentId = prog.current_step_id;
+  // 完整步骤表；无 steps 时退回旧 items
+  const list = steps.length
+    ? steps
+    : (prog.items || []).map((i) => ({ ...i, status: i.status || "running" }));
+  const sig = JSON.stringify([
+    job.status,
+    currentId,
+    list.map((i) => [i.id, i.status, i.step, i.total, i.pct, i.eta_s]),
+  ]);
   if (sig === liveItemsSig) return;
   liveItemsSig = sig;
-  if (!shown.length) { wrap.innerHTML = ""; return; }
-  wrap.innerHTML = shown.map((i) => {
-    const stepText = i.total > 1 ? `${i.step}/${i.total}` : "";
-    const pct = i.pct || 0;
-    const eta = fmtEta(i.eta_s);
-    return `<div class="live-item">
+  if (!list.length) {
+    wrap.innerHTML = job.status === "running"
+      ? `<div class="empty" style="padding:8px">等待步骤表…</div>`
+      : "";
+    return;
+  }
+  let lastStage = null;
+  const parts = [];
+  for (const i of list) {
+    if (i.stage && i.stage !== lastStage) {
+      lastStage = i.stage;
+      parts.push(`<div class="step-group">${esc(STAGE_LABELS[i.stage] || i.stage)}</div>`);
+    }
+    const step = Number(i.step) || 0;
+    const total = Math.max(1, Number(i.total) || 1);
+    const pct = typeof i.pct === "number" ? Math.min(100, i.pct) : (total > 1 ? (100 * step) / total : 0);
+    const stepText = total > 1 ? `${step}/${total}` : (pct > 0 && pct < 100 ? `${pct.toFixed(0)}%` : "");
+    const eta = i.status === "running" ? fmtEta(i.eta_s) : "";
+    const cls = [
+      "live-item",
+      i.status === "done" ? "done" : "",
+      i.status === "failed" ? "failed" : "",
+      i.status === "running" || i.id === currentId ? "current" : "",
+      i.status === "pending" ? "pending" : "",
+    ].filter(Boolean).join(" ");
+    parts.push(`<div class="${cls}">
       <span class="li-label" title="${esc(i.label || "")}">${esc(i.label || i.id)}</span>
       <span class="li-step mono">${stepText}</span>
       <div class="li-bar"><div class="li-fill" style="width:${pct}%"></div></div>
       <span class="li-eta">${eta}</span>
-    </div>`;
-  }).join("");
+    </div>`);
+  }
+  wrap.innerHTML = parts.join("");
+  const cur = wrap.querySelector(".live-item.current");
+  if (cur) cur.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
 function startLogPolling(id) {
@@ -460,7 +595,6 @@ function startLogPolling(id) {
     state.polling = null;
   }
   const pull = async () => {
-    // 任务切换后停止旧轮询
     if (state.selectedTaskId !== id) { clearInterval(state.polling); state.polling = null; return; }
     try {
       const data = await api(`/api/log/${id}?after=${state.logOffset}`);
@@ -471,12 +605,18 @@ function startLogPolling(id) {
       }
       const job = state.tasks.find((t) => t.id === id);
       if (job) {
-        // 日志接口带回的细粒度 progress / stages，立刻喂给总进度条
-        if (data.progress) job.progress = data.progress;
-        if (Array.isArray(data.stages) && data.stages.length) job.stages = data.stages;
+        // 日志只负责文本；进度以 /api/progress SSE 为准。
+        // 断线兜底：仅当本地还没有更新的 seq 时才吃 log 里的 progress
+        const incoming = data.progress;
+        const incomingSeq = Number(incoming?.seq) || 0;
+        if (incoming && incomingSeq > appliedProgressSeq) {
+          appliedProgressSeq = incomingSeq;
+          job.progress = incoming;
+          if (Array.isArray(data.stages) && data.stages.length) job.stages = data.stages;
+          renderStages(job);
+        }
         if (data.status) job.status = data.status;
         if (data.current_stage !== undefined) job.current_stage = data.current_stage;
-        renderStages(job);
         $("#task-stop").disabled = job.status !== "running";
         if (job.status === "failed" || job.status === "success" || job.status === "interrupted") {
           renderShotsIfVisible();
@@ -487,7 +627,7 @@ function startLogPolling(id) {
     }
   };
   pull();
-  state.polling = setInterval(pull, 800);
+  state.polling = setInterval(pull, 1200);
 }
 
 function appendLogLines(lines) {
@@ -593,6 +733,53 @@ function mediaSig(entry) {
   return entry ? `${entry.mtime}:${entry.size}` : "";
 }
 
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderFinalVideo(final) {
+  const wrap = $("#final-wrap");
+  const badge = $("#final-badge");
+  const player = $("#final-player");
+  const link = $("#final-download");
+  const meta = $("#final-meta");
+  if (!wrap || !player) return;
+  const has = !!(final && final.url);
+  wrap.hidden = !has;
+  if (badge) badge.hidden = !has;
+  if (!has) {
+    if (player.src) {
+      player.removeAttribute("src");
+      player.load();
+    }
+    return;
+  }
+  const sig = mediaSig(final);
+  if (player.dataset.sig !== sig) {
+    const paused = player.paused;
+    const t = player.currentTime || 0;
+    player.src = final.url;
+    player.dataset.sig = sig;
+    player.load();
+    // 文件更新时尽量停在原位置；首次载入不自动播
+    if (!paused && t > 0) {
+      player.addEventListener("loadedmetadata", () => {
+        try { player.currentTime = Math.min(t, player.duration || t); } catch {}
+      }, { once: true });
+    }
+  }
+  if (link) {
+    link.href = final.url;
+    link.setAttribute("download", "final.mp4");
+  }
+  if (meta) {
+    meta.textContent = `${fmtBytes(final.size)} · ${final.path || "final.mp4"}`;
+  }
+}
+
 function renderShotsIfVisible() {
   if (!state.project) return;
   $("#shots-card").hidden = false;
@@ -628,8 +815,7 @@ async function renderShots() {
   }
   if (seq !== renderShotsSeq) return;
   if (!media && shotCards.size) return; // 产物清单暂时拿不到：保持现状，别清空预览
-  if (media?.final) $("#final-badge").hidden = false;
-  else $("#final-badge").hidden = true;
+  renderFinalVideo(media?.final || null);
   // 2) 拉分镜（决定镜头顺序和台词）
   let shots = [];
   let reuseMap = {};
@@ -832,36 +1018,121 @@ async function openStoryboardEditor() {
   renderStoryboardEditor();
 }
 
+const VOICE_OPTIONS = {
+  female: ["Serena", "Vivian"],
+  male: ["Dylan", "Uncle_Fu", "Eric"],
+};
+
+function bindSbFields(root, target, { onCharacters } = {}) {
+  $$(".fields [data-f]", root).forEach((input) => {
+    const apply = () => {
+      const f = input.dataset.f;
+      if (f === "characters" && onCharacters) {
+        onCharacters(input.value);
+        return;
+      }
+      if (f === "seed") {
+        const n = parseInt(input.value, 10);
+        target.seed = Number.isFinite(n) ? n : 0;
+        return;
+      }
+      target[f] = input.value.trim();
+    };
+    input.addEventListener("change", apply);
+    input.addEventListener("input", apply);
+  });
+}
+
 function renderStoryboardEditor() {
   const sb = state.sbData;
   if (!sb) return;
+  if (!Array.isArray(sb.characters)) sb.characters = [];
+  if (!Array.isArray(sb.shots)) sb.shots = [];
   const summary = $("#sb-summary");
-  summary.textContent = `${sb.characters?.length || 0} 个角色 · ${sb.shots?.length || 0} 镜${sb.title ? ` · 《${sb.title}》` : ""}`;
+  summary.textContent = `${sb.characters.length} 个角色 · ${sb.shots.length} 镜${sb.title ? ` · 《${sb.title}》` : ""}`;
   const wrap = $("#sb-shots");
   wrap.innerHTML = "";
 
-  // 角色简表
-  const charBlock = document.createElement("div");
-  charBlock.className = "sb-shot";
-  charBlock.style.gridColumn = "1 / -1";
-  charBlock.innerHTML = `<div class="shot-meta"><span class="mono">characters</span></div>
-    <div class="fields">
-      <label>JSON</label>
-      <textarea rows="3" id="sb-chars">${esc(JSON.stringify(sb.characters || [], null, 1))}</textarea>
-    </div>`;
-  wrap.appendChild(charBlock);
+  // 角色：解析后按字段编辑，不再塞一整段 JSON
+  const charHead = document.createElement("div");
+  charHead.className = "sb-section-head";
+  charHead.innerHTML = `<span class="mono">characters</span><span class="hint">id / 姓名 / 性别 / 音色 / 外貌</span>`;
+  wrap.appendChild(charHead);
 
-  (sb.shots || []).forEach((shot, idx) => {
+  sb.characters.forEach((ch, idx) => {
+    const gender = ch.gender === "male" ? "male" : "female";
+    const voices = VOICE_OPTIONS[gender] || VOICE_OPTIONS.female;
+    const voice = ch.voice && voices.includes(ch.voice) ? ch.voice : (voices[0] || "");
+    ch.gender = gender;
+    if (!ch.voice) ch.voice = voice;
+    const row = document.createElement("div");
+    row.className = "sb-shot sb-char";
+    row.innerHTML = `<div class="shot-meta">
+        <span class="mono">${esc(ch.name || ch.id || `角色${idx + 1}`)}</span>
+        <button type="button" class="ghost sb-del">删除</button>
+      </div>
+      <div class="fields">
+        <label>id</label><input data-f="id" value="${esc(ch.id || "")}" placeholder="chenyuan">
+        <label>name</label><input data-f="name" value="${esc(ch.name || "")}" placeholder="陈媛">
+        <label>gender</label>
+        <select data-f="gender">
+          <option value="female"${gender === "female" ? " selected" : ""}>female</option>
+          <option value="male"${gender === "male" ? " selected" : ""}>male</option>
+        </select>
+        <label>voice</label>
+        <select data-f="voice">
+          ${voices.map((v) => `<option value="${esc(v)}"${(ch.voice || voice) === v ? " selected" : ""}>${esc(v)}</option>`).join("")}
+        </select>
+        <label>appearance</label><textarea data-f="appearance" rows="2" placeholder="只写原文可见外貌">${esc(ch.appearance || "")}</textarea>
+        <label>seed</label><input data-f="seed" type="number" value="${esc(ch.seed ?? "")}">
+      </div>`;
+    $(".sb-del", row).addEventListener("click", () => {
+      sb.characters.splice(idx, 1);
+      renderStoryboardEditor();
+    });
+    bindSbFields(row, ch);
+    $$("select[data-f]", row).forEach((sel) => {
+      sel.addEventListener("change", () => {
+        ch[sel.dataset.f] = sel.value;
+        if (sel.dataset.f === "gender") renderStoryboardEditor(); // 换性别 → 刷新音色选项
+      });
+    });
+    wrap.appendChild(row);
+  });
+
+  const addChar = document.createElement("button");
+  addChar.type = "button";
+  addChar.textContent = "＋ 添加角色";
+  addChar.className = "ghost";
+  addChar.addEventListener("click", () => {
+    sb.characters.push({
+      id: `char${sb.characters.length + 1}`,
+      name: "",
+      gender: "female",
+      voice: "Serena",
+      appearance: "",
+      seed: Math.floor(Math.random() * 0xffffffff),
+    });
+    renderStoryboardEditor();
+  });
+  wrap.appendChild(addChar);
+
+  const shotHead = document.createElement("div");
+  shotHead.className = "sb-section-head";
+  shotHead.innerHTML = `<span class="mono">shots</span><span class="hint">镜头列表</span>`;
+  wrap.appendChild(shotHead);
+
+  sb.shots.forEach((shot, idx) => {
     const row = document.createElement("div");
     row.className = "sb-shot";
     row.innerHTML = `<div class="shot-meta">
         <span class="mono">#${idx + 1} ${esc(shot.id || "")}</span>
-        <button class="ghost sb-del">删除</button>
+        <button type="button" class="ghost sb-del">删除</button>
       </div>
       <div class="fields">
         <label>id</label><input data-f="id" value="${esc(shot.id || "")}">
         <label>location</label><input data-f="location" value="${esc(shot.location || "")}">
-        <label>characters</label><input data-f="characters" value="${esc((shot.characters || []).join(","))}">
+        <label>characters</label><input data-f="characters" value="${esc((shot.characters || []).join(","))}" placeholder="角色 id，逗号分隔">
         <label>image_prompt</label><textarea data-f="image_prompt" rows="2">${esc(shot.image_prompt || "")}</textarea>
         <label>motion_prompt</label><textarea data-f="motion_prompt" rows="2">${esc(shot.motion_prompt || "")}</textarea>
         <label>speaker</label><input data-f="speaker" value="${esc(shot.speaker || "")}">
@@ -869,28 +1140,24 @@ function renderStoryboardEditor() {
         <label>emotion</label><input data-f="emotion" value="${esc(shot.emotion || "")}">
       </div>`;
     $(".sb-del", row).addEventListener("click", () => {
-      state.sbData.shots.splice(idx, 1);
+      sb.shots.splice(idx, 1);
       renderStoryboardEditor();
     });
-    $$(".fields [data-f]", row).forEach((input) => {
-      input.addEventListener("change", () => {
-        const f = input.dataset.f;
-        if (f === "characters") {
-          shot.characters = input.value.split(/[,，\s]+/).filter(Boolean);
-        } else {
-          shot[f] = input.value.trim();
-        }
-      });
+    bindSbFields(row, shot, {
+      onCharacters: (value) => {
+        shot.characters = value.split(/[,，\s]+/).filter(Boolean);
+      },
     });
     wrap.appendChild(row);
   });
 
   const addBtn = document.createElement("button");
+  addBtn.type = "button";
   addBtn.textContent = "＋ 添加镜头";
   addBtn.className = "ghost";
   addBtn.addEventListener("click", () => {
-    state.sbData.shots.push({
-      id: `s${String((state.sbData.shots?.length || 0) + 1).padStart(3, "0")}`,
+    sb.shots.push({
+      id: `s${String((sb.shots.length || 0) + 1).padStart(3, "0")}`,
       characters: [], location: "", image_prompt: "", motion_prompt: "",
       speaker: "", dialogue: "", emotion: "calm",
     });
@@ -901,16 +1168,6 @@ function renderStoryboardEditor() {
 
 async function saveStoryboard() {
   if (!state.sbData) return;
-  // 角色文本框
-  const charsEl = $("#sb-chars");
-  if (charsEl) {
-    try {
-      state.sbData.characters = JSON.parse(charsEl.value);
-    } catch (err) {
-      toast(`characters 不是合法 JSON：${err.message}`, true);
-      return;
-    }
-  }
   try {
     await api("/api/storyboard/write", {
       method: "POST",
@@ -941,14 +1198,22 @@ async function validateStoryboard() {
 }
 
 // ---------------------------------------------------------------- SSE + init
+let sseRefreshTimer = null;
+
 function connectEvents() {
+  // 全局事件只刷新任务列表元数据；细进度走 /api/progress/<id>
   const es = new EventSource("/api/events");
   es.onopen = () => setConn(true);
   es.onerror = () => setConn(false);
   es.onmessage = (ev) => {
     try {
       const data = JSON.parse(ev.data);
-      if (data.event === "change") refreshState();
+      if (data.event !== "change") return;
+      if (sseRefreshTimer) return;
+      sseRefreshTimer = setTimeout(() => {
+        sseRefreshTimer = null;
+        refreshState();
+      }, 1500);
     } catch {}
   };
 }
@@ -964,7 +1229,11 @@ async function loadBudget() {
 }
 
 function bind() {
-  $("#novel-load").addEventListener("click", loadNovel);
+  // 改路径后失焦/回车即自动载入，不再需要「载入」按钮
+  $("#novel-path").addEventListener("change", () => loadNovel({ quiet: false }));
+  $("#novel-path").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); loadNovel({ quiet: false }); }
+  });
   $("#start-btn").addEventListener("click", startTask);
   $("#storyboard-edit").addEventListener("click", openStoryboardEditor);
   $("#sb-save").addEventListener("click", saveStoryboard);

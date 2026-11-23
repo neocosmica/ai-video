@@ -32,6 +32,12 @@ from pipeline.mirrors import apply_mirrors
 
 apply_mirrors()
 
+from pipeline.progress_model import (
+    STAGE_LABELS as _PM_STAGE_LABELS,
+    STAGE_WEIGHTS as _PM_STAGE_WEIGHTS,
+    STAGES as _PM_STAGES,
+    ProgressEngine,
+)
 from pipeline.projects import (
     PROJECTS_DIRNAME,
     artifacts_dir,
@@ -49,278 +55,58 @@ STATE_FILENAME = "state.json"
 LOG_TAIL_LINES = 4000  # 内存里每任务保留的日志行数
 HISTORY = 30  # 每个项目 state.json 里最多保留多少条任务记录
 
-# 与 pipeline.run.STAGES 保持一致；单独在这里声明是为了 import 轻量
-STAGES = ("screenplay", "images", "audio", "videos", "music", "assemble")
-STAGE_LABELS = {
-    "screenplay": "校验分镜",
-    "images": "静帧生成",
-    "audio": "对白配音",
-    "videos": "视频生成",
-    "music": "配乐生成",
-    "assemble": "合成混音",
-}
-# 总进度条里各阶段的权重（videos 最重）
-STAGE_WEIGHTS = {
-    "screenplay": 0.02,
-    "images": 0.18,
-    "audio": 0.10,
-    "videos": 0.60,
-    "music": 0.05,
-    "assemble": 0.05,
-}
-
-# 子进程终端条（tqdm）解析：`s003 a2v:  45%|████▌     | 5/11 [00:16<00:20,  2.30s/it]`
-_TQDM_LINE = re.compile(
-    r"^(?P<desc>.+?):\s+\d+%\|.*?\|\s*(?P<n>\d+)/(?P<total>\d+)\s*\[(?P<elapsed>[^<]*)<(?P<eta>[^\],]*)"
-)
-# 进度条 desc → 正在处理的条目 id
-_DESC_ITEMS = (
-    (re.compile(r"^(?P<id>\S+)\s+(?:a2v|i2v)$"), "{id}"),
-    (re.compile(r"^静帧\s+(?P<id>\S+)"), "{id}"),
-    (re.compile(r"^空镜\s+(?P<id>\S+)"), "{id}"),
-    (re.compile(r"^肖像\s+(?P<name>.+)$"), "肖像 {name}"),
-    (re.compile(r"^(?P<name>配乐)$"), "配乐"),
-    (re.compile(r"^(?P<name>MusicGen)$"), "配乐"),  # 原始 MusicGen 条也归到配乐
-)
-# 行首日志 → 条目开始 / 完成 / 失败
-_ITEM_START = (
-    (re.compile(r"^角色参考图\s+(.+?)\s*->"), "images"),
-    (re.compile(r"^空镜\s+(\S+)\s*->"), "images"),
-    (re.compile(r"^分镜静帧\s+(\S+)"), "images"),
-    (re.compile(r"^对白\s+(\S+)\s*·"), "audio"),
-    (re.compile(r"^整理\s+(\S+)"), "assemble"),
-)
-_ITEM_DONE = (
-    re.compile(r"^已有镜头\s+(\S+)，跳过"),
-)
-_ITEM_FAIL = (
-    re.compile(r"^镜头\s+(\S+)\s+失败"),
-    re.compile(r"^跳过\s+(\S+)[:：]"),
-)
+# 与 pipeline.progress_model / pipeline.run 保持一致
+STAGES = _PM_STAGES
+STAGE_LABELS = dict(_PM_STAGE_LABELS)
+STAGE_WEIGHTS = dict(_PM_STAGE_WEIGHTS)
 
 
 # ---------------------------------------------------------------------------
-# 任务
+# 进度：委托 ProgressEngine（见 pipeline/progress_model.py）
 # ---------------------------------------------------------------------------
 
 
-class ProgressTracker:
-    """解析子进程输出的 tqdm 行，维护每镜进度 + 阶段内合成进度。
+class _EngineTracker:
+    """兼容旧 tracker.feed / snapshot / finalize 调用面。"""
 
-    进度来源与终端一致（``pipeline.progress._ShotBar`` 看到的同一批行）：
-    - 视频每镜：LTX 两段 Denoising 合并条（8+3 步），解析 ``desc: n/total``；
-    - 图像每张 / TTS 每句 / 配乐：只标「进行中」，模型不吐可解析的步数；
-    - 失败/被杀：标记该镜失败。
-    """
+    def __init__(self, engine: ProgressEngine) -> None:
+        self.engine = engine
 
-    def __init__(self, job: "Job") -> None:
-        self.job = job
-        self.lock = threading.Lock()
-        # item_id -> {"label", "pct", "step", "total", "eta_s", "status", "desc"}
-        self.items: dict[str, dict] = {}
-        self.stage_pct: dict[str, float] = {}
-        self.current_desc: str | None = None
+    def feed(self, line: str, stage: str | None = None) -> None:
+        self.engine.feed_line(line, stage)
 
-    # -- 主入口：每收到一行调用一次 ---------------------------------------
-    def feed(self, line: str, stage: str | None) -> None:
-        with self.lock:
-            self._feed_locked(line, stage)
-
-    def _feed_locked(self, line: str, stage: str | None) -> None:
-        m = _TQDM_LINE.match(line.strip())
-        if m:
-            desc = m.group("desc").strip()
-            n, total = int(m.group("n")), int(m.group("total"))
-            eta_s = _parse_hms(m.group("eta"))
-            item_id, label = self._item_for_desc(desc)
-            if item_id is not None:
-                # 换镜头时先收掉其它 running，否则网页会叠多条进度条
-                self._close_running(except_id=item_id)
-                item = self.items.setdefault(
-                    item_id,
-                    {"label": label, "pct": 0.0, "step": 0, "total": total, "eta_s": None, "status": "running"},
-                )
-                item.update(
-                    {
-                        "label": label,
-                        "step": n,
-                        "total": total,
-                        "pct": round(100.0 * n / max(1, total), 1),
-                        "eta_s": eta_s,
-                        "status": "running" if n < total else "done",
-                    }
-                )
-                self.current_desc = desc
-            self._recompute_stage_pct(stage)
-            return
-        # 阶段级整行完成消息
-        for pattern in _ITEM_DONE:
-            mm = pattern.match(line.strip())
-            if mm:
-                item_id = f"shot:{mm.group(1)}"
-                item = self.items.setdefault(
-                    item_id,
-                    {"label": mm.group(1), "pct": 0.0, "step": 0, "total": 1, "eta_s": None, "status": "running"},
-                )
-                item["status"] = "done"
-                item["pct"] = 100.0
-                self._recompute_stage_pct(stage)
-                return
-        for pattern in _ITEM_FAIL:
-            mm = pattern.match(line.strip())
-            if mm:
-                item_id = f"shot:{mm.group(1)}"
-                item = self.items.setdefault(
-                    item_id,
-                    {"label": mm.group(1), "pct": 0.0, "step": 0, "total": 1, "eta_s": None, "status": "running"},
-                )
-                item["status"] = "failed"
-                item["pct"] = item.get("pct") or 0.0
-                self._recompute_stage_pct(stage)
-                return
-        for pattern, stage_key in _ITEM_START:
-            mm = pattern.match(line.strip())
-            if mm:
-                name = mm.group(1)
-                # assemble 的「整理 s001」与视频阶段的镜头条目同名，加前缀避免混同
-                label = f"整理 {name}" if stage_key == "assemble" else name
-                item_id = f"{stage_key}:{mm.group(1)}"
-                # 「整理 s001」→「整理 s002」没有单独完成行；开新条时必须关掉旧的
-                self._close_running(except_id=item_id)
-                item = self.items.get(item_id)
-                if item is None:
-                    self.items[item_id] = {
-                        "label": label,
-                        "pct": 0.0,
-                        "step": 0,
-                        "total": 1,
-                        "eta_s": None,
-                        "status": "running",
-                    }
-                else:
-                    item.update(
-                        {
-                            "label": label,
-                            "status": "running",
-                            "pct": 0.0,
-                            "eta_s": None,
-                        }
-                    )
-                self.current_desc = label
-                self._recompute_stage_pct(stage_key or stage)
-                return
-
-    def _close_running(self, *, except_id: str | None = None) -> None:
-        """把其它仍标 running 的条目收成 done（assemble 整理镜尤其需要）。"""
-        for key, item in self.items.items():
-            if key == except_id:
-                continue
-            if item.get("status") == "running":
-                item["status"] = "done"
-                item["pct"] = 100.0
-                item["eta_s"] = None
-
-    def _recompute_stage_pct(self, stage: str | None) -> None:
-        """按磁盘产物 + 当前 tqdm 步数回写阶段内百分比（细到去噪步 / MusicGen token）。"""
-        if not stage:
-            return
-        running = next((it for it in self.items.values() if it.get("status") == "running"), None)
-        live = None
-        if running is not None:
-            live = dict(running)
-            for key, val in self.items.items():
-                if val is running:
-                    live["id"] = key
-                    break
-        try:
-            from pipeline.live import infer_progress
-
-            out = getattr(self.job, "out", "") or ""
-            if out:
-                prog = infer_progress(out, stage, live_item=live)
-                sp = (prog.get("stage_pct") or {}).get(stage)
-                if isinstance(sp, (int, float)) and sp > 0:
-                    self.stage_pct[stage] = float(sp)
-                    return
-        except Exception:
-            pass
-        # 退化：用已记录的 done + 当前条进度估
-        done = sum(1 for it in self.items.values() if it.get("status") == "done")
-        frac = 0.0
-        if running:
-            total = max(1, int(running.get("total") or 1))
-            frac = float(running.get("step") or 0) / total if total > 1 else max(0.0, float(running.get("pct") or 0) / 100.0)
-        denom = max(done + (1 if running else 0), 1)
-        self.stage_pct[stage] = round(min(99.0, 100.0 * (done + frac) / denom), 1)
+    def snapshot(self) -> dict:
+        return self.engine.snapshot()
 
     def finalize(self, *, success: bool) -> None:
-        """任务结束时落定所有条目：否则「整理 sXXX」这类只有开始、没有完成行的
-        条目会永远停在 running，任务结束后还挂着一条假进度。"""
-        with self.lock:
-            for item in self.items.values():
-                if item["status"] == "running":
-                    item["status"] = "done" if success else "failed"
-                    item["pct"] = 100.0
-                    item["eta_s"] = None
-            for stage, st in (getattr(self.job, "stage_status", {}) or {}).items():
-                if st == "done" or success:
-                    self.stage_pct[stage] = 100.0
-
-    def _item_for_desc(self, desc: str) -> tuple[str | None, str]:
-        for pattern, template in _DESC_ITEMS:
-            mm = pattern.match(desc)
-            if mm:
-                label = template.format(**{k: mm.group(k) for k in mm.groupdict()})
-                return f"shot:{label}" if template.startswith("{id}") else f"misc:{label}", label
-        return None, desc
-
-    # -- 快照 --------------------------------------------------------------
-    def snapshot(self) -> dict:
-        with self.lock:
-            # 每次快照再按磁盘刷一次阶段进度（总进度条不靠「假 8%」卡住）
-            stage = None
-            try:
-                for s in getattr(self.job, "stages", []) or []:
-                    if (getattr(self.job, "stage_status", {}) or {}).get(s) == "running":
-                        stage = s
-                        break
-            except Exception:
-                stage = None
-            self._recompute_stage_pct(stage)
-            # 网页只需要正在跑的条；已完成的堆在 items 里只会造成多进度条幻觉
-            items = [
-                dict(v, id=k)
-                for k, v in self.items.items()
-                if v.get("status") == "running"
-            ]
-            return {
-                "items": items,
-                "stage_pct": dict(self.stage_pct),
-                "current": self.current_desc,
-            }
+        self.engine.finalize(success=success)
 
     def set_stage_pct(self, stage: str, pct: float) -> None:
-        with self.lock:
-            self.stage_pct[stage] = round(max(0.0, min(100.0, pct)), 1)
-
-
-def _parse_hms(text: str) -> float | None:
-    """`00:20` / `01:02:03` / `20s` → 秒。"""
-    text = (text or "").strip()
-    m = re.match(r"^(?:(\d+):)?(?:(\d+):)?(\d+(?:\.\d+)?)$", text)
-    if not m:
-        return None
-    h, mi, s = (g or "0" for g in m.groups())
-    return int(h) * 3600 + int(mi) * 60 + float(s)
+        # 旧接口：阶段百分比由引擎按步骤汇总，忽略外部写入
+        pass
 
 
 class _NullTracker:
-    """历史任务占位：snapshot() 的 progress 恒为空。"""
+    """历史任务占位。"""
 
     def snapshot(self) -> dict:
-        return {"items": [], "stage_pct": {}, "current": None}
+        return {
+            "seq": 0,
+            "overall_pct": 0.0,
+            "current_step_id": None,
+            "stages": [],
+            "steps": [],
+            "items": [],
+            "stage_pct": {},
+            "current": None,
+            "status": "pending",
+            "task_id": "",
+        }
 
     def feed(self, *_args) -> None:
+        pass
+
+    def finalize(self, *, success: bool) -> None:
         pass
 
 
@@ -357,7 +143,9 @@ class Job:
         self.stage_status: dict[str, str] = {s: "pending" for s in self.stages}
         self.stage_status[self.stages[0]] = "running"
         self.pid: int | None = None
-        self.tracker = ProgressTracker(self)
+        # 细进度只走 /api/progress SSE，不在每步 bump 时刷全局 change（避免列表狂刷新）
+        self.engine = ProgressEngine(out, stages=list(self.stages), task_id=task_id)
+        self.tracker = _EngineTracker(self.engine)
         self.returncode: int | None = None
         self.created_at = time.time()
         self.started_at: float | None = None
@@ -367,10 +155,27 @@ class Job:
     # -- 序列化 ------------------------------------------------------------
     def snapshot(self) -> dict:
         with self.lock:
-            stages = [
-                {"key": s, "label": STAGE_LABELS.get(s, s), "status": self.stage_status.get(s, "pending")}
-                for s in self.stages
-            ]
+            prog = self.tracker.snapshot()
+            # 阶段状态以引擎为准（含 pct）；任务级 status 仍用 self.stage_status 兜底
+            eng_stages = prog.get("stages") or []
+            if eng_stages:
+                stages = [
+                    {
+                        "key": s["key"],
+                        "label": s.get("label") or STAGE_LABELS.get(s["key"], s["key"]),
+                        "status": s.get("status") or self.stage_status.get(s["key"], "pending"),
+                        "pct": s.get("pct", 0),
+                        "weight": s.get("weight"),
+                    }
+                    for s in eng_stages
+                ]
+                for s in stages:
+                    self.stage_status[s["key"]] = s["status"]
+            else:
+                stages = [
+                    {"key": s, "label": STAGE_LABELS.get(s, s), "status": self.stage_status.get(s, "pending")}
+                    for s in self.stages
+                ]
             return {
                 "id": self.id,
                 "name": self.name,
@@ -380,8 +185,9 @@ class Job:
                 "detail": self.detail,
                 "status": self.status,
                 "stages": stages,
-                "current_stage": next((s["key"] for s in stages if s["status"] == "running"), None),
-                "progress": self.tracker.snapshot(),
+                "current_stage": prog.get("current_stage")
+                or next((s["key"] for s in stages if s["status"] == "running"), None),
+                "progress": prog,
                 "returncode": self.returncode,
                 "error": self.error,
                 "created_at": self.created_at,
@@ -449,17 +255,13 @@ class Job:
             self.append_log(f"$ {shlex.join(self.cmd)}")
 
             last_persist = [0.0]
-            last_notify = [0.0]
 
             def on_line(text: str) -> None:
                 self.append_log(text)
                 parse_stage_progress(text, self)
-                self.tracker.feed(text, self.current_stage_safe())
+                # 引擎内部节流推送；这里只喂行
+                self.engine.feed_line(text, self.current_stage_safe())
                 now = time.time()
-                # 进度条要跟 tqdm 步走：约 0.5s 推一次 SSE；落盘仍 2s 一次
-                if now - last_notify[0] >= 0.5:
-                    last_notify[0] = now
-                    notify_change()
                 if now - last_persist[0] >= 2.0:
                     last_persist[0] = now
                     _persist()
@@ -471,7 +273,7 @@ class Job:
             code = run_tee(self.cmd, log=self.log_path, env=env, cwd=ROOT, on_line=on_line, on_start=on_start)
             self.returncode = code
             self.status = "success" if code == 0 else "failed"
-            self.tracker.finalize(success=(code == 0))
+            self.engine.finalize(success=(code == 0))
             with self.lock:
                 for s, st in self.stage_status.items():
                     if st == "running":
@@ -832,8 +634,11 @@ class _RestoredJob(Job):
             }
         )
         # 历史任务若 snap 里带了 progress，塞进可快照的 tracker
+        self.engine = None
         prog = snap.get("progress")
-        if isinstance(prog, dict) and (prog.get("items") or prog.get("stage_pct")):
+        if isinstance(prog, dict) and (
+            prog.get("items") or prog.get("stage_pct") or prog.get("steps") or prog.get("overall_pct") is not None
+        ):
             self.tracker = _FrozenTracker(prog)
 
     def start(self) -> None:  # pragma: no cover
@@ -841,21 +646,15 @@ class _RestoredJob(Job):
 
 
 class _FrozenTracker:
-    """只读 progress 快照。"""
+    """历史任务只读 progress 快照（完整 snapshot 形状）。"""
 
     def __init__(self, snap: dict) -> None:
-        self._snap = {
-            "items": list(snap.get("items") or []),
-            "stage_pct": dict(snap.get("stage_pct") or {}),
-            "current": snap.get("current"),
-        }
+        base = _NullTracker().snapshot()
+        base.update(snap or {})
+        self._snap = base
 
     def snapshot(self) -> dict:
-        return {
-            "items": [dict(x) for x in self._snap["items"]],
-            "stage_pct": dict(self._snap["stage_pct"]),
-            "current": self._snap["current"],
-        }
+        return dict(self._snap)
 
     def feed(self, *_args) -> None:
         pass
@@ -865,7 +664,7 @@ class _FrozenTracker:
 
 
 class _AttachedJob(Job):
-    """挂载外部 produce（CLI 或网页重启后仍活着的子进程）：盯 pid + 磁盘推断进度。"""
+    """挂载外部 produce（CLI 或网页重启后仍活着的子进程）：盯 pid + Engine.observe_disk。"""
 
     def __init__(self, snap: dict) -> None:
         _RestoredJob.__init__(self, snap, float(snap.get("created_at") or time.time()))
@@ -873,8 +672,10 @@ class _AttachedJob(Job):
         self.source = snap.get("source") or "cli"
         self.detail = snap.get("detail") or "CLI produce（网页自动挂载）"
         self._watch_started = False
-        self.tracker = _FrozenTracker(snap.get("progress") or {})
-        # 用磁盘进度覆盖
+        stages = [s["key"] if isinstance(s, dict) else s for s in (snap.get("stages") or self.stages)]
+        self.stages = [s for s in stages if s in STAGE_LABELS] or list(STAGES)
+        self.engine = ProgressEngine(self.out, stages=list(self.stages), task_id=self.id)
+        self.tracker = _EngineTracker(self.engine)
         self.refresh_from_disk()
 
     @classmethod
@@ -891,22 +692,19 @@ class _AttachedJob(Job):
         threading.Thread(target=self._watch, daemon=True).start()
 
     def refresh_from_disk(self) -> None:
-        from pipeline.live import build_live_snapshot, read_live
+        from pipeline.live import read_live
 
-        snap = build_live_snapshot(
-            self.out,
-            proc={"pid": self.pid, "pgid": getattr(self, "pgid", None)},
-            live=read_live(self.out),
-        )
+        live = read_live(self.out) or {}
+        cur = live.get("current_stage")
+        if cur and cur in self.stage_status:
+            self.engine.set_stage(cur, "running")
+        self.engine.observe_disk()
+        prog = self.engine.snapshot()
         with self.lock:
-            self.stage_status = {
-                s["key"]: s["status"] for s in (snap.get("stages") or [])
-            }
-            if snap.get("stages"):
-                self.stages = [s["key"] for s in snap["stages"]]
-            self.tracker = _FrozenTracker(snap.get("progress") or {})
-            if snap.get("pid"):
-                self.pid = snap["pid"]
+            for s in prog.get("stages") or []:
+                self.stage_status[s["key"]] = s.get("status") or "pending"
+            if live.get("pid"):
+                self.pid = live["pid"]
 
     def _watch(self) -> None:
         from pipeline.live import pid_alive
@@ -914,28 +712,26 @@ class _AttachedJob(Job):
         while self.status == "running":
             alive = pid_alive(self.pid)
             if not alive:
-                # 进程没了：按成片/失败收尾，并清空逐条进度（别留「配乐 5%」假条）
                 final = resolve(self.out) / "final.mp4"
                 ok = final.exists()
                 self.status = "success" if ok else "failed"
                 self.returncode = 0 if ok else 1
                 self.error = None if ok else "外部 produce 已结束（未见成片）"
                 self.finished_at = time.time()
+                self.engine.finalize(success=ok)
                 with self.lock:
                     for s, st in list(self.stage_status.items()):
                         if st == "running":
                             self.stage_status[s] = "done" if ok else "failed"
-                    self.tracker = _FrozenTracker({"items": [], "stage_pct": {}, "current": None})
                 self.append_log(f"[webui] 外部任务结束：{self.status}")
                 notify_change()
                 _persist()
                 return
             try:
                 self.refresh_from_disk()
-                notify_change()
             except Exception as exc:
                 self.append_log(f"[webui] 刷新外部进度失败：{exc}")
-            time.sleep(1.0)  # 外部任务按磁盘/日志推进度，1s 一刷
+            time.sleep(0.5)  # 挂载任务 0.5s 扫盘，配合引擎节流
 
     def stop(self) -> None:
         import os
@@ -1071,6 +867,9 @@ def parse_stage_progress(line: str, job: Job) -> None:
             if idx < now_idx and st in ("running", "pending"):
                 job.stage_status[s] = "done"
         job.stage_status[stage] = "running"
+    engine = getattr(job, "engine", None)
+    if engine is not None:
+        engine.set_stage(stage, "running")
     notify_change()
 
 
@@ -1442,6 +1241,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._api_log(path.rsplit("/", 1)[-1], query)
             elif path.startswith("/api/log-stream/"):
                 self._stream_job_log(path.rsplit("/", 1)[-1])
+            elif path.startswith("/api/progress/"):
+                self._stream_progress(path.rsplit("/", 1)[-1])
             elif path.startswith("/media/"):
                 self._serve_media(path[len("/media/"):])
             else:
@@ -1558,6 +1359,14 @@ class _Handler(BaseHTTPRequestHandler):
             storyboard = storyboard or f"{project_dir(name).relative_to(ROOT)}/storyboard.json"
             write_storyboard(storyboard, sb_data)
 
+        # --force：启动前先清产物（bash 串跑路径不会进 cmd_run 的清理逻辑）
+        if force:
+            from pipeline.projects import clear_artifacts
+
+            removed = clear_artifacts(out, stages=stages, only=only)
+            if removed:
+                print(f"[webui] --force 已清除 {len(removed)} 项产物：{out}", flush=True)
+
         cmd, log_path = build_pipeline_cmd(
             stages=stages, novel=novel, out=out, storyboard=storyboard, only=only, force=force
         )
@@ -1598,6 +1407,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not stages:
             stages = ["images", "videos"]  # 兼容旧前端：缺省图文都重做
         novel = str(data.get("novel") or "").strip()
+        from pipeline.projects import clear_artifacts
+
+        clear_artifacts(out, stages=stages, only=shots)
         cmd, log_path = build_pipeline_cmd(
             stages=stages, novel=novel or None, out=out, storyboard=storyboard, only=shots, force=True
         )
@@ -1650,11 +1462,22 @@ class _Handler(BaseHTTPRequestHandler):
                     )
             return found
 
+        final_path = base / "final.mp4"
+        final = None
+        if final_path.is_file():
+            rel = f"{out_rel.rstrip('/')}/final.mp4".replace("\\", "/")
+            st = final_path.stat()
+            final = {
+                "path": rel,
+                "url": "/media/" + rel,
+                "mtime": int(st.st_mtime),
+                "size": st.st_size,
+            }
         return {
             "frames": _scan("frames", (".png", ".jpg", ".jpeg", ".webp")),
             "clips": _scan("clips", (".mp4",)),
             "voices": _scan("audio/voice", (".wav",)),
-            "final": (base / "final.mp4").exists(),
+            "final": final,
         }
 
     def _api_log(self, task_id: str, query: str) -> None:
@@ -1684,7 +1507,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "close")
+        # SSE 长连接：不要 Connection: close，否则浏览器会反复重连，顶栏「已连接」狂闪
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
     def _sse_event(self, payload: str) -> None:
@@ -1692,6 +1517,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def _stream_events(self) -> None:
+        """任务列表级变更（新建/结束）；细进度走 /api/progress/<id>。"""
         self._sse_start()
         q: queue.Queue = queue.Queue()
         with _LOCK:
@@ -1711,6 +1537,61 @@ class _Handler(BaseHTTPRequestHandler):
             with _LOCK:
                 if q in _CHANGE_QUEUES:
                     _CHANGE_QUEUES.remove(q)
+
+    def _sse_progress_event(self, snap: dict) -> None:
+        seq = int(snap.get("seq") or 0)
+        payload = json.dumps({"event": "progress", "progress": snap}, ensure_ascii=False)
+        self.wfile.write(f"id: {seq}\nevent: progress\ndata: {payload}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
+    def _stream_progress(self, task_id: str) -> None:
+        """按任务推送进度快照；支持 Last-Event-ID 跳过已见 seq。"""
+        job = get_job(task_id)
+        if not job:
+            raise FileNotFoundError("task not found")
+        last_id = 0
+        raw = self.headers.get("Last-Event-ID") or self.headers.get("Last-Event-Id") or ""
+        try:
+            last_id = int(str(raw).strip() or "0")
+        except ValueError:
+            last_id = 0
+        self._sse_start()
+        engine = getattr(job, "engine", None)
+        q: queue.Queue | None = queue.Queue() if engine is not None else None
+        try:
+            # 连接后立刻推当前快照
+            snap = job.tracker.snapshot() if hasattr(job, "tracker") else {}
+            self._sse_progress_event(snap)
+            last_id = max(last_id, int(snap.get("seq") or 0))
+            if engine is None:
+                # 历史任务：推一次终态后结束
+                self.wfile.write(b"event: end\ndata: {}\n\n")
+                self.wfile.flush()
+                return
+            assert q is not None
+            engine.subscribe(q)
+            while job.status == "running":
+                try:
+                    snap = q.get(timeout=15.0)
+                except queue.Empty:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    continue
+                if int(snap.get("seq") or 0) <= last_id:
+                    continue
+                last_id = int(snap.get("seq") or 0)
+                self._sse_progress_event(snap)
+            # 终态再推一次
+            final = job.tracker.snapshot()
+            if int(final.get("seq") or 0) > last_id:
+                self._sse_progress_event(final)
+            self.wfile.write(b"event: end\ndata: {}\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            if engine is not None and q is not None:
+                engine.unsubscribe(q)
 
     def _stream_job_log(self, task_id: str) -> None:
         job = get_job(task_id)
