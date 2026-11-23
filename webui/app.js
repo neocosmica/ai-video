@@ -75,6 +75,14 @@ async function refreshState() {
     renderProjects();
     renderDatalists();
     renderTasks();
+    // 刷新后同步当前打开的任务详情（进度条/逐镜进度），否则只更新列表不更新面板
+    if (state.selectedTaskId) {
+      const job = state.tasks.find((t) => t.id === state.selectedTaskId);
+      if (job) {
+        renderStages(job);
+        $("#task-stop").disabled = job.status !== "running";
+      }
+    }
     renderShotsIfVisible();
   } catch (err) {
     setConn(false);
@@ -159,7 +167,7 @@ function pickerMsg(msg, bad = false) {
 }
 
 // 选项目 → 工作区所有字段归位到这个项目
-async function openProject(name, path) {
+async function openProject(name, path, { autoSelectRunning = true } = {}) {
   state.project = name;
   state.currentOut = path || `projects/${name}`;
   state.currentStoryboard = `${state.currentOut}/storyboard.json`;
@@ -168,6 +176,7 @@ async function openProject(name, path) {
   stageTrackSig = "";
   liveItemsSig = "";
   tasksSig = "";
+  try { localStorage.setItem("nv_last_project", name); } catch {}
   $("#log").textContent = "";
   $("#project-picker").hidden = true;
   $("#workspace").hidden = false;
@@ -192,11 +201,17 @@ async function openProject(name, path) {
   await refreshState();
   renderShots();
   scheduleShotsAutoRefresh();
+  // 有运行中的任务就自动打开详情，避免重开网页后还要再点一次才看得到进度
+  if (autoSelectRunning) {
+    const running = state.tasks.find((t) => t.status === "running");
+    if (running) selectTask(running.id);
+  }
 }
 
 function backToProjects() {
   state.project = "";
   state.selectedTaskId = null;
+  try { localStorage.removeItem("nv_last_project"); } catch {}
   if (state.polling) { clearInterval(state.polling); state.polling = null; }
   if (shotsTimer) { clearInterval(shotsTimer); shotsTimer = null; }
   $("#workspace").hidden = true;
@@ -376,7 +391,16 @@ function renderOverall(job) {
     if (s.status === "done") pct += w * 100;
     else if (s.status === "running") {
       const sp = job.progress?.stage_pct?.[s.key];
-      const inner = typeof sp === "number" && sp > 0 ? Math.min(99, sp) : (job.progress?.current ? 8 : 2);
+      let inner;
+      if (typeof sp === "number" && sp > 0) {
+        inner = Math.min(99, sp);
+      } else {
+        // 后端没给 stage_pct 时，用当前条目的 pct 凑一个阶段内进度，避免整段卡在 ~3%
+        const run = (job.progress?.items || []).find((i) => i.status === "running");
+        if (run && typeof run.pct === "number" && run.pct > 0) inner = Math.min(99, run.pct);
+        else if (run && run.total > 1) inner = Math.min(99, 100 * (run.step || 0) / run.total);
+        else inner = job.progress?.current ? 8 : 2;
+      }
       pct += w * inner;
       currentLabel = `正在：${STAGE_LABELS[s.key] || s.key}`;
     }
@@ -407,24 +431,21 @@ let liveItemsSig = "";
 function renderLiveItems(job) {
   const wrap = $("#live-items");
   const items = job.progress?.items || [];
-  // 任务已结束就不再显示逐条进度：避免「整理 s001…」这类条目结束后还挂着
+  // 任务已结束就清空；进行中只保留「正在跑」的条，完成/未开始的不挂着占位
   if (job.status !== "running") {
     if (liveItemsSig !== "ended") { liveItemsSig = "ended"; wrap.innerHTML = ""; }
     return;
   }
-  const running = items.filter((i) => i.status === "running");
-  const recent = items.filter((i) => i.status !== "running").slice(-4);
-  const shown = [...running, ...recent].slice(0, 8);
+  const shown = items.filter((i) => i.status === "running").slice(0, 3);
   const sig = JSON.stringify(shown.map((i) => [i.id, i.status, i.step, i.total, i.pct, i.eta_s]));
   if (sig === liveItemsSig) return;
   liveItemsSig = sig;
   if (!shown.length) { wrap.innerHTML = ""; return; }
   wrap.innerHTML = shown.map((i) => {
-    const cls = i.status === "done" ? "done" : i.status === "failed" ? "failed" : "";
     const stepText = i.total > 1 ? `${i.step}/${i.total}` : "";
-    const pct = i.status === "done" ? 100 : i.pct || 0;
-    const eta = i.status === "running" ? fmtEta(i.eta_s) : i.status === "done" ? "✓" : "✕";
-    return `<div class="live-item ${cls}">
+    const pct = i.pct || 0;
+    const eta = fmtEta(i.eta_s);
+    return `<div class="live-item">
       <span class="li-label" title="${esc(i.label || "")}">${esc(i.label || i.id)}</span>
       <span class="li-step mono">${stepText}</span>
       <div class="li-bar"><div class="li-fill" style="width:${pct}%"></div></div>
@@ -450,6 +471,11 @@ function startLogPolling(id) {
       }
       const job = state.tasks.find((t) => t.id === id);
       if (job) {
+        // 日志接口带回的细粒度 progress / stages，立刻喂给总进度条
+        if (data.progress) job.progress = data.progress;
+        if (Array.isArray(data.stages) && data.stages.length) job.stages = data.stages;
+        if (data.status) job.status = data.status;
+        if (data.current_stage !== undefined) job.current_stage = data.current_stage;
         renderStages(job);
         $("#task-stop").disabled = job.status !== "running";
         if (job.status === "failed" || job.status === "success" || job.status === "interrupted") {
@@ -461,7 +487,7 @@ function startLogPolling(id) {
     }
   };
   pull();
-  state.polling = setInterval(pull, 1200);
+  state.polling = setInterval(pull, 800);
 }
 
 function appendLogLines(lines) {
@@ -624,9 +650,12 @@ async function renderShots() {
   const job = state.tasks.find((t) => t.id === state.selectedTaskId);
   const progItems = {};
   if (job?.progress?.items) {
-    // 只认 shot: 前缀的镜头条目；misc:配乐、assemble:整理 等不对应镜头卡
+    // 只认 shot: 前缀；label 可能是「s012 a2v」，按 id 抽镜头号对齐卡片
     for (const it of job.progress.items) {
-      if ((it.id || "").startsWith("shot:")) progItems[it.label] = it;
+      const raw = it.id || "";
+      if (!raw.startsWith("shot:")) continue;
+      const sid = raw.slice(5).split(/\s+/)[0];
+      if (sid) progItems[sid] = it;
     }
   }
   // 4) 如果连分镜都没有，先展示已有媒体
@@ -716,6 +745,7 @@ function renderShotCard(shot, media, reuseMap, progItems) {
   const progEl = $(".shot-progress", card);
   const progFill = $(".shot-progress-fill", card);
   const progText = $(".shot-progress-text", card);
+  // 镜头卡只在「正在生成 / 失败」时显示进度条；已完成的用状态文案即可，避免一排绿条
   let progShow = false, progWidth = "", progLabel = "", progFillCls = "shot-progress-fill";
   if (prog && prog.status === "running") {
     progShow = true;
@@ -726,10 +756,6 @@ function renderShotCard(shot, media, reuseMap, progItems) {
     progWidth = "100%";
     progFillCls += " failed";
     progLabel = "失败";
-  } else if (clipEntry || (frameEntry && !shot.dialogue)) {
-    progShow = true;
-    progWidth = "100%";
-    progFillCls += " done";
   }
   progEl.classList.toggle("show", progShow);
   progText.classList.toggle("show", progShow && (prog?.status === "running" || prog?.status === "failed"));
@@ -958,6 +984,17 @@ function bind() {
 bind();
 renderStagePicks();
 loadBudget();
-refreshState();
 connectEvents();
 setInterval(refreshState, 4000);
+
+(async function boot() {
+  await refreshState();
+  // 有运行中的项目优先打开；否则恢复上次打开的项目
+  const runningProj = (state.projects || []).find((p) => (p.tasks || {}).running > 0);
+  let last = "";
+  try { last = localStorage.getItem("nv_last_project") || ""; } catch {}
+  const target = runningProj || (state.projects || []).find((p) => p.name === last);
+  if (target) {
+    await openProject(target.name, target.path);
+  }
+})();

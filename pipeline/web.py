@@ -80,6 +80,7 @@ _DESC_ITEMS = (
     (re.compile(r"^空镜\s+(?P<id>\S+)"), "{id}"),
     (re.compile(r"^肖像\s+(?P<name>.+)$"), "肖像 {name}"),
     (re.compile(r"^(?P<name>配乐)$"), "配乐"),
+    (re.compile(r"^(?P<name>MusicGen)$"), "配乐"),  # 原始 MusicGen 条也归到配乐
 )
 # 行首日志 → 条目开始 / 完成 / 失败
 _ITEM_START = (
@@ -133,6 +134,8 @@ class ProgressTracker:
             eta_s = _parse_hms(m.group("eta"))
             item_id, label = self._item_for_desc(desc)
             if item_id is not None:
+                # 换镜头时先收掉其它 running，否则网页会叠多条进度条
+                self._close_running(except_id=item_id)
                 item = self.items.setdefault(
                     item_id,
                     {"label": label, "pct": 0.0, "step": 0, "total": total, "eta_s": None, "status": "running"},
@@ -148,6 +151,7 @@ class ProgressTracker:
                     }
                 )
                 self.current_desc = desc
+            self._recompute_stage_pct(stage)
             return
         # 阶段级整行完成消息
         for pattern in _ITEM_DONE:
@@ -160,6 +164,7 @@ class ProgressTracker:
                 )
                 item["status"] = "done"
                 item["pct"] = 100.0
+                self._recompute_stage_pct(stage)
                 return
         for pattern in _ITEM_FAIL:
             mm = pattern.match(line.strip())
@@ -171,6 +176,7 @@ class ProgressTracker:
                 )
                 item["status"] = "failed"
                 item["pct"] = item.get("pct") or 0.0
+                self._recompute_stage_pct(stage)
                 return
         for pattern, stage_key in _ITEM_START:
             mm = pattern.match(line.strip())
@@ -179,11 +185,73 @@ class ProgressTracker:
                 # assemble 的「整理 s001」与视频阶段的镜头条目同名，加前缀避免混同
                 label = f"整理 {name}" if stage_key == "assemble" else name
                 item_id = f"{stage_key}:{mm.group(1)}"
-                self.items.setdefault(
-                    item_id,
-                    {"label": label, "pct": 0.0, "step": 0, "total": 1, "eta_s": None, "status": "running"},
-                )
+                # 「整理 s001」→「整理 s002」没有单独完成行；开新条时必须关掉旧的
+                self._close_running(except_id=item_id)
+                item = self.items.get(item_id)
+                if item is None:
+                    self.items[item_id] = {
+                        "label": label,
+                        "pct": 0.0,
+                        "step": 0,
+                        "total": 1,
+                        "eta_s": None,
+                        "status": "running",
+                    }
+                else:
+                    item.update(
+                        {
+                            "label": label,
+                            "status": "running",
+                            "pct": 0.0,
+                            "eta_s": None,
+                        }
+                    )
+                self.current_desc = label
+                self._recompute_stage_pct(stage_key or stage)
                 return
+
+    def _close_running(self, *, except_id: str | None = None) -> None:
+        """把其它仍标 running 的条目收成 done（assemble 整理镜尤其需要）。"""
+        for key, item in self.items.items():
+            if key == except_id:
+                continue
+            if item.get("status") == "running":
+                item["status"] = "done"
+                item["pct"] = 100.0
+                item["eta_s"] = None
+
+    def _recompute_stage_pct(self, stage: str | None) -> None:
+        """按磁盘产物 + 当前 tqdm 步数回写阶段内百分比（细到去噪步 / MusicGen token）。"""
+        if not stage:
+            return
+        running = next((it for it in self.items.values() if it.get("status") == "running"), None)
+        live = None
+        if running is not None:
+            live = dict(running)
+            for key, val in self.items.items():
+                if val is running:
+                    live["id"] = key
+                    break
+        try:
+            from pipeline.live import infer_progress
+
+            out = getattr(self.job, "out", "") or ""
+            if out:
+                prog = infer_progress(out, stage, live_item=live)
+                sp = (prog.get("stage_pct") or {}).get(stage)
+                if isinstance(sp, (int, float)) and sp > 0:
+                    self.stage_pct[stage] = float(sp)
+                    return
+        except Exception:
+            pass
+        # 退化：用已记录的 done + 当前条进度估
+        done = sum(1 for it in self.items.values() if it.get("status") == "done")
+        frac = 0.0
+        if running:
+            total = max(1, int(running.get("total") or 1))
+            frac = float(running.get("step") or 0) / total if total > 1 else max(0.0, float(running.get("pct") or 0) / 100.0)
+        denom = max(done + (1 if running else 0), 1)
+        self.stage_pct[stage] = round(min(99.0, 100.0 * (done + frac) / denom), 1)
 
     def finalize(self, *, success: bool) -> None:
         """任务结束时落定所有条目：否则「整理 sXXX」这类只有开始、没有完成行的
@@ -194,6 +262,9 @@ class ProgressTracker:
                     item["status"] = "done" if success else "failed"
                     item["pct"] = 100.0
                     item["eta_s"] = None
+            for stage, st in (getattr(self.job, "stage_status", {}) or {}).items():
+                if st == "done" or success:
+                    self.stage_pct[stage] = 100.0
 
     def _item_for_desc(self, desc: str) -> tuple[str | None, str]:
         for pattern, template in _DESC_ITEMS:
@@ -206,7 +277,22 @@ class ProgressTracker:
     # -- 快照 --------------------------------------------------------------
     def snapshot(self) -> dict:
         with self.lock:
-            items = [dict(v, id=k) for k, v in self.items.items()]
+            # 每次快照再按磁盘刷一次阶段进度（总进度条不靠「假 8%」卡住）
+            stage = None
+            try:
+                for s in getattr(self.job, "stages", []) or []:
+                    if (getattr(self.job, "stage_status", {}) or {}).get(s) == "running":
+                        stage = s
+                        break
+            except Exception:
+                stage = None
+            self._recompute_stage_pct(stage)
+            # 网页只需要正在跑的条；已完成的堆在 items 里只会造成多进度条幻觉
+            items = [
+                dict(v, id=k)
+                for k, v in self.items.items()
+                if v.get("status") == "running"
+            ]
             return {
                 "items": items,
                 "stage_pct": dict(self.stage_pct),
@@ -303,6 +389,8 @@ class Job:
                 "finished_at": self.finished_at,
                 "log_path": str(self.log_path),
                 "media_base": self.out,
+                "pid": self.pid,
+                "source": getattr(self, "source", "web"),
             }
 
     # -- 日志 --------------------------------------------------------------
@@ -360,13 +448,25 @@ class Job:
             self.started_at = time.time()
             self.append_log(f"$ {shlex.join(self.cmd)}")
 
+            last_persist = [0.0]
+            last_notify = [0.0]
+
             def on_line(text: str) -> None:
                 self.append_log(text)
                 parse_stage_progress(text, self)
                 self.tracker.feed(text, self.current_stage_safe())
+                now = time.time()
+                # 进度条要跟 tqdm 步走：约 0.5s 推一次 SSE；落盘仍 2s 一次
+                if now - last_notify[0] >= 0.5:
+                    last_notify[0] = now
+                    notify_change()
+                if now - last_persist[0] >= 2.0:
+                    last_persist[0] = now
+                    _persist()
 
             def on_start(pid: int) -> None:
                 self.pid = pid
+                _persist()
 
             code = run_tee(self.cmd, log=self.log_path, env=env, cwd=ROOT, on_line=on_line, on_start=on_start)
             self.returncode = code
@@ -512,10 +612,14 @@ def load_project_tasks(name: str) -> list[Job]:
     """读某项目的 state.json → 恢复成只读历史任务，返回该项目的全部任务。
 
     服务重启后内存是空的，网页第一次选某个项目时按需恢复它的历史；
-    运行中的旧记录会被标成「中断」。
+    运行中的旧记录：若 pid 仍活着则挂载继续盯进度，否则标成「中断」。
+    另外会扫描 CLI produce / live.json，把外部任务挂进列表。
     """
+    from pipeline.live import pid_alive
+
     path = state_path_for(f"{PROJECTS_DIRNAME}/{name}")
     restored: list[Job] = []
+    dirty = False
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -525,11 +629,36 @@ def load_project_tasks(name: str) -> list[Job]:
             if get_job(task_id):
                 continue  # 内存里已经有了（例如刚重启后仍在跑的任务）
             if snap.get("status") == "running":
+                if pid_alive(snap.get("pid")):
+                    # 已有同 out / 同 pid 的挂载（例如启动时扫到的 CLI），不要再挂一份
+                    dup = next(
+                        (
+                            j
+                            for j in _JOBS.values()
+                            if j.status == "running"
+                            and (
+                                (snap.get("pid") and j.pid == snap.get("pid"))
+                                or (snap.get("out") and job_out(j) == snap.get("out"))
+                            )
+                        ),
+                        None,
+                    )
+                    if dup:
+                        continue
+                    # 网页服务重启后子进程还在：挂载盯盘进度，不标中断
+                    job = _AttachedJob.from_snapshot(snap)
+                    with _LOCK:
+                        _JOBS[task_id] = job
+                        CURRENT_PROJECT_JOB_IDS.add(job.id)
+                    job.start_watch()
+                    restored.append(job)
+                    continue
                 snap["status"] = "interrupted"
                 snap["error"] = "服务重启，任务中断；请重跑需要的阶段"
                 for stage in snap.get("stages") or []:
                     if stage.get("status") == "running":
                         stage["status"] = "failed"
+                dirty = True
             try:
                 created = float(snap.get("created_at") or 0)
             except (TypeError, ValueError):
@@ -539,9 +668,70 @@ def load_project_tasks(name: str) -> list[Job]:
                 _JOBS[task_id] = job
                 CURRENT_PROJECT_JOB_IDS.add(job.id)
             restored.append(job)
-    if restored:
+    attach_external_jobs(name)
+    if dirty:
         _persist()  # 把「中断」标记立刻写回 state.json
     return jobs_for_project(name)
+
+
+def attach_external_jobs(name: str | None = None) -> list[Job]:
+    """发现 CLI produce / live.json，挂成可刷新进度的任务。
+
+    ``name`` 为空时扫描全部；指定项目名则只挂该项目。
+    """
+    from pipeline.live import (
+        build_live_snapshot,
+        discover_produce_processes,
+        pid_alive,
+        project_name_from_out,
+        read_live,
+        stable_cli_task_id,
+    )
+
+    attached: list[Job] = []
+    procs = discover_produce_processes()
+    by_out = {p["out"]: p for p in procs}
+
+    # live.json：进程扫描不到时也能靠文件发现（刚写完、或 ps 权限问题）
+    outs: set[str] = set(by_out)
+    projects_root = ROOT / PROJECTS_DIRNAME
+    if projects_root.is_dir():
+        for child in projects_root.iterdir():
+            if not child.is_dir():
+                continue
+            if name and child.name != name:
+                continue
+            rel = f"{PROJECTS_DIRNAME}/{child.name}"
+            live = read_live(rel)
+            if live and (live.get("status") == "running" or pid_alive(live.get("pid"))):
+                outs.add(rel)
+
+    for out in outs:
+        proj = project_name_from_out(out)
+        if name and proj != name:
+            continue
+        # 已有同 out 的运行中任务（网页自己起的）就别再挂一份
+        existing = [
+            j for j in jobs_for_project(proj)
+            if job_out(j) == out and j.status == "running"
+        ]
+        if existing:
+            continue
+        task_id = stable_cli_task_id(out)
+        if get_job(task_id) and get_job(task_id).status == "running":
+            continue
+        snap = build_live_snapshot(out, proc=by_out.get(out), live=read_live(out))
+        if snap.get("status") != "running":
+            continue
+        snap["id"] = task_id
+        job = _AttachedJob.from_snapshot(snap)
+        with _LOCK:
+            _JOBS[task_id] = job
+            CURRENT_PROJECT_JOB_IDS.add(job.id)
+        job.start_watch()
+        attached.append(job)
+        notify_change()
+    return attached
 
 
 def migrate_legacy_state() -> None:
@@ -607,6 +797,13 @@ class _RestoredJob(Job):
     """历史任务：只读快照，不能再 start。"""
 
     def __init__(self, snap: dict, created_at: float) -> None:
+        stages_raw = snap.get("stages") or []
+        if stages_raw and isinstance(stages_raw[0], str):
+            stage_keys = list(stages_raw)
+            stage_status = dict(snap.get("stage_status") or {s: "pending" for s in stage_keys})
+        else:
+            stage_keys = [s.get("key") for s in stages_raw]
+            stage_status = {s.get("key"): s.get("status", "pending") for s in stages_raw}
         self.__dict__.update(
             {
                 "id": snap.get("id") or uuid.uuid4().hex[:12],
@@ -616,8 +813,8 @@ class _RestoredJob(Job):
                 "only": snap.get("only"),
                 "detail": snap.get("detail") or "",
                 "status": snap.get("status") or "interrupted",
-                "stages": [s.get("key") for s in (snap.get("stages") or [])],
-                "stage_status": {s.get("key"): s.get("status", "pending") for s in (snap.get("stages") or [])},
+                "stages": stage_keys,
+                "stage_status": stage_status,
                 "returncode": snap.get("returncode"),
                 "error": snap.get("error"),
                 "created_at": created_at,
@@ -628,13 +825,140 @@ class _RestoredJob(Job):
                 "log": [],
                 "subscribers": [],
                 "cmd": [],
-                "pid": None,
+                "pid": snap.get("pid"),
+                "pgid": snap.get("pgid"),
+                "source": snap.get("source") or "web",
                 "tracker": _NullTracker(),
             }
         )
+        # 历史任务若 snap 里带了 progress，塞进可快照的 tracker
+        prog = snap.get("progress")
+        if isinstance(prog, dict) and (prog.get("items") or prog.get("stage_pct")):
+            self.tracker = _FrozenTracker(prog)
 
     def start(self) -> None:  # pragma: no cover
         raise RuntimeError("历史任务不能重新启动，请新建任务")
+
+
+class _FrozenTracker:
+    """只读 progress 快照。"""
+
+    def __init__(self, snap: dict) -> None:
+        self._snap = {
+            "items": list(snap.get("items") or []),
+            "stage_pct": dict(snap.get("stage_pct") or {}),
+            "current": snap.get("current"),
+        }
+
+    def snapshot(self) -> dict:
+        return {
+            "items": [dict(x) for x in self._snap["items"]],
+            "stage_pct": dict(self._snap["stage_pct"]),
+            "current": self._snap["current"],
+        }
+
+    def feed(self, *_args) -> None:
+        pass
+
+    def finalize(self, *, success: bool) -> None:
+        pass
+
+
+class _AttachedJob(Job):
+    """挂载外部 produce（CLI 或网页重启后仍活着的子进程）：盯 pid + 磁盘推断进度。"""
+
+    def __init__(self, snap: dict) -> None:
+        _RestoredJob.__init__(self, snap, float(snap.get("created_at") or time.time()))
+        self.status = "running"
+        self.source = snap.get("source") or "cli"
+        self.detail = snap.get("detail") or "CLI produce（网页自动挂载）"
+        self._watch_started = False
+        self.tracker = _FrozenTracker(snap.get("progress") or {})
+        # 用磁盘进度覆盖
+        self.refresh_from_disk()
+
+    @classmethod
+    def from_snapshot(cls, snap: dict) -> "_AttachedJob":
+        return cls(snap)
+
+    def start(self) -> None:  # pragma: no cover
+        raise RuntimeError("挂载任务不能 start，只监视已有进程")
+
+    def start_watch(self) -> None:
+        if self._watch_started:
+            return
+        self._watch_started = True
+        threading.Thread(target=self._watch, daemon=True).start()
+
+    def refresh_from_disk(self) -> None:
+        from pipeline.live import build_live_snapshot, read_live
+
+        snap = build_live_snapshot(
+            self.out,
+            proc={"pid": self.pid, "pgid": getattr(self, "pgid", None)},
+            live=read_live(self.out),
+        )
+        with self.lock:
+            self.stage_status = {
+                s["key"]: s["status"] for s in (snap.get("stages") or [])
+            }
+            if snap.get("stages"):
+                self.stages = [s["key"] for s in snap["stages"]]
+            self.tracker = _FrozenTracker(snap.get("progress") or {})
+            if snap.get("pid"):
+                self.pid = snap["pid"]
+
+    def _watch(self) -> None:
+        from pipeline.live import pid_alive
+
+        while self.status == "running":
+            alive = pid_alive(self.pid)
+            if not alive:
+                # 进程没了：按成片/失败收尾，并清空逐条进度（别留「配乐 5%」假条）
+                final = resolve(self.out) / "final.mp4"
+                ok = final.exists()
+                self.status = "success" if ok else "failed"
+                self.returncode = 0 if ok else 1
+                self.error = None if ok else "外部 produce 已结束（未见成片）"
+                self.finished_at = time.time()
+                with self.lock:
+                    for s, st in list(self.stage_status.items()):
+                        if st == "running":
+                            self.stage_status[s] = "done" if ok else "failed"
+                    self.tracker = _FrozenTracker({"items": [], "stage_pct": {}, "current": None})
+                self.append_log(f"[webui] 外部任务结束：{self.status}")
+                notify_change()
+                _persist()
+                return
+            try:
+                self.refresh_from_disk()
+                notify_change()
+            except Exception as exc:
+                self.append_log(f"[webui] 刷新外部进度失败：{exc}")
+            time.sleep(1.0)  # 外部任务按磁盘/日志推进度，1s 一刷
+
+    def stop(self) -> None:
+        import os
+        import signal
+
+        pid = self.pid
+        pgid = getattr(self, "pgid", None) or pid
+        if not pid:
+            self.append_log("[webui] 外部任务没有进程号，无法停止")
+            return
+        try:
+            if sys.platform == "win32":
+                subprocess.call(["taskkill", "/F", "/T", "/PID", str(pid)])
+            else:
+                try:
+                    os.killpg(int(pgid), signal.SIGTERM)
+                except Exception:
+                    os.kill(int(pid), signal.SIGTERM)
+            self.append_log("[webui] 已请求停止外部任务…")
+        except ProcessLookupError:
+            pass
+        except Exception as exc:
+            self.append_log(f"[webui] 停止失败：{exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -786,9 +1110,30 @@ def _project_file_options() -> dict:
 
 def _all_projects() -> dict:
     """项目清单 + 每个项目的任务统计，供项目选择页一次拉全。"""
+    from pipeline.live import discover_produce_processes, project_name_from_out
     from pipeline.projects import list_projects as scan_projects
 
+    # 先挂一次外部任务，统计才准
+    try:
+        attach_external_jobs(None)
+    except Exception:
+        pass
+
     projects = scan_projects()
+    mem_running: dict[str, int] = {}
+    with _LOCK:
+        for j in _JOBS.values():
+            if j.status != "running":
+                continue
+            proj = project_of_job(j)
+            if proj:
+                mem_running[proj] = mem_running.get(proj, 0) + 1
+    # 进程扫描兜底（内存还没挂上时项目卡也能亮「运行中」）
+    for proc in discover_produce_processes():
+        proj = project_name_from_out(proc["out"])
+        if proj and proj not in mem_running:
+            mem_running[proj] = 1
+
     for item in projects:
         path = state_path_for(item["path"])
         done = running = failed = 0
@@ -809,6 +1154,10 @@ def _all_projects() -> dict:
                 created = snap.get("created_at") or 0
                 if created > (last or 0):
                     last = created
+        # 磁盘上可能还没有 running 记录（CLI 没写 state.json），用内存/进程补
+        live_run = mem_running.get(item["name"], 0)
+        if live_run > running:
+            running = live_run
         item["tasks"] = {"done": done, "running": running, "failed": failed, "total": done + running + failed}
         item["last_activity"] = last
     return {"projects": projects}
@@ -1153,7 +1502,15 @@ class _Handler(BaseHTTPRequestHandler):
 
         params = parse_qs(query)
         name = unquote(params.get("project", [""])[0]).strip()
-        tasks = load_project_tasks(name) if name else jobs_outside_projects()
+        if name:
+            tasks = load_project_tasks(name)
+        else:
+            # 项目选择页也要发现外部 produce，卡片才能显示「运行中」
+            try:
+                attach_external_jobs(None)
+            except Exception:
+                pass
+            tasks = jobs_outside_projects()
         file_options = _project_file_options()
         return {
             "project": name,
@@ -1309,7 +1666,18 @@ class _Handler(BaseHTTPRequestHandler):
             if pair.startswith("after="):
                 after = int(pair[6:] or 0)
         lines, total = job.log_lines(after)
-        self._json({"lines": lines, "total": total, "status": job.status})
+        # 附带最新进度：前端 1.2s 轮询就能推整体条，不必等 4s 全量 refresh
+        snap = job.snapshot()
+        self._json(
+            {
+                "lines": lines,
+                "total": total,
+                "status": job.status,
+                "progress": snap.get("progress"),
+                "stages": snap.get("stages"),
+                "current_stage": snap.get("current_stage"),
+            }
+        )
 
     # -- SSE ---------------------------------------------------------------
     def _sse_start(self) -> None:
@@ -1385,6 +1753,13 @@ def serve(host: str, port: int) -> None:
     WEB_DIR.mkdir(parents=True, exist_ok=True)
     if not (WEB_DIR / "index.html").exists():
         raise SystemExit(f"缺少网页文件：{WEB_DIR / 'index.html'}")
+    # 启动时立刻挂上已在跑的 CLI produce，避免用户打开网页看不到进度
+    try:
+        attached = attach_external_jobs(None)
+        if attached:
+            print(f"已挂载外部任务 {len(attached)} 个：{', '.join(j.out for j in attached)}", flush=True)
+    except Exception as exc:
+        print(f"挂载外部任务失败（可忽略）：{exc}", flush=True)
     server = ThreadingHTTPServer((host, port), _Handler)
     print(f"小说成片控制台：http://{host}:{port}  （Ctrl+C 停止）", flush=True)
     try:

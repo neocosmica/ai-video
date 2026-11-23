@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,33 @@ from pipeline.projects import artifacts_sub
 
 # 对白先于视频（A2V 口型要音频条件）；配乐放在视频之后，此时成片长度已经确定
 STAGES = ("screenplay", "images", "audio", "videos", "music", "assemble")
+
+
+def _install_live_hooks(out: Path, stages: list[str]) -> None:
+    """CLI produce/run 写 work/webui/live.json，网页后开也能挂上进度。"""
+    from pipeline.live import clear_live, mark_stage, write_live
+
+    write_live(
+        out,
+        {
+            "status": "running",
+            "stages": stages,
+            "stage_status": {s: ("running" if s == stages[0] else "pending") for s in stages},
+            "current_stage": stages[0] if stages else None,
+            "source": "cli",
+            "detail": "CLI produce",
+        },
+    )
+
+    def _atexit() -> None:
+        # 正常路径会 clear_live；异常退出时尽量标失败，避免网页一直显示运行中
+        from pipeline.live import read_live
+
+        cur = read_live(out)
+        if cur and cur.get("status") == "running":
+            clear_live(out, status="failed", returncode=1)
+
+    atexit.register(_atexit)
 
 
 def install_storyboard(out: str | Path, storyboard: str | None, *, force: bool = False) -> None:
@@ -63,36 +91,53 @@ def cmd_run(args: argparse.Namespace) -> None:
         )
     failed_videos = False
     end_idx = STAGES.index(until) + 1 if until else len(STAGES)
-    for stage in STAGES[STAGES.index(start) : end_idx]:
-        cmd = [sys.executable, "-m", "pipeline", stage, "--out", str(out)]
-        if args.config:
-            cmd += ["--config", str(resolve(args.config))]
-        if args.force:
-            cmd.append("--force")
-        if stage == "screenplay":
-            # 分镜 JSON 已写好；这里只校验。小说路径用于对白覆盖检查。
-            if getattr(args, "novel", None):
-                cmd += ["--novel", str(resolve(args.novel))]
-            if getattr(args, "max_shots", None):
-                cmd += ["--max-shots", str(args.max_shots)]
-        if getattr(args, "only", None) and stage in {"images", "audio", "videos"}:
-            cmd += ["--only", args.only]
-        print(f"\n== {stage} ==")
-        code = subprocess.call(cmd)
-        if code != 0 and stage == "videos":
-            failed_videos = True
-            continue
-        if code != 0:
-            raise SystemExit(code)
-    final = out / "final.mp4"
-    if final.exists():
-        print(f"\n成片：{final}")
-    else:
-        work_final = artifacts_sub(out, "final.mp4")
-        if work_final.exists():
-            print(f"\n成片（旧位置，建议移到 {final}）：{work_final}")
-    if failed_videos:
-        raise SystemExit("视频阶段有镜头失败。能用的镜头已经合成进成片。")
+    selected = list(STAGES[STAGES.index(start) : end_idx])
+    from pipeline.live import clear_live, mark_stage
+
+    _install_live_hooks(out, selected)
+    exit_code = 0
+    try:
+        for stage in selected:
+            mark_stage(out, stage, selected)
+            cmd = [sys.executable, "-m", "pipeline", stage, "--out", str(out)]
+            if args.config:
+                cmd += ["--config", str(resolve(args.config))]
+            if args.force:
+                cmd.append("--force")
+            if stage == "screenplay":
+                # 分镜 JSON 已写好；这里只校验。小说路径用于对白覆盖检查。
+                if getattr(args, "novel", None):
+                    cmd += ["--novel", str(resolve(args.novel))]
+                if getattr(args, "max_shots", None):
+                    cmd += ["--max-shots", str(args.max_shots)]
+            if getattr(args, "only", None) and stage in {"images", "audio", "videos"}:
+                cmd += ["--only", args.only]
+            print(f"\n== {stage} ==")
+            code = subprocess.call(cmd)
+            if code != 0 and stage == "videos":
+                failed_videos = True
+                continue
+            if code != 0:
+                exit_code = code
+                clear_live(out, status="failed", returncode=code)
+                raise SystemExit(code)
+        final = out / "final.mp4"
+        if final.exists():
+            print(f"\n成片：{final}")
+        else:
+            work_final = artifacts_sub(out, "final.mp4")
+            if work_final.exists():
+                print(f"\n成片（旧位置，建议移到 {final}）：{work_final}")
+        if failed_videos:
+            exit_code = 1
+            clear_live(out, status="failed", returncode=1)
+            raise SystemExit("视频阶段有镜头失败。能用的镜头已经合成进成片。")
+        clear_live(out, status="success", returncode=0)
+    except SystemExit:
+        raise
+    except Exception:
+        clear_live(out, status="failed", returncode=exit_code or 1)
+        raise
 
 
 def cmd_produce(args: argparse.Namespace) -> None:
