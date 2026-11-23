@@ -10,11 +10,12 @@ import numpy as np
 import soundfile as sf
 
 from pipeline.config import Settings
+from pipeline.dialogue import plan_segments, spoken_chars, split_text_by_ratios
 from pipeline.hf_cache import resolve_snapshot
 from pipeline.mirrors import child_env
 from pipeline.runtime import ensure_runtime_layout, musicgen_python, musicgen_venv_path
 from pipeline.progress import run_tee
-from pipeline.util import dump_json, frames_for_duration, load_json, resolve, stable_seed
+from pipeline.util import dump_json, frames_for_duration, load_json, resolve, snap_frames, stable_seed, stable_seed
 from pipeline.voices import (
     default_music_prompt,
     emotion_instruct,
@@ -46,6 +47,82 @@ def _speaker_profile(shot: dict, characters: dict[str, dict]) -> dict:
     }
 
 
+def silence_cuts(arr: np.ndarray, sample_rate: int, *, min_gap: float = 0.12) -> list[tuple[int, int]]:
+    """返回音频里可切的静音区间（采样下标），用于把一句连续语音切成几段。"""
+    sr = max(1, int(sample_rate))
+    hop = max(1, int(0.02 * sr))
+    count = arr.shape[0] // hop
+    if count < 3:
+        return []
+    frames = arr[: count * hop].reshape(count, hop)
+    rms = np.sqrt(np.mean(frames**2, axis=1))
+    speech = float(np.percentile(rms, 90))
+    threshold = max(0.008, 0.18 * speech)
+    quiet = rms <= threshold
+    cuts: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, is_quiet in enumerate(quiet):
+        if is_quiet:
+            if start is None:
+                start = index
+            continue
+        if start is not None:
+            if (index - start) * hop >= min_gap * sr:
+                cuts.append((start * hop, index * hop))
+            start = None
+    if start is not None and (count - start) * hop >= min_gap * sr:
+        cuts.append((start * hop, count * hop))
+    return cuts
+
+
+def split_wav_at_cuts(
+    src: Path,
+    dests: list[Path],
+    cuts: list[tuple[int, int]],
+    target_seconds: float,
+    *,
+    sample_rate: int,
+    head_pad: int = 0,
+) -> list[float]:
+    """按候选静音区间把一条 wav 切成 len(dests) 段，返回各段时长。
+
+    段数由 ``target_seconds`` 决定，切点优先选最接近均分位置的静音区间，
+    因此语调连贯（本来就是一次合成），且一个字都不会丢。
+    """
+    data, sr = sf.read(str(src), always_2d=False)
+    arr = np.asarray(data, dtype=np.float32)
+    if arr.ndim > 1:
+        arr = arr.mean(axis=1)
+    total = arr.shape[0]
+    if len(dests) <= 1 or not cuts:
+        dests[0].parent.mkdir(parents=True, exist_ok=True)
+        _save_mono_wav(dests[0], arr[head_pad:], int(sr))
+        return [float(total - head_pad) / max(1, int(sr))]
+
+    # 每段的理想边界
+    want = [total * (index + 1) / len(dests) for index in range(len(dests) - 1)]
+    chosen: list[int] = []
+    pool = list(cuts)
+    for boundary in want:
+        if not pool:
+            break
+        best = min(pool, key=lambda cut: abs((cut[0] + cut[1]) / 2 - boundary))
+        chosen.append((best[0] + best[1]) // 2)
+        pool = [cut for cut in pool if cut[0] > best[1]]
+    chosen = sorted(set(chosen))
+    if len(chosen) != len(dests) - 1:
+        return []
+
+    edges = [head_pad, *chosen, total]
+    durations: list[float] = []
+    for index, dest in enumerate(dests):
+        chunk = arr[edges[index] : edges[index + 1]]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _save_mono_wav(dest, chunk, int(sr))
+        durations.append(float(chunk.shape[0]) / max(1, int(sr)))
+    return durations
+
+
 def _save_mono_wav(path: Path, audio, sample_rate: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     arr = np.array(audio, dtype=np.float32)
@@ -55,6 +132,69 @@ def _save_mono_wav(path: Path, audio, sample_rate: int) -> None:
     if peak > 1.0:
         arr = arr / peak
     sf.write(str(path), arr, sample_rate)
+
+
+def trim_silence_wav(
+    path: Path,
+    *,
+    pad_head: float = 0.08,
+    pad_tail: float = 0.16,
+    floor: float = 0.010,
+    run_frames: int = 3,
+    report_pad: bool = False,
+) -> float | tuple[float, int]:
+    """裁掉 TTS 首尾静音，只留一点呼吸余量；返回裁后时长。
+
+    Qwen3-TTS 常在句首尾留 1 秒以上空白（有时还带一点底噪/口水音），不裁会让
+    A2V 镜头白拖、口型等半天。用 20ms 窗 RMS 相对语音电平判定，并要求连续
+    多帧才算说话，避免把零星噪声当语音；只从两端向内收，句中停顿不动。
+
+    ``report_pad=True`` 时返回 (裁后时长, 被裁掉的开头采样数)，供按静音切段用。
+    """
+    data, sample_rate = sf.read(str(path), always_2d=False)
+    arr = np.asarray(data, dtype=np.float32)
+    if arr.ndim > 1:
+        arr = arr.mean(axis=1)
+    sr = max(1, int(sample_rate))
+
+    def _result(seconds: float, pad: int = 0):
+        return (seconds, pad) if report_pad else seconds
+
+    if arr.size == 0:
+        return _result(0.0)
+
+    hop = max(1, int(0.02 * sr))
+    count = arr.shape[0] // hop
+    if count < run_frames + 1:
+        return _result(float(arr.shape[0]) / sr)
+    frames = arr[: count * hop].reshape(count, hop)
+    rms = np.sqrt(np.mean(frames**2, axis=1))
+    # 语音电平取 90 分位；阈值取它的一小截，绝对下限防止整段静音时乱裁
+    speech = float(np.percentile(rms, 90))
+    threshold = max(floor, 0.25 * speech)
+    loud = rms > threshold
+
+    first: int | None = None
+    last: int | None = None
+    run = 0
+    for index, flag in enumerate(loud):
+        if flag:
+            run += 1
+            if run >= run_frames:
+                if first is None:
+                    first = index - run_frames + 1
+                last = index
+        else:
+            run = 0
+    if first is None or last is None:
+        return _result(float(arr.shape[0]) / sr)
+
+    start = max(0, int(first * hop - pad_head * sr))
+    end = min(arr.shape[0], int((last + 1) * hop + pad_tail * sr))
+    trimmed = arr[start:end]
+    if trimmed.shape[0] < arr.shape[0]:
+        _save_mono_wav(path, trimmed, sr)
+    return _result(float(trimmed.shape[0]) / sr, start)
 
 
 def wav_duration(path: Path) -> float:
@@ -81,32 +221,133 @@ def pad_wav_to_duration(src: Path, dest: Path, duration_s: float) -> Path:
     return dest
 
 
+def _synth_line(model, *, line: str, profile: dict) -> tuple[np.ndarray, int]:
+    """合成一句台词，返回波形与采样率。"""
+    chunks: list[np.ndarray] = []
+    sample_rate = 24000
+    # 条的总长按字数估，留足余量；说到 EOS 就停，避免默认 2048 步看起来几乎不动
+    max_tokens = min(2048, max(128, len(line) * 8))
+    for result in model.generate_custom_voice(
+        text=line,
+        speaker=profile["voice"],
+        language="Chinese",
+        instruct=profile["instruct"],
+        verbose=True,
+        max_tokens=max_tokens,
+    ):
+        chunks.append(np.array(result.audio, dtype=np.float32).reshape(-1))
+        sample_rate = int(getattr(result, "sample_rate", sample_rate) or sample_rate)
+    if not chunks:
+        raise SystemExit(f"TTS 没有产出音频：{line}")
+    return np.concatenate(chunks), sample_rate
+
+
+def _speak_with_fit(
+    model,
+    *,
+    shot_id: str,
+    line: str,
+    profile: dict,
+    max_seconds: float,
+    scratch: Path,
+) -> list[tuple[str, Path, float]]:
+    """合成整句台词，并把它切成每段都放得进单镜时长的若干段。
+
+    **台词只合成一次**，语速、语气完全由原文和 emotion 决定，绝不为了凑时长去调语速
+    或重念（重念会换一次 take，同一句前后语调就不一致了）。超长时只做两件事：
+
+    1. 在句中静音处切开（同一段音频切的，语调天然连贯）——首选；
+    2. 找不到足够静音点时（一口气念完），把整句原样放进一个更长的镜头。
+
+    返回 [(分段文本, wav 路径, 时长)]；第 2 种情况的时长可以超过 max_seconds。
+    """
+    audio, sample_rate = _synth_line(model, line=line, profile=profile)
+    whole = scratch / f"{shot_id}-whole.wav"
+    _save_mono_wav(whole, audio, sample_rate)
+    trimmed = trim_silence_wav(whole, report_pad=True)
+    duration, head_pad = trimmed if isinstance(trimmed, tuple) else (trimmed, 0)
+    if duration <= max_seconds:
+        return [(line, whole, duration)]
+
+    # 需要几段才够：按实测总长向上取整
+    count = max(2, int(math.ceil(duration / max_seconds)))
+    data, sr = sf.read(str(whole), always_2d=False)
+    arr = np.asarray(data, dtype=np.float32)
+    if arr.ndim > 1:
+        arr = arr.mean(axis=1)
+    cuts = silence_cuts(arr, int(sr))
+    dests = [scratch / f"{shot_id}-{index:02d}.wav" for index in range(1, count + 1)]
+    durations = split_wav_at_cuts(
+        whole,
+        dests,
+        cuts,
+        max_seconds,
+        sample_rate=int(sr),
+        head_pad=head_pad,
+    )
+    if durations and all(value <= max_seconds + 1e-3 for value in durations):
+        total = sum(durations) or 1.0
+        ratios: list[float] = []
+        running = 0.0
+        for value in durations:
+            running += value
+            ratios.append(running / total)
+        texts = split_text_by_ratios(line, ratios) or plan_segments(
+            line, max(2, math.ceil(spoken_chars(line) / len(durations)))
+        )
+        if len(texts) == len(durations):
+            print(
+                f"镜头 {shot_id} 的台词 {duration:.2f}s 超过 {max_seconds:.2f}s，"
+                f"已在静音处切成 {len(durations)} 段（同一次配音，语调连贯）："
+                f"{' / '.join(t.strip() for t in texts)}"
+            )
+            return list(zip(texts, dests, durations))
+
+    # 一口气念完、没有可用静音点：保持原样，让镜头跟着配音变长。
+    # 宁可这一镜久一点，也不重念或改语速去迁就时长。
+    print(
+        f"镜头 {shot_id} 的台词 {duration:.2f}s，句中没有可切的停顿；"
+        f"保持原样、不重念，镜头按 {duration:.2f}s 生成。"
+    )
+    return [(line, whole, duration)]
+
+
 def _generate_dialogue(settings: Settings, story: dict, out: Path, force: bool) -> list[dict]:
+    """生成对白，必要时把镜头拆成多个子镜头，保证每句都念得完。
+
+    拆分结果按原镜头顺序写回 story（子镜头复用父镜头的静帧），
+    分镜文件随后会落盘，因此文生图阶段不用重跑。
+    """
     from mlx_audio.tts.utils import load_model
 
     voice_dir = out / "audio" / "voice"
     voice_dir.mkdir(parents=True, exist_ok=True)
+    scratch = out / "audio" / "scratch"
     characters = _character_map(story)
+    max_seconds = snap_frames(settings.video_frames_max) / max(1, settings.video_fps)
     jobs = []
     for shot in story["shots"]:
         line = str(shot.get("dialogue") or "").strip()
         if not line:
             continue
-        dest = voice_dir / f"{shot['id']}.wav"
-        profile = _speaker_profile(shot, characters)
-        jobs.append((shot, dest, profile, line))
-        if dest.exists() and not force:
-            print(f"已有对白 {shot['id']}，跳过")
+        jobs.append((shot, voice_dir / f"{shot['id']}.wav", _speaker_profile(shot, characters), line))
 
-    pending = [item for item in jobs if force or not item[1].exists()]
+    def _reusable(dest: Path) -> bool:
+        """已有 wav 只有在不超单镜时长时才复用。
+
+        旧产物（比如上限还是 97 帧时生成的）可能比现在的镜头上限长，
+        直接复用会重演「念不完」，所以这里按当前上限复核一遍。
+        """
+        if not dest.exists():
+            return False
+        if force:
+            return False
+        return trim_silence_wav(dest) <= max_seconds + 1e-3
+
+    pending = [item for item in jobs if not _reusable(item[1])]
     if not pending:
         return [
-            {
-                "shot_id": shot["id"],
-                "path": str(dest),
-                **profile,
-                "text": line,
-            }
+            {"shot_id": shot["id"], "path": str(dest), **profile, "text": line}
             for shot, dest, profile, line in jobs
             if dest.exists()
         ]
@@ -119,60 +360,162 @@ def _generate_dialogue(settings: Settings, story: dict, out: Path, force: bool) 
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     print(f"加载 TTS：{tts_dir}")
     model = load_model(str(tts_dir))
-    results = []
+
+    results: list[dict] = []
+    # 每个对白镜头的处理结果：单段就是原镜头，多段则是一串子镜头
+    by_shot: dict[str, list[dict]] = {}
+    split_count = 0
     for shot, dest, profile, line in jobs:
         if dest.exists() and not force:
+            # 能走到这里说明长度复核通过（见 _reusable）
             results.append({"shot_id": shot["id"], "path": str(dest), **profile, "text": line})
+            by_shot[str(shot["id"])] = [shot]
             continue
+        if dest.exists():
+            # 旧 wav 超长：删掉重念，让 _speak_with_fit 按当前上限切段
+            dest.unlink()
         print(f"对白 {shot['id']} · {profile['voice']} · {profile['emotion']}：{line}")
-        chunks = []
-        sample_rate = 24000
-        # 条的总长按字数估，留足余量；说到 EOS 就停，避免默认 2048 步看起来几乎不动
-        max_tokens = min(2048, max(128, len(line) * 8))
-        for result in model.generate_custom_voice(
-            text=line,
-            speaker=profile["voice"],
-            language="Chinese",
-            instruct=profile["instruct"],
-            verbose=True,
-            max_tokens=max_tokens,
-        ):
-            chunks.append(np.array(result.audio, dtype=np.float32).reshape(-1))
-            sample_rate = int(getattr(result, "sample_rate", sample_rate) or sample_rate)
-        if not chunks:
-            raise SystemExit(f"TTS 没有产出音频：{shot['id']}")
-        audio = np.concatenate(chunks)
-        _save_mono_wav(dest, audio, sample_rate)
-        results.append({"shot_id": shot["id"], "path": str(dest), **profile, "text": line})
+        segments = _speak_with_fit(
+            model,
+            shot_id=str(shot["id"]),
+            line=line,
+            profile=profile,
+            max_seconds=max_seconds,
+            scratch=scratch,
+        )
+        if len(segments) == 1:
+            text, wav, _ = segments[0]
+            wav.replace(dest)
+            shot["dialogue"] = text
+            results.append({"shot_id": shot["id"], "path": str(dest), **profile, "text": text})
+            by_shot[str(shot["id"])] = [shot]
+            continue
+        # 一句台词放不进一个镜头：拆成相邻子镜头，各段独立配音
+        children: list[dict] = []
+        for offset, (text, wav, _) in enumerate(segments, start=1):
+            child = _split_shot(shot, offset, text)
+            child_wav = voice_dir / f"{child['id']}.wav"
+            wav.replace(child_wav)
+            children.append(child)
+            results.append({"shot_id": child["id"], "path": str(child_wav), **profile, "text": text})
+        by_shot[str(shot["id"])] = children
+        split_count += len(children)
+        if dest.exists():
+            dest.unlink()
+
+    if split_count:
+        rebuilt: list[dict] = []
+        for shot in story["shots"]:
+            rebuilt.extend(by_shot.get(str(shot["id"]), [shot]))
+        story["shots"] = rebuilt
+        story["auto_split_dialogue"] = split_count
+        print(
+            f"台词太长，已自动拆成 {split_count} 个子镜头（复用同一静帧，不需要重跑文生图）。"
+            f"分镜现在 {len(rebuilt)} 镜。"
+        )
     return results
 
 
+def _split_shot(parent: dict, offset: int, text: str) -> dict:
+    """由父镜头派生第 offset 段子镜头（offset 从 1 起）。
+
+    子镜头沿用父镜头的人物、场景、情绪和静帧，并记下 ``reuse_frame``：
+    视频阶段直接复用父镜头那张静帧，所以拆镜不用重跑文生图。
+    """
+    parent_id = str(parent["id"])
+    child = dict(parent)
+    # 用 _p1/_p2 这种明确后缀，避免和分镜里本来就有的 s007b 之类 id 撞车
+    child["id"] = f"{parent_id}_p{offset}"
+    child["dialogue"] = text
+    child["reuse_frame"] = parent_id
+    # 静帧相同但运镜要有差异，否则几段视频会像同一段复制
+    child["seed"] = stable_seed("split", parent_id, str(offset), text)
+    for key in ("audio_duration", "audio_overflow", "video_frames", "video", "video_error"):
+        child.pop(key, None)
+    return child
+
+
 def apply_shot_timings(settings: Settings, story: dict, out: Path) -> None:
-    """按对白 wav 写 audio_duration / video_frames，供 A2V 与配乐估长。"""
+    """按对白 wav 写 audio_duration / video_frames。
+
+    有对白的镜头：时长**跟着配音走**（向上取 8k+1 格），不为了塞进某个上限去动台词。
+    台词本身已经在 _speak_with_fit 里切到不超过 video_frames_max，所以这里正常不会
+    超上限；万一超了（极端长句），就按实际配音给足帧数，宁可这镜长一点。
+    """
     voice_dir = out / "audio" / "voice"
+    fps = max(1, settings.video_fps)
+    cap_frames = snap_frames(settings.video_frames_max)
     for shot in story["shots"]:
         voice = voice_dir / f"{shot['id']}.wav"
         line = str(shot.get("dialogue") or "").strip()
         if line and voice.exists():
-            duration = wav_duration(voice)
-            frames = frames_for_duration(
-                duration,
-                settings.video_fps,
-                min_frames=settings.video_frames_min,
-                max_frames=settings.video_frames_max,
-            )
+            # 已有 wav 可能带首尾静音（老产物），这里再裁一次；对已裁过的文件幂等
+            duration = trim_silence_wav(voice)
             shot["audio_duration"] = round(duration, 3)
-            shot["video_frames"] = frames
+            shot["video_frames"] = frames_for_duration(
+                duration,
+                fps,
+                min_frames=settings.video_frames_min,
+                max_frames=max(cap_frames, snap_frames(int(math.ceil(duration * fps)) + 1)),
+            )
         else:
             shot.pop("audio_duration", None)
             shot["video_frames"] = int(settings.video_frames)
+        shot.pop("audio_overflow", None)
 
 
-def _estimate_timeline(settings: Settings, out: Path, story: dict) -> float:
-    total = 0.0
+def assert_no_overflow(settings: Settings, story: dict) -> None:
+    """兜底：确认没有镜头的画面比自己的配音短。
+
+    镜头时长现在是跟着配音走的（frames_for_duration 向上取格），所以正常情况
+    不会触发。真触发了说明 video_frames 是旧产物或算错了，必须报错——
+    绝不允许静默截掉半句台词，这是最初「台词读不完」的根因。
+    """
     fps = max(1, settings.video_fps)
+    bad = [
+        (
+            str(shot.get("id") or "?"),
+            float(shot["audio_duration"]),
+            float(shot["video_frames"]) / fps,
+        )
+        for shot in story["shots"]
+        if shot.get("audio_duration") is not None and shot.get("video_frames")
+        and float(shot["video_frames"]) / fps + 1e-3 < float(shot["audio_duration"])
+    ]
+    if not bad:
+        return
+    listed = "\n".join(
+        f"- {sid}：对白 {dur:.2f}s，镜头只有 {frames_s:.2f}s" for sid, dur, frames_s in bad
+    )
+    raise SystemExit(
+        f"有镜头的画面比配音短，继续下去台词会被截断：\n{listed}\n"
+        "请用 --force 重跑 audio 让 video_frames 按实测配音重算。"
+    )
+
+
+def _timeline_seconds(settings: Settings, out: Path, story: dict) -> tuple[float, str]:
+    """成片时间轴时长（秒），以及这个数字的来源说明。
+
+    优先级刻意从「最确定」到「最估算」：
+    1. 全部镜头都有 video_frames —— 视频已经渲染完，这是最终时间轴，配乐就按它生成；
+    2. 否则读 clips/*.mp4 实测时长；
+    3. 再否则用 TTS wav 时长 / 默认帧数估算（配乐只是个大概值，assemble 会用它裁到真实长度）。
+    """
+    fps = max(1, settings.video_fps)
+    shots = story.get("shots") or []
+    frames_total = sum(int(s.get("video_frames") or 0) for s in shots)
+    if shots and all(s.get("video_frames") for s in shots):
+        return max(2.0, frames_total / fps), "video_frames（镜头已渲染，精确）"
+
+    total = 0.0
+    measured = 0
     voice_dir = out / "audio" / "voice"
-    for shot in story["shots"]:
+    for shot in shots:
+        clip = out / "clips" / f"{shot['id']}.mp4"
+        if clip.exists():
+            total += _clip_duration(settings, clip)
+            measured += 1
+            continue
         frames = shot.get("video_frames")
         if frames:
             total += float(frames) / fps
@@ -181,30 +524,36 @@ def _estimate_timeline(settings: Settings, out: Path, story: dict) -> float:
         if voice.exists():
             total += max(0.1, wav_duration(voice))
             continue
-        clip = out / "clips" / f"{shot['id']}.mp4"
-        if clip.exists():
-            proc = subprocess.run(
-                [
-                    str(settings.ffprobe),
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "format=duration",
-                    "-of",
-                    "default=noprint_wrappers=1:nokey=1",
-                    str(clip),
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            try:
-                total += max(0.1, float(proc.stdout.strip()))
-                continue
-            except ValueError:
-                pass
         total += settings.video_frames / fps
-    return max(2.0, total)
+    if measured:
+        return max(2.0, total), f"clips 实测（{measured}/{len(shots)} 镜）"
+    return max(2.0, total), "TTS/默认帧数估算"
+
+
+def _clip_duration(settings: Settings, clip: Path) -> float:
+    proc = subprocess.run(
+        [
+            str(settings.ffprobe),
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(clip),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    try:
+        return max(0.1, float(proc.stdout.strip()))
+    except ValueError:
+        return 0.1
+
+
+def _estimate_timeline(settings: Settings, out: Path, story: dict) -> float:
+    return _timeline_seconds(settings, out, story)[0]
 
 
 def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> Path:
@@ -215,10 +564,19 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
         str(story.get("style") or ""), str(story.get("title") or "")
     )
     seed = int(story.get("music_seed") or stable_seed("bgm", prompt, story.get("title", "")))
-    duration = min(30.0, max(8.0, _estimate_timeline(settings, out, story) + 2.0))
+    timeline, source = _timeline_seconds(settings, out, story)
+    # 配乐要比成片长一点：留出尾部淡出的余量，也让 -stream_loop 不需要真的绕回
+    wanted = min(float(settings.music_max_seconds), max(8.0, timeline + 2.0))
     if dest.exists() and not force:
-        print(f"已有配乐，跳过：{dest}")
-        return dest
+        have = wav_duration(dest)
+        # 关键：旧配乐比成片短就必须重做，否则合成时只能靠循环拼接，中间留硬接缝
+        if have + 0.05 >= timeline:
+            print(f"已有配乐 {have:.1f}s ≥ 成片 {timeline:.1f}s，跳过：{dest}")
+            return dest
+        print(
+            f"已有配乐只有 {have:.1f}s，短于成片 {timeline:.1f}s，重新生成："
+            f"{have:.1f}s → {wanted:.0f}s（时间轴依据：{source}）"
+        )
     if not settings.musicgen_dir.exists():
         raise SystemExit(f"还没有 MusicGen 代码：{settings.musicgen_dir}。请先运行 scripts/setup.sh")
     script = settings.musicgen_dir / "generate.py"
@@ -240,7 +598,7 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
         )
     if t5_dir is None or not (t5_dir / "model.safetensors").is_file():
         raise SystemExit("找不到 MusicGen 文本编码器 t5-base。请先运行 scripts/setup.sh。")
-    print(f"配乐约 {duration:.0f}s：{prompt}")
+    print(f"配乐约 {wanted:.0f}s（成片 {timeline:.1f}s，依据 {source}）：{prompt}")
     env = child_env()
     local_bin = str(Path.home() / ".local" / "bin")
     env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
@@ -258,22 +616,29 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
         "-m",
         str(model_dir),
         "-d",
-        str(int(round(duration))),
+        str(int(round(wanted))),
         "-o",
         str(dest),
         "--no-open",
     ]
     _ = seed  # MusicGen-MLX CLI 暂不暴露 seed；保留变量便于以后接上
     log = out / "logs" / "bgm.log"
-    code = run_tee(cmd, log=log, env=env, cwd=settings.musicgen_dir, progress="配乐")
+    code = run_tee(
+        cmd,
+        log=log,
+        env=env,
+        cwd=settings.musicgen_dir,
+        progress="配乐",
+        desc="MusicGen",
+    )
     if code != 0 or not dest.exists():
         raise SystemExit(f"配乐失败，详见 {log}")
     return dest
 
 
 def cmd_audio(args: argparse.Namespace) -> None:
+    """只做对白（TTS）。配乐挪到 music 阶段，等视频渲染完、时间轴精确后再生成。"""
     settings = Settings.load(resolve(args.config) if args.config else None)
-    ensure_runtime_layout(musicgen_dir=settings.musicgen_dir)
     out = resolve(args.out)
     story_path = out / "storyboard.json"
     if not story_path.exists():
@@ -281,15 +646,18 @@ def cmd_audio(args: argparse.Namespace) -> None:
     story = load_json(story_path)
     voices = _generate_dialogue(settings, story, out, args.force)
     apply_shot_timings(settings, story, out)
-    music = _generate_music(settings, story, out, args.force)
-    manifest = {
-        "tts_model": settings.tts_model,
-        "music_model": settings.music_model,
-        "music": str(music),
-        "music_prompt": str(story.get("music_prompt") or default_music_prompt(story.get("style", ""), story.get("title", ""))),
-        "voices": voices,
-        "timeline_s": round(_estimate_timeline(settings, out, story), 2),
-    }
+    # 兜底：自动拆镜之后仍有超长对白就不许继续，避免成片悄悄被截台词
+    assert_no_overflow(settings, story)
+    manifest = _load_manifest(out)
+    manifest.update(
+        {
+            "tts_model": settings.tts_model,
+            "music_model": settings.music_model,
+            "music_prompt": str(story.get("music_prompt") or default_music_prompt(story.get("style", ""), story.get("title", ""))),
+            "voices": voices,
+            "timeline_s": round(_estimate_timeline(settings, out, story), 2),
+        }
+    )
     dump_json(out / "audio" / "manifest.json", manifest)
     # 把推断出的音色写回人物表，方便下次改分镜
     by_name = {c["name"]: c for c in story.get("characters") or []}
@@ -304,6 +672,47 @@ def cmd_audio(args: argparse.Namespace) -> None:
     dump_json(story_path, story)
     timed = sum(1 for shot in story["shots"] if shot.get("audio_duration") is not None)
     print(
-        f"音频就绪：对白 {len(voices)} 条（其中 {timed} 镜写入 video_frames），"
-        f"配乐 {music}，估长约 {manifest['timeline_s']}s"
+        f"对白就绪：{len(voices)} 条（其中 {timed} 镜写入 video_frames），"
+        f"时间轴估长 {manifest['timeline_s']}s；配乐在 videos 之后由 music 阶段生成"
     )
+
+
+def _load_manifest(out: Path) -> dict:
+    path = out / "audio" / "manifest.json"
+    if path.exists():
+        try:
+            return load_json(path)
+        except Exception:
+            pass
+    return {}
+
+
+def cmd_music(args: argparse.Namespace) -> None:
+    """在所有镜头渲染完之后生成配乐：此时成片长度完全确定，不会短于视频。"""
+    settings = Settings.load(resolve(args.config) if args.config else None)
+    ensure_runtime_layout(musicgen_dir=settings.musicgen_dir)
+    out = resolve(args.out)
+    story_path = out / "storyboard.json"
+    if not story_path.exists():
+        raise SystemExit(f"还没有分镜：{story_path}")
+    story = load_json(story_path)
+    timeline, source = _timeline_seconds(settings, out, story)
+    music = _generate_music(settings, story, out, args.force)
+    have = wav_duration(music)
+    manifest = _load_manifest(out)
+    manifest.update(
+        {
+            "music": str(music),
+            "music_seconds": round(have, 3),
+            "music_model": settings.music_model,
+            "timeline_s": round(timeline, 3),
+            "timeline_source": source,
+        }
+    )
+    dump_json(out / "audio" / "manifest.json", manifest)
+    if have + 0.05 < timeline:
+        print(
+            f"提示：配乐 {have:.1f}s 仍短于成片 {timeline:.1f}s（受 music_max_seconds="
+            f"{settings.music_max_seconds:.0f} 限制），合成时会循环补齐。"
+        )
+    print(f"配乐就绪：{music}（{have:.1f}s，成片 {timeline:.1f}s，依据 {source}）")
