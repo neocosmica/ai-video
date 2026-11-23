@@ -444,6 +444,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     audio = sub.add_parser("audio", help="本地生成对白（TTS）")
     add_common(audio)
+    audio.add_argument(
+        "--only",
+        default=None,
+        help="只重新合成这些镜头的对白，例如 s004,s007；其余镜头复用已有配音",
+    )
     audio.set_defaults(func=cmd_audio)
 
     music = sub.add_parser(
@@ -463,14 +468,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common(produce, novel=True)
     add_storyboard(produce)
-    produce.add_argument("--only", default=None, help="只重做列出的镜头，用于 images 和 videos")
+    produce.add_argument("--only", default=None, help="只重做列出的镜头，用于 images、audio 和 videos")
     produce.set_defaults(func=cmd_produce, start="screenplay")
 
     run = sub.add_parser("run", help="按阶段串跑（默认从 screenplay 起，等同 produce）")
     add_common(run, novel=True)
     add_storyboard(run)
     run.add_argument("--from", dest="start", default="screenplay", choices=STAGES)
-    run.add_argument("--only", default=None, help="只重做列出的镜头，用于 images 和 videos")
+    run.add_argument("--only", default=None, help="只重做列出的镜头，用于 images、audio 和 videos")
     run.set_defaults(func=cmd_run)
 
     budget = sub.add_parser(

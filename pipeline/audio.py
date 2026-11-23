@@ -312,11 +312,16 @@ def _speak_with_fit(
     return [(line, whole, duration)]
 
 
-def _generate_dialogue(settings: Settings, story: dict, out: Path, force: bool) -> list[dict]:
+def _generate_dialogue(
+    settings: Settings, story: dict, out: Path, force: bool, only: str | None = None
+) -> list[dict]:
     """生成对白，必要时把镜头拆成多个子镜头，保证每句都念得完。
 
     拆分结果按原镜头顺序写回 story（子镜头复用父镜头的静帧），
     分镜文件随后会落盘，因此文生图阶段不用重跑。
+
+    ``only``：逗号分隔的镜头 id。只重新合成这些镜头的对白；其余镜头
+    复用已有 wav（没有则报错——漏配音会让后面 videos 阶段静默跳过）。
     """
     from mlx_audio.tts.utils import load_model
 
@@ -325,10 +330,15 @@ def _generate_dialogue(settings: Settings, story: dict, out: Path, force: bool) 
     scratch = out / "audio" / "scratch"
     characters = _character_map(story)
     max_seconds = snap_frames(settings.video_frames_max) / max(1, settings.video_fps)
+    wanted: set[str] | None = None
+    if only:
+        wanted = {item.strip() for item in only.split(",") if item.strip()}
     jobs = []
     for shot in story["shots"]:
         line = str(shot.get("dialogue") or "").strip()
         if not line:
+            continue
+        if wanted is not None and str(shot["id"]) not in wanted:
             continue
         jobs.append((shot, voice_dir / f"{shot['id']}.wav", _speaker_profile(shot, characters), line))
 
@@ -343,6 +353,21 @@ def _generate_dialogue(settings: Settings, story: dict, out: Path, force: bool) 
         if force:
             return False
         return trim_silence_wav(dest) <= max_seconds + 1e-3
+
+    if wanted is not None:
+        for shot in story["shots"]:
+            line = str(shot.get("dialogue") or "").strip()
+            if not line or str(shot["id"]) in wanted:
+                continue
+            voice = voice_dir / f"{shot['id']}.wav"
+            if not voice.exists():
+                raise SystemExit(
+                    f"--only 模式只重做 {sorted(wanted)}，但镜头 {shot['id']} 有对白却没有配音"
+                    f" {voice}。请先不带 --only 完整跑一次 audio。"
+                )
+        # --only 模式只重念指定镜头，绝不自动拆镜改写 shots（拆镜会动整个分镜，
+        # 和「只重做这几个镜头」的预期相悖）；要拆镜请不带 --only 跑。
+        force = force or True
 
     pending = [item for item in jobs if not _reusable(item[1])]
     if not pending:
@@ -391,6 +416,11 @@ def _generate_dialogue(settings: Settings, story: dict, out: Path, force: bool) 
             by_shot[str(shot["id"])] = [shot]
             continue
         # 一句台词放不进一个镜头：拆成相邻子镜头，各段独立配音
+        if wanted is not None:
+            raise SystemExit(
+                f"镜头 {shot['id']} 的台词超过单镜上限，需要拆镜；"
+                "--only 模式不改分镜，请不带 --only 跑 audio（或先在分镜里手工拆好）。"
+            )
         children: list[dict] = []
         for offset, (text, wav, _) in enumerate(segments, start=1):
             child = _split_shot(shot, offset, text)
@@ -644,7 +674,7 @@ def cmd_audio(args: argparse.Namespace) -> None:
     if not story_path.exists():
         raise SystemExit(f"还没有分镜：{story_path}")
     story = load_json(story_path)
-    voices = _generate_dialogue(settings, story, out, args.force)
+    voices = _generate_dialogue(settings, story, out, args.force, getattr(args, "only", None))
     apply_shot_timings(settings, story, out)
     # 兜底：自动拆镜之后仍有超长对白就不许继续，避免成片悄悄被截台词
     assert_no_overflow(settings, story)

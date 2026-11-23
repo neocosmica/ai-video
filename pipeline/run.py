@@ -69,7 +69,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 cmd += ["--novel", str(resolve(args.novel))]
             if getattr(args, "max_shots", None):
                 cmd += ["--max-shots", str(args.max_shots)]
-        if getattr(args, "only", None) and stage in {"images", "videos"}:
+        if getattr(args, "only", None) and stage in {"images", "audio", "videos"}:
             cmd += ["--only", args.only]
         print(f"\n== {stage} ==")
         code = subprocess.call(cmd)
