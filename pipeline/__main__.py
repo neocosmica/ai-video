@@ -491,7 +491,10 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     # 项目文件夹约定：--project 补默认路径、命名守卫、清单与 novel 猜测
     from pipeline.projects import (
         apply_project_defaults,
+        artifacts_dir,
+        artifacts_sub,
         check_name,
+        has_work_dir,
         list_projects,
         novel_candidates,
     )
@@ -507,13 +510,24 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     ns3 = argparse.Namespace(project="demo", out="somewhere/else", novel=None, storyboard=None)
     apply_project_defaults(ns3)
     assert ns3.out == "somewhere/else", ns3.out
+    # 过程产物收进 <项目>/work/；顶层只留小说、分镜、成片
+    assert artifacts_dir("projects/x").name == "work", artifacts_dir("projects/x")
+    assert artifacts_sub("projects/x", "audio", "voice") == artifacts_dir("projects/x") / "audio" / "voice"
+    assert artifacts_dir(Path("/abs/out")) == Path("/abs/out/work")
+    demo_dir = ROOT / "projects" / "demo"
+    assert (demo_dir / "novel.txt").exists() and (demo_dir / "storyboard.json").exists()
+    assert (demo_dir / "final.mp4").exists()
+    assert has_work_dir(demo_dir), "demo 项目应有 work/ 过程产物目录"
+    assert (demo_dir / "work" / "frames").is_dir()
+    for stray in ("frames", "clips", "audio", "logs", "normalized"):
+        assert not (demo_dir / stray).exists(), f"demo 顶层不应再有过程产物：{stray}/"
     try:
         check_name("../escape")
         raise AssertionError("项目名不应接受路径分隔符")
     except SystemExit:
         pass
-    cands = novel_candidates(ROOT / "projects" / "demo" / "storyboard.json")
-    assert cands and cands[0] == ROOT / "projects" / "demo" / "novel.txt", cands
+    cands = novel_candidates(demo_dir / "storyboard.json")
+    assert cands and cands[0] == demo_dir / "novel.txt", cands
     names = {item["name"] for item in list_projects()}
     assert "demo" in names and "scifi" in names, names
     for label, path in (

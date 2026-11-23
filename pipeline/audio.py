@@ -13,6 +13,7 @@ from pipeline.config import Settings
 from pipeline.dialogue import plan_segments, spoken_chars, split_text_by_ratios
 from pipeline.hf_cache import resolve_snapshot
 from pipeline.mirrors import child_env
+from pipeline.projects import artifacts_sub
 from pipeline.runtime import ensure_runtime_layout, musicgen_python, musicgen_venv_path
 from pipeline.progress import run_tee
 from pipeline.util import dump_json, frames_for_duration, load_json, resolve, snap_frames, stable_seed, stable_seed
@@ -325,9 +326,9 @@ def _generate_dialogue(
     """
     from mlx_audio.tts.utils import load_model
 
-    voice_dir = out / "audio" / "voice"
+    voice_dir = artifacts_sub(out, "audio", "voice")
     voice_dir.mkdir(parents=True, exist_ok=True)
-    scratch = out / "audio" / "scratch"
+    scratch = artifacts_sub(out, "audio", "scratch")
     characters = _character_map(story)
     max_seconds = snap_frames(settings.video_frames_max) / max(1, settings.video_fps)
     wanted: set[str] | None = None
@@ -472,7 +473,7 @@ def apply_shot_timings(settings: Settings, story: dict, out: Path) -> None:
     台词本身已经在 _speak_with_fit 里切到不超过 video_frames_max，所以这里正常不会
     超上限；万一超了（极端长句），就按实际配音给足帧数，宁可这镜长一点。
     """
-    voice_dir = out / "audio" / "voice"
+    voice_dir = artifacts_sub(out, "audio", "voice")
     fps = max(1, settings.video_fps)
     cap_frames = snap_frames(settings.video_frames_max)
     for shot in story["shots"]:
@@ -539,9 +540,9 @@ def _timeline_seconds(settings: Settings, out: Path, story: dict) -> tuple[float
 
     total = 0.0
     measured = 0
-    voice_dir = out / "audio" / "voice"
+    voice_dir = artifacts_sub(out, "audio", "voice")
     for shot in shots:
-        clip = out / "clips" / f"{shot['id']}.mp4"
+        clip = artifacts_sub(out, "clips", f"{shot['id']}.mp4")
         if clip.exists():
             total += _clip_duration(settings, clip)
             measured += 1
@@ -587,7 +588,7 @@ def _estimate_timeline(settings: Settings, out: Path, story: dict) -> float:
 
 
 def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> Path:
-    music_dir = out / "audio"
+    music_dir = artifacts_sub(out, "audio")
     music_dir.mkdir(parents=True, exist_ok=True)
     dest = music_dir / "bgm.wav"
     prompt = str(story.get("music_prompt") or "").strip() or default_music_prompt(
@@ -652,7 +653,7 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
         "--no-open",
     ]
     _ = seed  # MusicGen-MLX CLI 暂不暴露 seed；保留变量便于以后接上
-    log = out / "logs" / "bgm.log"
+    log = artifacts_sub(out, "logs", "bgm.log")
     code = run_tee(
         cmd,
         log=log,
@@ -688,7 +689,7 @@ def cmd_audio(args: argparse.Namespace) -> None:
             "timeline_s": round(_estimate_timeline(settings, out, story), 2),
         }
     )
-    dump_json(out / "audio" / "manifest.json", manifest)
+    dump_json(artifacts_sub(out, "audio", "manifest.json"), manifest)
     # 把推断出的音色写回人物表，方便下次改分镜
     by_name = {c["name"]: c for c in story.get("characters") or []}
     for item in voices:
@@ -708,7 +709,7 @@ def cmd_audio(args: argparse.Namespace) -> None:
 
 
 def _load_manifest(out: Path) -> dict:
-    path = out / "audio" / "manifest.json"
+    path = artifacts_sub(out, "audio", "manifest.json")
     if path.exists():
         try:
             return load_json(path)
@@ -739,7 +740,7 @@ def cmd_music(args: argparse.Namespace) -> None:
             "timeline_source": source,
         }
     )
-    dump_json(out / "audio" / "manifest.json", manifest)
+    dump_json(artifacts_sub(out, "audio", "manifest.json"), manifest)
     if have + 0.05 < timeline:
         print(
             f"提示：配乐 {have:.1f}s 仍短于成片 {timeline:.1f}s（受 music_max_seconds="

@@ -15,7 +15,8 @@
 
 ### 1. 输入输出约定
 
-**每个项目一个独立文件夹，所有和这部片相关的内容都在里面**；全部项目放在根目录的 `projects/` 下：
+**每个项目一个独立文件夹，所有和这部片相关的内容都在里面**；全部项目放在根目录的 `projects/` 下。
+项目顶层只放「源」和「成片」，过程产物全部收进 `work/`：
 
 ```
 projects/
@@ -23,7 +24,7 @@ projects/
     novel.txt        # 小说
     storyboard.json  # 分镜（produce 也会把外部分镜拷到这里）
     final.mp4        # 成片
-    frames/ clips/ audio/ ...   # 流水线产物
+    work/            # 过程产物（自动生成）：frames/ clips/ audio/ logs/ ...
   scifi/
     ...
 ```
@@ -34,6 +35,7 @@ projects/
 | 小说 | `projects/<片名>/novel.txt` |
 | 分镜 | `projects/<片名>/storyboard.json` |
 | 成片 | `projects/<片名>/final.mp4` |
+| 过程产物 | `projects/<片名>/work/`（帧、片段、配音、日志；脚本自动管理） |
 
 新建项目：`./scripts/run.sh projects --new <片名>`。CLI 全部子命令都支持 `--project <片名>`，等价于 `--out projects/<片名>` 并自动补 novel/storyboard 默认路径。
 

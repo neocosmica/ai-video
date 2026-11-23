@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from pipeline.config import Settings
+from pipeline.projects import WORK_DIRNAME, artifacts_dir, artifacts_sub
 from pipeline.util import ass_escape, ass_time, ffmpeg_concat_line, load_json, resolve
 
 FONT_DIR = Path("/System/Library/Fonts/Supplemental")
@@ -225,7 +226,8 @@ def _mix_soundtrack(
     配乐不做全程固定衰减（否则空镜段也被一起压掉、整条片几乎听不见配乐），
     而是按已知的对白时间轴分段设音量：说话时乘 music_duck_gain，空镜段恢复满电平。
     """
-    mixed = out / "soundtrack.m4a"
+    mixed = artifacts_sub(out, "soundtrack.m4a")
+    mixed.parent.mkdir(parents=True, exist_ok=True)
     inputs: list[str] = [
         "-f",
         "lavfi",
@@ -318,13 +320,13 @@ def cmd_assemble(args: argparse.Namespace) -> None:
     story = load_json(story_path)
     clips = []
     for shot in story["shots"]:
-        path = out / "clips" / f"{shot['id']}.mp4"
+        path = artifacts_sub(out, "clips", f"{shot['id']}.mp4")
         if path.exists():
             clips.append((shot, path))
     if not clips:
-        raise SystemExit(f"没有可合成的镜头。请先看 {out / 'logs'}")
+        raise SystemExit(f"没有可合成的镜头。请先看 {artifacts_sub(out, 'logs')}")
 
-    normal_dir = out / "normalized"
+    normal_dir = artifacts_sub(out, "normalized")
     normal_dir.mkdir(parents=True, exist_ok=True)
     normalized = []
     cursor = 0.0
@@ -340,7 +342,7 @@ def cmd_assemble(args: argparse.Namespace) -> None:
         if line:
             text = f"{speaker}：{line}" if speaker else line
             cues.append((cursor, cursor + duration, text))
-            voice = out / "audio" / "voice" / f"{shot['id']}.wav"
+            voice = artifacts_sub(out, "audio", "voice", f"{shot['id']}.wav")
             if voice.exists():
                 # 成片仍用 TTS 原轨（A2V mp4 里的音会被 normalize 剥掉）；裁到本镜时长
                 voice_cues.append((cursor, voice, duration))
@@ -349,12 +351,12 @@ def cmd_assemble(args: argparse.Namespace) -> None:
         cursor += duration
         normalized.append(dest)
 
-    listing = out / "concat.txt"
+    listing = artifacts_sub(out, "concat.txt")
     listing.write_text("\n".join(ffmpeg_concat_line(p) for p in normalized) + "\n", encoding="utf-8")
-    joined = out / "joined.mp4"
+    joined = artifacts_sub(out, "joined.mp4")
     _run([str(settings.ffmpeg), "-y", "-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy", str(joined)])
 
-    music = out / "audio" / "bgm.wav"
+    music = artifacts_sub(out, "audio", "bgm.wav")
     if music.exists():
         have = _wav_seconds(settings, music)
         if have + 0.05 < cursor:
@@ -370,18 +372,20 @@ def cmd_assemble(args: argparse.Namespace) -> None:
         music=music if music.exists() else None,
     )
 
-    subs = out / "subs.ass"
+    subs = artifacts_sub(out, "subs.ass")
     _write_ass(subs, cues, settings)
     final = out / "final.mp4"
-    fonts = f"ass=subs.ass:fontsdir={FONT_DIR}"
+    fonts = f"ass={WORK_DIRNAME}/subs.ass:fontsdir={FONT_DIR}"
+    work = artifacts_dir(out)
+    work.mkdir(parents=True, exist_ok=True)
     _run(
         [
             str(settings.ffmpeg),
             "-y",
             "-i",
-            "joined.mp4",
+            f"{WORK_DIRNAME}/joined.mp4",
             "-i",
-            "soundtrack.m4a",
+            f"{WORK_DIRNAME}/soundtrack.m4a",
             "-vf",
             fonts,
             "-c:v",

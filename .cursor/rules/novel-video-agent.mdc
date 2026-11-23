@@ -50,7 +50,7 @@ cd "/Users/wangxinyu/.cursor/projects/Users-wangxinyu-ai/terminals" && ls -t *.t
 - 记录文件要跑起来几秒后才生成，稍等再找；找不到就让用户在终端列表里点标题含 produce 的那条。
 - 用户说「看进展 / 打开终端」时同样这么做，不要重起进程。
 
-汇报进展时读终端记录尾部 + `ls -lt projects/<片名>/frames`，按 `screenplay → images → audio → videos → music → assemble` 判断当前阶段，并把最新静帧贴给用户。
+汇报进展时读终端记录尾部 + `ls -lt projects/<片名>/work/frames`，按 `screenplay → images → audio → videos → music → assemble` 判断当前阶段，并把最新静帧贴给用户。
 
 对白规则：
 - **台词按小说原样写。不要为了控制时长去改写、删字、压短台词，也不要在 emotion 里写「快说／放慢」之类的语速要求**——配音的语速和语气由原文内容和 `emotion` 决定，管线不会为了塞进镜头去调

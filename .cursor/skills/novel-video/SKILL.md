@@ -179,11 +179,11 @@ cd "/Users/wangxinyu/.cursor/projects/Users-wangxinyu-ai/terminals" && ls -t *.t
 
 ```bash
 tail -30 "/Users/wangxinyu/.cursor/projects/Users-wangxinyu-ai/terminals/<pid>.txt"
-ls -lt projects/<片名>/frames | head
+ls -lt projects/<片名>/work/frames | head
 ```
 
 - 阶段顺序固定是 `screenplay → images → audio → videos → music → assemble`，当前在哪个 `== stage ==` 就看最后出现的那一个。
-- 静帧进度可以数字数 `frames/*.png`；视频进度看 `logs/<shot>.log`。
+- 静帧进度可以数字数 `work/frames/*.png`；视频进度看 `work/logs/<shot>.log`。
 - 顺带把最新出好的静帧贴给用户看，比只报百分比直观。
 
 ## 禁止事项

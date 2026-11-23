@@ -11,7 +11,7 @@
 .python-version
 .DS_Store
 
-# 项目文件夹：只入库小说、分镜、project.json；产物（图/视频/音频/成片/日志）不入库
+# 项目文件夹：顶层只入库小说、分镜、project.json；work/ 过程产物与成片不入库
 projects/**
 !projects/
 !projects/*/

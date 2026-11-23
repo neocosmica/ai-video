@@ -24,6 +24,8 @@ from pipeline.util import ROOT
 PROJECTS_DIRNAME = "projects"
 PROJECTS_DIR = ROOT / PROJECTS_DIRNAME
 PROJECT_META = "project.json"
+# 过程产物子文件夹：帧、片段、配音、日志、中间合成文件都收进 <项目>/work/
+WORK_DIRNAME = "work"
 
 # 项目名：中文/英文/数字/连字符/下划线/点，不允许路径分隔符
 SAFE_NAME = re.compile(r"^[\w\u4e00-\u9fff][\w\-.\u4e00-\u9fff]*$")
@@ -62,6 +64,22 @@ def storyboard_path(name: str) -> Path:
 def legacy_project(name: str) -> Path:
     """旧布局的项目目录 output/<name>/（不再新建，仅供兼容读取）。"""
     return ROOT / "output" / check_name(name)
+
+
+def artifacts_dir(out: str | Path) -> Path:
+    """流水线过程产物的根目录：<out>/work/。
+
+    `out` 可以是绝对路径，也可以是相对仓库根的路径（同 pipeline.util.resolve）。
+    项目顶层只保留 novel.txt / storyboard.json / final.mp4 / project.json，
+    其余一律进 work/。
+    """
+    base = Path(out) if Path(out).is_absolute() else ROOT / out
+    return base / WORK_DIRNAME
+
+
+def artifacts_sub(out: str | Path, *parts: str) -> Path:
+    """产物子目录：artifacts_sub(out, "audio", "voice") → <out>/work/audio/voice。"""
+    return artifacts_dir(out).joinpath(*parts)
 
 
 def strip_storyboard_suffix(stem: str) -> str:
@@ -127,12 +145,23 @@ def _describe(path: Path) -> dict:
         "has_final": (path / "final.mp4").exists(),
         "has_storyboard": (path / "storyboard.json").exists(),
         "novel": novel_rel,
+        "has_work": has_work_dir(path),
     }
 
 
 def is_artifacts_only(directory: Path) -> bool:
     """只有流水线产物、没有小说/分镜的项目文件夹（迁移时用来识别误嵌套）。"""
     return not (directory / "novel.txt").exists() and not (directory / "storyboard.json").exists()
+
+
+def has_work_dir(directory: Path) -> bool:
+    """项目文件夹里是否有过程产物子文件夹（work/ 或旧布局的散落产物）。"""
+    if (directory / WORK_DIRNAME).is_dir():
+        return True
+    return any(
+        (directory / name).exists()
+        for name in ("frames", "clips", "audio", "characters", "logs", "normalized")
+    )
 
 
 def list_projects() -> list[dict]:
@@ -224,6 +253,8 @@ def cmd_projects(args: argparse.Namespace) -> None:
             flags.append("分镜")
         if item["has_final"]:
             flags.append("成片")
+        if item.get("has_work"):
+            flags.append("产物")
         legacy = "（旧布局 output/，建议迁到 projects/）" if item.get("legacy") else ""
         misplaced = "（产物在嵌套子文件夹，建议拍平到 " + f"{PROJECTS_DIRNAME}/{item['name']}/" + "）" if item.get("final_only") else ""
         print(f"- {item['name']}：{item['path']}/  [{'、'.join(flags) or '空'}]{legacy}{misplaced}")

@@ -33,6 +33,7 @@ apply_mirrors()
 
 from pipeline.projects import (
     PROJECTS_DIRNAME,
+    artifacts_sub,
     novel_candidates,
     project_dir,
 )
@@ -606,7 +607,7 @@ def build_pipeline_cmd(
                 )
             )
         cmd = ["/bin/bash", "-c", " && ".join(parts)]
-    log_path = out_dir / "logs" / f"webui-{time.strftime('%Y%m%d-%H%M%S')}.log"
+    log_path = artifacts_sub(out_dir, "logs", f"webui-{time.strftime('%Y%m%d-%H%M%S')}.log")
     return cmd, log_path
 
 
@@ -1083,13 +1084,13 @@ class _Handler(BaseHTTPRequestHandler):
         base = safe_path(out_rel)
 
         def _scan(rel_dir: str, exts: tuple[str, ...]) -> list[dict]:
-            d = base / rel_dir
+            d = artifacts_sub(base, rel_dir)
             if not d.is_dir():
                 return []
             found = []
             for f in sorted(d.iterdir()):
                 if f.is_file() and f.suffix.lower() in exts:
-                    rel = f"{out_rel.rstrip('/')}/{rel_dir}/{f.name}".replace("\\", "/")
+                    rel = f"{out_rel.rstrip('/')}/work/{rel_dir}/{f.name}".replace("\\", "/")
                     found.append(
                         {
                             "id": f.stem,

@@ -10,6 +10,7 @@ from pipeline.audio import pad_wav_to_duration
 from pipeline.config import Settings
 from pipeline.hf_cache import resolve_snapshot
 from pipeline.mirrors import child_env
+from pipeline.projects import artifacts_sub
 from pipeline.runtime import (
     ensure_runtime_layout,
     ltx_cli,
@@ -179,7 +180,7 @@ def _video_env(settings: Settings, *, offline: bool) -> dict[str, str]:
 def _prepare_a2v_audio(out: Path, shot: dict, voice: Path, frames: int, fps: int) -> Path:
     """按镜头帧数裁/补对白，满足 A2V「音频不少于画面时长」。"""
     need = frames / max(1, fps) + 0.05
-    dest = out / "audio" / "a2v" / f"{shot['id']}.wav"
+    dest = artifacts_sub(out, "audio", "a2v", f"{shot['id']}.wav")
     return pad_wav_to_duration(voice, dest, need)
 
 
@@ -263,7 +264,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
     wanted = None
     if args.only:
         wanted = {item.strip() for item in args.only.split(",") if item.strip()}
-    clips = out / "clips"
+    clips = artifacts_sub(out, "clips")
     clips.mkdir(parents=True, exist_ok=True)
     failures = 0
     width, height = settings.video_width, settings.video_height
@@ -273,12 +274,12 @@ def cmd_videos(args: argparse.Namespace) -> None:
     for shot in story["shots"]:
         if wanted and shot["id"] not in wanted:
             continue
-        image = out / "frames" / f"{shot['id']}.png"
+        image = artifacts_sub(out, "frames", f"{shot['id']}.png")
         if not image.exists():
             # 台词被自动拆分出的子镜头没有自己的静帧，复用父镜头那张
             reuse = str(shot.get("reuse_frame") or "").strip()
             if reuse:
-                image = out / "frames" / f"{reuse}.png"
+                image = artifacts_sub(out, "frames", f"{reuse}.png")
         dest = clips / f"{shot['id']}.mp4"
         if dest.exists() and not args.force:
             print(f"已有镜头 {shot['id']}，跳过")
@@ -289,7 +290,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
             print(f"跳过 {shot['id']}：没有静帧 {image}")
             continue
         line = str(shot.get("dialogue") or "").strip()
-        voice = out / "audio" / "voice" / f"{shot['id']}.wav"
+        voice = artifacts_sub(out, "audio", "voice", f"{shot['id']}.wav")
         audio_for_ltx: Path | None = None
         frames = _shot_frames(shot, settings)
         if line:
@@ -305,7 +306,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
             shot,
             image,
             dest,
-            out / "logs" / f"{shot['id']}.log",
+            artifacts_sub(out, "logs", f"{shot['id']}.log"),
             width,
             height,
             frames,
@@ -326,7 +327,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 shot,
                 image,
                 dest,
-                out / "logs" / f"{shot['id']}-retry.log",
+                artifacts_sub(out, "logs", f"{shot['id']}-retry.log"),
                 width,
                 height,
                 frames,
@@ -348,7 +349,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 shot,
                 image,
                 dest,
-                out / "logs" / f"{shot['id']}-small.log",
+                artifacts_sub(out, "logs", f"{shot['id']}-small.log"),
                 width,
                 height,
                 frames,
@@ -358,7 +359,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 audio=audio_for_ltx,
             )
         if code != 0 or not dest.exists():
-            shot["video_error"] = f"退出码 {code}，详见 logs/{shot['id']}.log"
+            shot["video_error"] = f"退出码 {code}，详见 work/logs/{shot['id']}.log"
             failures += 1
             print(f"镜头 {shot['id']} 失败，继续下一个。")
             continue

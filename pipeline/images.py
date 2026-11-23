@@ -9,6 +9,7 @@ import sys
 
 from pipeline.config import Settings
 from pipeline.mirrors import apply_mirrors
+from pipeline.projects import artifacts_sub
 from pipeline.runtime import ensure_runtime_layout, preflight
 from pipeline.util import ROOT, load_json, resolve
 
@@ -152,8 +153,8 @@ def _cast_of(shot: dict, characters: list[dict]) -> list[dict]:
 
 
 def run_t2i(story: dict, out: Path, settings: Settings, only: str | None, force: bool) -> bool:
-    portraits = out / "characters"
-    frames = out / "frames"
+    portraits = artifacts_sub(out, "characters")
+    frames = artifacts_sub(out, "frames")
     shots = _selected(story["shots"], only)
     pending_portraits = []
     for char in story.get("characters") or []:
@@ -208,8 +209,8 @@ def run_t2i(story: dict, out: Path, settings: Settings, only: str | None, force:
 
 
 def run_edit(story: dict, out: Path, settings: Settings, only: str | None, force: bool) -> None:
-    frames = out / "frames"
-    portraits = out / "characters"
+    frames = artifacts_sub(out, "frames")
+    portraits = artifacts_sub(out, "characters")
     pending = []
     for shot in _selected(story["shots"], only):
         path = frames / f"{shot['id']}.png"
@@ -264,7 +265,7 @@ def cmd_images(args: argparse.Namespace) -> None:
             env["NOVEL_IMAGE_PHASE"] = "edit"
             env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             os.execve(sys.executable, [sys.executable, "-m", "pipeline", *sys.argv[1:]], env)
-        print(f"静帧在 {out / 'frames'}")
+        print(f"静帧在 {artifacts_sub(out, 'frames')}")
         return
     run_edit(story, out, settings, args.only, args.force)
-    print(f"静帧在 {out / 'frames'}")
+    print(f"静帧在 {artifacts_sub(out, 'frames')}")

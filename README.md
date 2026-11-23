@@ -15,7 +15,8 @@
 
 ## 项目路径约定
 
-**每个项目一个独立文件夹，这部片的小说、分镜、产物全在里面**；全部项目放在根目录 `projects/` 下：
+**每个项目一个独立文件夹，这部片的小说、分镜、产物全在里面**；全部项目放在根目录 `projects/` 下。
+项目顶层只放「源」和「成片」，过程产物全部收进 `work/`：
 
 ```
 projects/
@@ -23,7 +24,7 @@ projects/
     novel.txt        # 小说
     storyboard.json  # 分镜
     final.mp4        # 成片
-    frames/ clips/ audio/ ...   # 流水线产物
+    work/            # 过程产物（自动生成）：frames/ clips/ audio/ logs/ ...
   scifi/
     ...
 ```
