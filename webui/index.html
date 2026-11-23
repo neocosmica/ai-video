@@ -77,7 +77,7 @@
   <!-- 右列：任务与进度 -->
   <section class="col" id="col-tasks">
     <div class="card">
-      <h2>② 任务与进度</h2>
+      <h2>② 任务与进度 <button id="tasks-clear" class="ghost" style="float:right;font-size:12px;padding:2px 10px;">🧹 清空记录</button></h2>
       <div id="task-list" class="task-list"><div class="empty">还没有任务。左侧启动一个。</div></div>
     </div>
     <div class="card" id="task-detail-card" hidden>
@@ -96,15 +96,17 @@
       </div>
       <pre id="log" class="log"></pre>
     </div>
-    <div class="card" id="shots-card" hidden>
-      <h2>③ 镜头产物 <span id="shots-out-label" class="mono hint"></span></h2>
-      <div class="actions" style="margin:0 0 10px">
-        <label class="check"><input type="checkbox" id="auto-refresh" checked> 自动刷新（5s）</label>
-        <span id="final-badge" class="badge" hidden>🎬 final.mp4 已生成</span>
-      </div>
-      <div id="shots-grid" class="shots-grid"></div>
-    </div>
   </section>
+
+  <!-- 底部：镜头产物，横跨左右两栏 -->
+  <div class="card" id="shots-card" hidden>
+    <h2>③ 镜头产物 <span id="shots-out-label" class="mono hint"></span></h2>
+    <div class="actions" style="margin:0 0 10px">
+      <label class="check"><input type="checkbox" id="auto-refresh" checked> 自动刷新（5s）</label>
+      <span id="final-badge" class="badge" hidden>🎬 final.mp4 已生成</span>
+    </div>
+    <div id="shots-grid" class="shots-grid"></div>
+  </div>
 </main>
 
 <template id="shot-card-tpl">

@@ -568,6 +568,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(run, novel=True)
     add_storyboard(run)
     run.add_argument("--from", dest="start", default="screenplay", choices=STAGES)
+    run.add_argument(
+        "--until",
+        default=None,
+        choices=STAGES,
+        help="跑到哪个阶段为止（含）；缺省一路跑到 assemble。例：--from images --until audio",
+    )
     run.add_argument("--only", default=None, help="只重做列出的镜头，用于 images、audio 和 videos")
     run.set_defaults(func=cmd_run)
 

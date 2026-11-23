@@ -164,12 +164,24 @@ async function startTask() {
 }
 
 // ---------------------------------------------------------------- task list
+let tasksSig = "";
+
 function renderTasks() {
   const wrap = $("#task-list");
   if (!state.tasks.length) {
-    wrap.innerHTML = `<div class="empty">还没有任务。左侧启动一个。</div>`;
+    if (tasksSig !== "empty") {
+      tasksSig = "empty";
+      wrap.innerHTML = `<div class="empty">还没有任务。左侧启动一个。</div>`;
+    }
     return;
   }
+  // 内容没变就不重建 DOM：任务列表每 4s 轮询一次，重建会让列表闪烁
+  const sig = JSON.stringify([
+    state.selectedTaskId,
+    state.tasks.map((t) => [t.id, t.name, t.status, t.created_at, (t.stages || []).map((s) => [s.key, s.status])]),
+  ]);
+  if (sig === tasksSig) return;
+  tasksSig = sig;
   wrap.innerHTML = state.tasks.map((t) => {
     const dots = (t.stages || []).map((s) => {
       const cls = s.status === "done" ? "done" : s.status === "running" ? "run" : s.status === "failed" ? "fail" : "";
@@ -199,6 +211,10 @@ async function selectTask(id) {
   state.selectedTaskId = id;
   state.logOffset = 0;
   state.followLog = true;
+  stageTrackSig = "";
+  liveItemsSig = "";
+  // 新任务新日志：清掉上一个任务的日志，别让旧失败信息挂在下面
+  $("#log").textContent = "";
   const job = state.tasks.find((t) => t.id === id);
   if (!job) return;
   $("#task-detail-card").hidden = false;
@@ -214,13 +230,19 @@ async function selectTask(id) {
   renderShotsIfVisible();
 }
 
+let stageTrackSig = "";
+
 function renderStages(job) {
   const wrap = $("#stage-track");
-  wrap.innerHTML = (job.stages || []).map((s) => {
-    const cls = s.status === "done" ? "done" : s.status === "running" ? "running" : s.status === "failed" ? "failed" : "";
-    const icon = s.status === "done" ? "✓" : s.status === "running" ? "⏳" : s.status === "failed" ? "✕" : "·";
-    return `<div class="stage-step ${cls}">${icon} ${STAGE_LABELS[s.key] || s.key}</div>`;
-  }).join("");
+  const sig = JSON.stringify([(job.stages || []).map((s) => [s.key, s.status])]);
+  if (sig !== stageTrackSig) {
+    stageTrackSig = sig;
+    wrap.innerHTML = (job.stages || []).map((s) => {
+      const cls = s.status === "done" ? "done" : s.status === "running" ? "running" : s.status === "failed" ? "failed" : "";
+      const icon = s.status === "done" ? "✓" : s.status === "running" ? "⏳" : s.status === "failed" ? "✕" : "·";
+      return `<div class="stage-step ${cls}">${icon} ${STAGE_LABELS[s.key] || s.key}</div>`;
+    }).join("");
+  }
   renderOverall(job);
   renderLiveItems(job);
 }
@@ -249,10 +271,14 @@ function renderOverall(job) {
   if (job.status === "success") { pct = 100; currentLabel = "完成"; }
   if (job.status === "failed") currentLabel = "失败（可点「重跑失败阶段」）";
   if (job.status === "interrupted") currentLabel = "已中断";
-  fill.style.width = `${Math.min(100, pct).toFixed(1)}%`;
-  fill.className = "overall-fill " + (job.status === "success" ? "done" : job.status === "failed" ? "failed" : "");
-  pctEl.textContent = `${Math.min(100, pct).toFixed(1)}%`;
-  stageEl.textContent = currentLabel;
+  const pctText = `${Math.min(100, pct).toFixed(1)}%`;
+  const width = `${Math.min(100, pct).toFixed(1)}%`;
+  const fillCls = "overall-fill " + (job.status === "success" ? "done" : job.status === "failed" ? "failed" : "");
+  // 值没变不写 DOM：进度条每 1.2s 刷新一次，重写会打断 CSS 过渡动画
+  if (fill.style.width !== width) fill.style.width = width;
+  if (fill.className !== fillCls) fill.className = fillCls;
+  if (pctEl.textContent !== pctText) pctEl.textContent = pctText;
+  if (stageEl.textContent !== currentLabel) stageEl.textContent = currentLabel;
 }
 
 function fmtEta(sec) {
@@ -263,12 +289,22 @@ function fmtEta(sec) {
   return `剩 ${m}m${String(sec % 60).padStart(2, "0")}s`;
 }
 
+let liveItemsSig = "";
+
 function renderLiveItems(job) {
   const wrap = $("#live-items");
   const items = job.progress?.items || [];
+  // 任务已结束就不再显示逐条进度：避免「整理 s001…」这类条目结束后还挂着
+  if (job.status !== "running") {
+    if (liveItemsSig !== "ended") { liveItemsSig = "ended"; wrap.innerHTML = ""; }
+    return;
+  }
   const running = items.filter((i) => i.status === "running");
   const recent = items.filter((i) => i.status !== "running").slice(-4);
   const shown = [...running, ...recent].slice(0, 8);
+  const sig = JSON.stringify(shown.map((i) => [i.id, i.status, i.step, i.total, i.pct, i.eta_s]));
+  if (sig === liveItemsSig) return;
+  liveItemsSig = sig;
   if (!shown.length) { wrap.innerHTML = ""; return; }
   wrap.innerHTML = shown.map((i) => {
     const cls = i.status === "done" ? "done" : i.status === "failed" ? "failed" : "";
@@ -376,9 +412,49 @@ async function rerunFailed() {
   }
 }
 
+async function clearTasks() {
+  try {
+    const res = await api("/api/tasks/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    toast(res.kept ? `已清空历史记录（运行中的 ${res.kept} 个任务保留）` : "已清空历史记录");
+    if (!state.tasks.some((t) => t.id === state.selectedTaskId && t.status === "running")) {
+      // 当前选中的任务被清掉时，收起详情面板
+      state.selectedTaskId = null;
+      $("#task-detail-card").hidden = true;
+      $("#shots-card").hidden = true;
+      $("#log").textContent = "";
+    }
+    await refreshState();
+  } catch (err) {
+    toast(`清空失败：${err.message}`, true);
+  }
+}
+
 // ---------------------------------------------------------------- shots
 let shotsTimer = null;
 let mediaCache = null;
+let renderShotsSeq = 0; // 防止重叠的异步渲染互相覆盖
+let shotsLastOut = "";
+const shotCards = new Map(); // shot id -> 已渲染的卡片 DOM（增量更新，不整格重建）
+
+function clearShotCards() {
+  for (const [, card] of shotCards) card.remove();
+  shotCards.clear();
+}
+
+function ensureShotCard(id) {
+  let card = shotCards.get(id);
+  if (!card) {
+    const node = $("#shot-card-tpl").content.cloneNode(true);
+    card = $(".shot-card", node);
+    $(".shot-id", card).textContent = id;
+    shotCards.set(id, card);
+  }
+  return card;
+}
+
+function mediaSig(entry) {
+  return entry ? `${entry.mtime}:${entry.size}` : "";
+}
 
 function renderShotsIfVisible() {
   const job = state.tasks.find((t) => t.id === state.selectedTaskId);
@@ -398,7 +474,14 @@ function scheduleShotsAutoRefresh() {
 async function renderShots() {
   const out = state.currentOut;
   if (!out) return;
+  const seq = ++renderShotsSeq;
   $("#shots-out-label").textContent = out;
+  // 换了输出目录：旧卡片全部清掉，避免闪现上一个片的产物
+  if (out !== shotsLastOut) {
+    clearShotCards();
+    shotsLastOut = out;
+    mediaCache = null;
+  }
   // 1) 拉产物清单
   let media = null;
   try {
@@ -408,6 +491,8 @@ async function renderShots() {
   } catch (err) {
     media = mediaCache;
   }
+  if (seq !== renderShotsSeq) return;
+  if (!media && shotCards.size) return; // 产物清单暂时拿不到：保持现状，别清空预览
   if (media?.final) $("#final-badge").hidden = false;
   else $("#final-badge").hidden = true;
   // 2) 拉分镜（决定镜头顺序和台词）
@@ -425,87 +510,135 @@ async function renderShots() {
     // 没分镜就只按产物文件展示
     shots = [];
   }
+  if (seq !== renderShotsSeq) return;
   // 3) 进度（视频 n/total 等来自日志解析）
   const job = state.tasks.find((t) => t.id === state.selectedTaskId);
   const progItems = {};
   if (job?.progress?.items) {
-    for (const it of job.progress.items) progItems[it.label] = it;
+    // 只认 shot: 前缀的镜头条目；misc:配乐、assemble:整理 等不对应镜头卡
+    for (const it of job.progress.items) {
+      if ((it.id || "").startsWith("shot:")) progItems[it.label] = it;
+    }
   }
   // 4) 如果连分镜都没有，先展示已有媒体
   if (!shots.length) {
-    shots = [];
     for (const f of media?.frames || []) shots.push({ id: f.id });
     for (const c of media?.clips || []) if (!shots.some((s) => s.id === c.id)) shots.push({ id: c.id });
   }
   const grid = $("#shots-grid");
-  const tpl = $("#shot-card-tpl");
-  grid.innerHTML = "";
   if (!shots.length) {
-    grid.innerHTML = `<div class="empty">还没有产物。等任务跑到「静帧生成」后这里会出现每个镜头的图 / 视频 / 配音。</div>`;
+    clearShotCards();
+    if (!grid.querySelector(":scope > .empty")) {
+      grid.innerHTML = `<div class="empty">还没有产物。等任务跑到「静帧生成」后这里会出现每个镜头的图 / 视频 / 配音。</div>`;
+    }
     return;
   }
+  // 5) 增量渲染：卡片按 shot id 复用，只有媒体文件变化才重建预览
+  const emptyEl = grid.querySelector(":scope > .empty");
+  if (emptyEl) emptyEl.remove();
+  const desired = [];
   for (const shot of shots) {
-    const node = tpl.content.cloneNode(true);
-    const card = $(".shot-card", node);
-    $(".shot-id", card).textContent = shot.id;
-    $(".shot-dialogue", card).textContent = shot.dialogue || "";
+    desired.push(shot.id);
+    renderShotCard(shot, media, reuseMap, progItems);
+  }
+  // 删掉不再存在的镜头卡
+  for (const [id, card] of [...shotCards]) {
+    if (!desired.includes(id)) {
+      card.remove();
+      shotCards.delete(id);
+    }
+  }
+  // 保持分镜顺序（insertBefore 移动已有节点，不会重新加载媒体）
+  let prev = null;
+  for (const id of desired) {
+    const card = shotCards.get(id);
+    const expected = prev ? prev.nextSibling : grid.firstChild;
+    if (card !== expected) grid.insertBefore(card, prev ? prev.nextSibling : grid.firstChild);
+    prev = card;
+  }
+}
+
+function renderShotCard(shot, media, reuseMap, progItems) {
+  const card = ensureShotCard(shot.id);
+  const clipEntry = (media?.clips || []).find((c) => c.id === shot.id);
+  const frameEntry = (media?.frames || []).find((f) => f.id === (reuseMap[shot.id] || shot.id));
+  const voiceEntry = (media?.voices || []).find((v) => v.id === shot.id);
+  const prog = progItems[shot.id];
+  const failed = shot.video_error || (prog && prog.status === "failed");
+  const sigs = {
+    clip: mediaSig(clipEntry),
+    frame: mediaSig(frameEntry),
+    voice: mediaSig(voiceEntry),
+  };
+  // 媒体文件没变就不动 DOM：这是「视频闪 / 加载圈不停」的修复点
+  if (JSON.stringify(sigs) !== JSON.stringify(card._sig || {})) {
+    card._sig = sigs;
+    card._hasFrame = !!frameEntry;
     const preview = $(".shot-preview", card);
-    const statusEl = $(".shot-status", card);
-    const progEl = $(".shot-progress", card);
-    const progFill = $(".shot-progress-fill", card);
-    const progText = $(".shot-progress-text", card);
     const audioEl = $(".shot-audio", card);
-    const actions = $(".shot-actions", card);
-
-    const frameEntry = (media?.frames || []).find((f) => f.id === (reuseMap[shot.id] || shot.id));
-    const clipEntry = (media?.clips || []).find((c) => c.id === shot.id);
-    const voiceEntry = (media?.voices || []).find((v) => v.id === shot.id);
-    const prog = progItems[shot.id];
-    const failed = shot.video_error || (prog && prog.status === "failed");
-
     if (clipEntry) {
-      preview.innerHTML = `<video src="${esc(clipEntry.url)}" muted preload="metadata" controls></video>`;
-      statusEl.textContent = failed ? `视频失败：${shot.video_error || ""}` : "视频已生成";
-      statusEl.className = "shot-status " + (failed ? "bad" : "ok");
+      const poster = frameEntry ? ` poster="${esc(frameEntry.url)}"` : "";
+      const preload = frameEntry ? "none" : "metadata"; // 有静帧当海报就不预取，点了播放才加载
+      preview.innerHTML = `<video src="${esc(clipEntry.url)}"${poster} muted ${preload} controls></video>`;
     } else if (frameEntry) {
       preview.innerHTML = `<img src="${esc(frameEntry.url)}" loading="lazy" alt="">`;
-      statusEl.textContent = failed ? `视频失败：${shot.video_error || "见日志"}` : "静帧已生成" + (shot.dialogue ? "，视频待跑" : "（空镜）");
-      statusEl.className = "shot-status " + (failed ? "bad" : "");
     } else {
-      statusEl.textContent = failed ? `失败：${shot.video_error || "见日志"}` : "静帧未生成";
-      statusEl.className = "shot-status " + (failed ? "bad" : "");
+      preview.innerHTML = "";
     }
-    // 每镜进度条
-    if (prog && prog.status === "running") {
-      progEl.classList.add("show");
-      progText.classList.add("show");
-      progFill.style.width = `${prog.pct || 0}%`;
-      progText.textContent = prog.total > 1 ? `${prog.step}/${prog.total} · ${fmtEta(prog.eta_s)}` : "生成中…";
-    } else if (prog && prog.status === "failed") {
-      progEl.classList.add("show");
-      progText.classList.add("show");
-      progFill.style.width = "100%";
-      progFill.className = "shot-progress-fill failed";
-      progText.textContent = "失败";
-    } else if (clipEntry || (frameEntry && !shot.dialogue)) {
-      progEl.classList.add("show");
-      progFill.style.width = "100%";
-      progFill.className = "shot-progress-fill done";
-    }
-    // 配音试听
-    if (voiceEntry) {
-      audioEl.innerHTML = `<audio src="${esc(voiceEntry.url)}" controls preload="none"></audio>`;
-    }
-    // 重跑按钮
+    audioEl.innerHTML = voiceEntry ? `<audio src="${esc(voiceEntry.url)}" controls preload="none"></audio>` : "";
+  }
+  // 台词 / 状态 / 进度条：就地文本更新，值没变不写 DOM
+  const dlg = $(".shot-dialogue", card);
+  if (dlg.textContent !== (shot.dialogue || "")) dlg.textContent = shot.dialogue || "";
+  const statusEl = $(".shot-status", card);
+  let statusText, statusCls;
+  if (clipEntry) {
+    statusText = failed ? `视频失败：${shot.video_error || ""}` : "视频已生成";
+    statusCls = "shot-status " + (failed ? "bad" : "ok");
+  } else if (frameEntry) {
+    statusText = failed ? `视频失败：${shot.video_error || "见日志"}` : "静帧已生成" + (shot.dialogue ? "，视频待跑" : "（空镜）");
+    statusCls = "shot-status " + (failed ? "bad" : "");
+  } else {
+    statusText = failed ? `失败：${shot.video_error || "见日志"}` : "静帧未生成";
+    statusCls = "shot-status " + (failed ? "bad" : "");
+  }
+  if (statusEl.textContent !== statusText) statusEl.textContent = statusText;
+  if (statusEl.className !== statusCls) statusEl.className = statusCls;
+  const progEl = $(".shot-progress", card);
+  const progFill = $(".shot-progress-fill", card);
+  const progText = $(".shot-progress-text", card);
+  let progShow = false, progWidth = "", progLabel = "", progFillCls = "shot-progress-fill";
+  if (prog && prog.status === "running") {
+    progShow = true;
+    progWidth = `${prog.pct || 0}%`;
+    progLabel = prog.total > 1 ? `${prog.step}/${prog.total} · ${fmtEta(prog.eta_s)}` : "生成中…";
+  } else if (prog && prog.status === "failed") {
+    progShow = true;
+    progWidth = "100%";
+    progFillCls += " failed";
+    progLabel = "失败";
+  } else if (clipEntry || (frameEntry && !shot.dialogue)) {
+    progShow = true;
+    progWidth = "100%";
+    progFillCls += " done";
+  }
+  progEl.classList.toggle("show", progShow);
+  progText.classList.toggle("show", progShow && (prog?.status === "running" || prog?.status === "failed"));
+  if (progFill.style.width !== progWidth) progFill.style.width = progWidth;
+  if (progFill.className !== progFillCls) progFill.className = progFillCls;
+  if (progText.textContent !== progLabel) progText.textContent = progLabel;
+  // 重跑按钮只在卡片首次创建时挂一次
+  if (!card._btns) {
+    card._btns = true;
+    const actions = $(".shot-actions", card);
     const btnFrame = document.createElement("button");
     btnFrame.textContent = "↻ 静帧";
     btnFrame.onclick = () => rerunShots([shot.id], ["images"]);
     const btnVideo = document.createElement("button");
     btnVideo.textContent = "↻ 视频";
-    btnVideo.onclick = () => rerunShots([shot.id], ["images", "videos"]);
+    btnVideo.onclick = () => rerunShots([shot.id], card._hasFrame ? ["videos"] : ["images", "videos"]);
     actions.appendChild(btnFrame);
     actions.appendChild(btnVideo);
-    grid.appendChild(node);
   }
 }
 
@@ -516,7 +649,13 @@ async function rerunShots(shots, stages) {
     const job = await api("/api/shots/rerun", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ out, storyboard: state.currentStoryboard, shots, stages }),
+      body: JSON.stringify({
+        out,
+        storyboard: state.currentStoryboard,
+        shots,
+        stages,
+        novel: $("#novel-path").value.trim(),
+      }),
     });
     toast(`已启动镜头重跑：${shots.join(", ")}`);
     await refreshState();
@@ -700,6 +839,7 @@ function bind() {
   $("#sb-close").addEventListener("click", () => { $("#sb-editor-card").hidden = true; });
   $("#task-stop").addEventListener("click", stopTask);
   $("#task-rerun-failed").addEventListener("click", rerunFailed);
+  $("#tasks-clear").addEventListener("click", clearTasks);
   $("#auto-refresh")?.addEventListener("change", scheduleShotsAutoRefresh);
 }
 

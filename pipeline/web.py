@@ -164,12 +164,25 @@ class ProgressTracker:
         for pattern, stage_key in _ITEM_START:
             mm = pattern.match(line.strip())
             if mm:
+                name = mm.group(1)
+                # assemble 的「整理 s001」与视频阶段的镜头条目同名，加前缀避免混同
+                label = f"整理 {name}" if stage_key == "assemble" else name
                 item_id = f"{stage_key}:{mm.group(1)}"
                 self.items.setdefault(
                     item_id,
-                    {"label": mm.group(1), "pct": 0.0, "step": 0, "total": 1, "eta_s": None, "status": "running"},
+                    {"label": label, "pct": 0.0, "step": 0, "total": 1, "eta_s": None, "status": "running"},
                 )
                 return
+
+    def finalize(self, *, success: bool) -> None:
+        """任务结束时落定所有条目：否则「整理 sXXX」这类只有开始、没有完成行的
+        条目会永远停在 running，任务结束后还挂着一条假进度。"""
+        with self.lock:
+            for item in self.items.values():
+                if item["status"] == "running":
+                    item["status"] = "done" if success else "failed"
+                    item["pct"] = 100.0
+                    item["eta_s"] = None
 
     def _item_for_desc(self, desc: str) -> tuple[str | None, str]:
         for pattern, template in _DESC_ITEMS:
@@ -243,8 +256,9 @@ class Job:
         self.lock = threading.Lock()
         self.log: list[str] = []
         self.subscribers: list[queue.Queue] = []
-        self.stage_status: dict[str, str] = {s: "pending" for s in stages}
-        self.stage_status[stages[0]] = "running"
+        self.stages = list(stages) or list(STAGES)
+        self.stage_status: dict[str, str] = {s: "pending" for s in self.stages}
+        self.stage_status[self.stages[0]] = "running"
         self.pid: int | None = None
         self.tracker = ProgressTracker(self)
         self.returncode: int | None = None
@@ -346,6 +360,7 @@ class Job:
             code = run_tee(self.cmd, log=self.log_path, env=env, cwd=ROOT, on_line=on_line, on_start=on_start)
             self.returncode = code
             self.status = "success" if code == 0 else "failed"
+            self.tracker.finalize(success=(code == 0))
             with self.lock:
                 for s, st in self.stage_status.items():
                     if st == "running":
@@ -358,6 +373,7 @@ class Job:
             self.finished_at = time.time()
             self.append_log(f"[webui] 任务结束：{self.status}（退出码 {self.returncode}）")
             notify_change()
+            _persist()  # 终态落盘：否则重启后完成的任务会被误标成「中断」
 
     def stop(self) -> None:
         """向进程组发 SIGTERM（run_tee 的子进程是独立 PTY 会话，用组信号才收得住）。"""
@@ -403,6 +419,17 @@ def get_job(task_id: str) -> Job | None:
 def all_jobs() -> list[Job]:
     with _LOCK:
         return sorted(_JOBS.values(), key=lambda j: j.created_at, reverse=True)
+
+
+def clear_finished_tasks() -> dict:
+    """清掉非运行中的历史任务记录（产物文件不动）；运行中的保留。"""
+    with _LOCK:
+        running = [j for j in _JOBS.values() if j.status == "running"]
+        _JOBS.clear()
+        for job in running:
+            _JOBS[job.id] = job
+    _persist()
+    return {"ok": True, "kept": len(running)}
 
 
 def register_job(job: Job) -> None:
@@ -492,6 +519,30 @@ def _slugify(title: str) -> str:
     return slug or "untitled"
 
 
+def _single_stage_cmd(
+    stage: str,
+    *,
+    out: Path,
+    novel: str | None = None,
+    storyboard: str | None = None,
+    only: str | None = None,
+    force: bool = False,
+) -> list[str]:
+    """单阶段命令；CLI 子命令一次只能一个，多阶段靠 run / bash && 串。"""
+    cmd = [sys.executable, "-m", "pipeline", stage, "--out", str(out)]
+    if stage == "screenplay":
+        # screenplay 只校验：外部分镜 + 小说路径用于对白覆盖检查
+        if novel:
+            cmd += ["--novel", str(resolve(novel))]
+        if storyboard:
+            cmd += ["--storyboard", str(resolve(storyboard))]
+    if only and stage in {"images", "audio", "videos"}:
+        cmd += ["--only", str(only)]
+    if force:
+        cmd.append("--force")
+    return cmd
+
+
 def build_pipeline_cmd(
     *,
     stages: list[str],
@@ -501,18 +552,54 @@ def build_pipeline_cmd(
     only: str | None,
     force: bool,
 ) -> tuple[list[str], Path]:
-    """拼出等价于 ./scripts/run.sh run 的命令（直接用当前解释器，不依赖 uv）。"""
+    """拼出 CLI 能接受的串跑命令。
+
+    CLI 的子命令一次只能一个（argparse subparsers），不能写成
+    ``pipeline screenplay images audio …``。所以：
+
+    - 勾选的阶段是 STAGES 的连续段（含全选 / 单阶段）→ 等价
+      ``run --from <首个> --until <末个>``：由 run 负责安装分镜、串跑、打
+      ``== stage ==`` 分隔行（webui 的阶段游标靠它推进）；
+    - 中间跳了阶段 → 用 ``bash -c`` 把单阶段命令 ``&&`` 起来，
+      语义与逐个调用 CLI 完全一致。
+
+    返回 ``(argv, 日志路径)``；argv 可能是 ``["/bin/bash", "-c", "…"]``。
+    """
     out_dir = resolve(out)
-    cmd = [sys.executable, "-m", "pipeline", *stages]
-    if novel:
-        cmd += ["--novel", str(resolve(novel))]
-    cmd += ["--out", str(out_dir)]
-    if storyboard:
-        cmd += ["--storyboard", str(resolve(storyboard))]
-    if only:
-        cmd += ["--only", str(only)]
-    if force:
-        cmd.append("--force")
+    selected = [s for s in STAGES if s in set(stages)]
+    if not selected:
+        selected = list(STAGES)
+    start_idx = STAGES.index(selected[0])
+    contiguous = selected == list(STAGES[start_idx : STAGES.index(selected[-1]) + 1])
+    if contiguous:
+        cmd = [sys.executable, "-m", "pipeline", "run", "--from", selected[0]]
+        if selected[-1] != STAGES[-1]:
+            cmd += ["--until", selected[-1]]
+        if novel:
+            cmd += ["--novel", str(resolve(novel))]
+        cmd += ["--out", str(out_dir)]
+        if storyboard:
+            cmd += ["--storyboard", str(resolve(storyboard))]
+        if only:
+            cmd += ["--only", str(only)]
+        if force:
+            cmd.append("--force")
+    else:
+        parts = []
+        for stage in selected:
+            parts.append(
+                shlex.join(
+                    _single_stage_cmd(
+                        stage,
+                        out=out_dir,
+                        novel=novel,
+                        storyboard=storyboard,
+                        only=only,
+                        force=force,
+                    )
+                )
+            )
+        cmd = ["/bin/bash", "-c", " && ".join(parts)]
     log_path = out_dir / "logs" / f"webui-{time.strftime('%Y%m%d-%H%M%S')}.log"
     return cmd, log_path
 
@@ -848,6 +935,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(self.create_task(data))
             elif path == "/api/task/stop":
                 self._json(self.stop_task(data))
+            elif path == "/api/tasks/clear":
+                self._json(clear_finished_tasks())
             elif path == "/api/file/read":
                 rel = str(data.get("path") or "")
                 self._json({"path": rel, "content": read_text(rel)})
@@ -889,6 +978,8 @@ class _Handler(BaseHTTPRequestHandler):
         stages = [s for s in (data.get("stages") or []) if s in STAGES]
         if not stages:
             stages = list(STAGES)
+        # 前端勾选顺序不可靠；统一按流水线顺序传给 CLI（run --from 依赖它）
+        stages = [s for s in STAGES if s in set(stages)]
 
         # 粘贴的小说片段先落盘
         novel_text = str(data.get("novel_text") or "").strip()
@@ -928,7 +1019,7 @@ class _Handler(BaseHTTPRequestHandler):
         return {"ok": True}
 
     def rerun_shots(self, data: dict) -> dict:
-        """对指定镜头重跑 images / videos（先 images 再 videos，用 --only）。"""
+        """对指定镜头重跑所选阶段（前端传什么阶段就跑什么）。"""
         shots_raw = data.get("shots") or []
         shots = ",".join(sorted({str(s).strip() for s in shots_raw if str(s).strip()}))
         if not shots:
@@ -937,14 +1028,17 @@ class _Handler(BaseHTTPRequestHandler):
         if not out:
             raise ValueError("没给输出目录")
         storyboard = str(data.get("storyboard") or "").strip()
-        stages = ["images", "videos"]
+        stages = [s for s in (data.get("stages") or []) if s in STAGES]
+        if not stages:
+            stages = ["images", "videos"]  # 兼容旧前端：缺省图文都重做
+        novel = str(data.get("novel") or "").strip()
         cmd, log_path = build_pipeline_cmd(
-            stages=stages, novel=None, out=out, storyboard=storyboard, only=shots, force=True
+            stages=stages, novel=novel or None, out=out, storyboard=storyboard, only=shots, force=True
         )
         job = Job(
             uuid.uuid4().hex[:12],
             name=f"重跑镜头 {shots}",
-            novel="",
+            novel=novel,
             out=out,
             stages=stages,
             only=shots,

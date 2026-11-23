@@ -49,6 +49,9 @@ def cmd_run(args: argparse.Namespace) -> None:
     start = getattr(args, "start", "screenplay")
     if start not in STAGES:
         raise SystemExit(f"--from 只能是 {', '.join(STAGES)}")
+    until = getattr(args, "until", None)
+    if until is not None and until not in STAGES:
+        raise SystemExit(f"--until 只能是 {', '.join(STAGES)}")
     out = resolve(args.out)
     if start == "screenplay" or getattr(args, "storyboard", None):
         install_storyboard(
@@ -57,7 +60,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             force=bool(getattr(args, "force", False)),
         )
     failed_videos = False
-    for stage in STAGES[STAGES.index(start) :]:
+    end_idx = STAGES.index(until) + 1 if until else len(STAGES)
+    for stage in STAGES[STAGES.index(start) : end_idx]:
         cmd = [sys.executable, "-m", "pipeline", stage, "--out", str(out)]
         if args.config:
             cmd += ["--config", str(resolve(args.config))]
