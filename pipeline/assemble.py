@@ -50,6 +50,28 @@ def _has_audio(ffprobe: Path, clip: Path) -> bool:
     return bool(proc.stdout.strip())
 
 
+def _wav_seconds(settings: Settings, path: Path) -> float:
+    proc = subprocess.run(
+        [
+            str(settings.ffprobe),
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    try:
+        return max(0.0, float(proc.stdout.strip()))
+    except ValueError:
+        return 0.0
+
+
 def _normalize(settings: Settings, src: Path, dest: Path) -> None:
     scale = (
         f"scale={settings.video_width}:{settings.video_height}:force_original_aspect_ratio=decrease,"
@@ -152,9 +174,12 @@ def _mix_soundtrack(
     voice_cues: list[tuple[float, Path, float]],
     music: Path | None,
 ) -> Path:
-    """把对白按时间轴铺开，配乐循环；有对白时把配乐压低，输出 stereo aac。
+    """把对白按时间轴铺开，配乐循环；对白出现时配乐下沉，空镜让配乐露出，输出 stereo aac。
 
     voice_cues: (start_s, wav, max_duration_s) — max_duration 对齐镜头长度，避免串镜。
+
+    配乐不做全程固定衰减（否则空镜段也被一起压掉、整条片几乎听不见配乐），
+    而是按已知的对白时间轴分段设音量：说话时乘 music_duck_gain，空镜段恢复满电平。
     """
     mixed = out / "soundtrack.m4a"
     inputs: list[str] = [
@@ -172,10 +197,12 @@ def _mix_soundtrack(
         delay_ms = max(0, int(round(start * 1000)))
         trim = max(0.05, float(max_dur))
         filters.append(
-            f"[{index + 1}:a]aformat=sample_rates=48000:channel_layouts=mono,"
+            f"[{index + 1}:a]aresample=48000,"
             f"atrim=0:{trim:.3f},asetpts=PTS-STARTPTS,"
-            f"volume={settings.voice_volume},adelay={delay_ms}|{delay_ms},"
-            f"aformat=channel_layouts=stereo[v{index}]"
+            f"volume={settings.voice_volume},"
+            # 用 pan 复制声道：aformat 做 mono→stereo 会乘 0.707，白白削掉 3 dB
+            f"pan=stereo|c0=c0|c1=c0,"
+            f"adelay={delay_ms}|{delay_ms}[v{index}]"
         )
         voice_labels.append(f"[v{index}]")
 
@@ -183,15 +210,39 @@ def _mix_soundtrack(
     if music and music.exists():
         inputs += ["-stream_loop", "-1", "-t", f"{total:.3f}", "-i", str(music)]
         music_idx = 1 + len(voice_cues)
-        duck = settings.music_volume * (0.35 if voice_labels else 1.0)
-        filters.append(
-            f"[{music_idx}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
-            f"volume={duck},afade=t=in:st=0:d=0.8,"
-            f"afade=t=out:st={max(0.0, total - 1.2):.3f}:d=1.2[m]"
-        )
+        # 基础电平：先 loudnorm 统一到参考响度（MusicGen 原始输出常只有 -28 LUFS），再乘 music_volume
+        chain = [
+            f"[{music_idx}:a]aresample=48000",
+            # mono 源用 pan 复制声道：aformat 做 mono→stereo 会乘 0.707，白白削掉 3 dB
+            "pan=stereo|c0=c0|c1=c0",
+            f"loudnorm=I={settings.music_target_lufs}:TP=-2:LRA=20",
+            f"volume={settings.music_volume}",
+        ]
+        # 对白闪避：按已知对白时间轴逐帧求值，说话时配乐下沉、空镜段恢复满电平。
+        # 注意必须用 eval=frame，默认 eval=once 只算第一帧，等于全程一个音量。
+        if voice_cues:
+            windows = []
+            for start, _wav, max_dur in voice_cues:
+                left = max(0.0, float(start) - settings.music_duck_pad)
+                right = min(float(total), float(start) + float(max_dur) + settings.music_duck_pad)
+                if right > left:
+                    windows.append((left, right))
+            if windows:
+                expr = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in windows)
+                chain.append(
+                    f"volume='if({expr},{settings.music_duck_gain},1.0)':eval=frame"
+                )
+        chain.append(f"afade=t=in:st=0:d=0.8")
+        chain.append(f"afade=t=out:st={max(0.0, total - 1.2):.3f}:d=1.2")
+        filters.append(",".join(chain) + "[m]")
         parts.append("[m]")
     parts.extend(voice_labels)
-    filters.append(f"{''.join(parts)}amix=inputs={len(parts)}:normalize=0:dropout_transition=0[aout]")
+    # normalize=0：混音只做相加，不按路数除；否则人声会随镜头数变轻。
+    # 末尾加限幅器兜底，防止人声叠配乐在某些字上冲过 0 dBFS 削波。
+    filters.append(
+        f"{''.join(parts)}amix=inputs={len(parts)}:normalize=0:dropout_transition=0,"
+        f"alimiter=limit={settings.mix_limit}:level=0[aout]"
+    )
     cmd = [
         str(settings.ffmpeg),
         "-y",
@@ -260,6 +311,13 @@ def cmd_assemble(args: argparse.Namespace) -> None:
     _run([str(settings.ffmpeg), "-y", "-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy", str(joined)])
 
     music = out / "audio" / "bgm.wav"
+    if music.exists():
+        have = _wav_seconds(settings, music)
+        if have + 0.05 < cursor:
+            print(
+                f"提示：配乐 {have:.1f}s 短于成片 {cursor:.1f}s，会循环补齐（中间可能听到接缝）。"
+                "建议跑一次 music 阶段按成片长度重新生成。"
+            )
     soundtrack = _mix_soundtrack(
         settings,
         out=out,
