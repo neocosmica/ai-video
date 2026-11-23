@@ -44,16 +44,23 @@ def frames_for_duration(
     fps: int,
     *,
     min_frames: int = 25,
-    max_frames: int = 97,
+    max_frames: int = 121,
 ) -> int:
-    """按对白秒数算 LTX 帧数（8k+1），夹在 min/max 之间。"""
+    """按对白秒数算 LTX 帧数（8k+1），夹在 min/max 之间。
+
+    取格必须是「向上」，否则取整后会比音频短几十毫秒，台词尾巴还是会被切掉。
+    """
     fps = max(1, int(fps))
-    raw = max(1, int(math.ceil(float(duration_s) * fps)))
     lo = snap_frames(min_frames)
     hi = snap_frames(max_frames)
     if lo > hi:
         lo, hi = hi, lo
-    return snap_frames(min(hi, max(lo, raw)))
+    raw = max(lo, int(math.ceil(float(duration_s) * fps)))
+    if raw >= hi:
+        return hi
+    # 向上对齐到 8k+1 网格
+    frames = 8 * int(math.ceil((raw - 1) / 8)) + 1
+    return max(lo, min(hi, frames))
 
 
 def has_cjk(text: str) -> bool:
