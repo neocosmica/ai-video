@@ -22,6 +22,10 @@ from pipeline.util import dump_json, load_json, resolve, snap, snap_frames
 
 DEFAULT_GEMMA = "mlx-community/gemma-3-12b-it-4bit"
 
+# LTX distilled 两段 Denoising 的默认步数（8 步半分辨率 + 3 步精修）。
+# 交给进度条先定死分母，第一段跑完只到 8/11，不会先冲到 100% 再掉回来。
+DENOISE_PLAN = (8, 3)
+
 
 def _prompt(shot: dict, *, with_speech: bool) -> str:
     motion = shot.get("motion_prompt") or "Slow cinematic push in"
@@ -143,6 +147,8 @@ def _command(
         cmd = [cli, "a2v", "--distilled", "--audio", str(audio), *common_tail]
     else:
         cmd = [cli, "generate", "--distilled", *common_tail, "--no-audio"]
+    # 固定两段步数，让终端进度条的分母（8 + 3）与实际一致
+    cmd += ["--stage1-steps", str(DENOISE_PLAN[0]), "--stage2-steps", str(DENOISE_PLAN[1])]
     if settings.video_low_ram:
         cmd.append("--low-ram")
     return cmd
@@ -208,7 +214,14 @@ def _run_once(
     )
     mode = "a2v" if audio is not None else "i2v"
     shot_id = str(shot.get("id") or "shot")
-    return run_tee(cmd, log=log, env=env, progress=f"{shot_id} {mode}")
+    return run_tee(
+        cmd,
+        log=log,
+        env=env,
+        progress=f"{shot_id} {mode}",
+        plan=DENOISE_PLAN,
+        desc="Denoising",
+    )
 
 
 def _wait_memory_headroom(min_free_pct: float = 25.0, timeout_s: float = 90.0) -> None:
@@ -261,6 +274,11 @@ def cmd_videos(args: argparse.Namespace) -> None:
         if wanted and shot["id"] not in wanted:
             continue
         image = out / "frames" / f"{shot['id']}.png"
+        if not image.exists():
+            # 台词被自动拆分出的子镜头没有自己的静帧，复用父镜头那张
+            reuse = str(shot.get("reuse_frame") or "").strip()
+            if reuse:
+                image = out / "frames" / f"{reuse}.png"
         dest = clips / f"{shot['id']}.mp4"
         if dest.exists() and not args.force:
             print(f"已有镜头 {shot['id']}，跳过")

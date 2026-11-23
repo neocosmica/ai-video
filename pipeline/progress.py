@@ -14,6 +14,7 @@ import select
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -55,39 +56,73 @@ class _ProgressRelay:
 
 
 class StageMerge:
-    """把连续多段 n/total 进度合成一条绝对进度。"""
+    """把连续多段 n/total 进度合成一条绝对进度。
 
-    def __init__(self) -> None:
+    给了 ``plan``（各段预期步数，例如 LTX distilled 的 8 + 3）就按步数加权，
+    分母从一开始固定为 ``sum(plan)``、段与段首尾相接：第一段跑完停在 8/11，
+    第二段从 8/11 接着走到 11/11，不会先冲 100% 再掉回来。
+    没给 ``plan`` 时退回旧行为（遇到新的一段才把上一段并入偏移），分母会随之变大。
+    """
+
+    def __init__(self, plan: Sequence[int] | None = None) -> None:
+        self.plan = [max(1, int(step)) for step in plan] if plan else []
+        self.segments = 0
         self.offset = 0
         self.last_n = 0
         self.last_total = 0
+        self.seen = False
         self.n = 0
-        self.total = 0
+        self.total = sum(self.plan)
+
+    def _new_segment(self, n: int, total: int) -> bool:
+        """同一段时间里 n 只会涨；倒退或从 0 重新数就是新的一段。"""
+        if n < self.last_n:
+            return True
+        return self.last_n > 0 and total != self.last_total and n == 0
 
     def update(self, n: int, total: int) -> tuple[int, int]:
         if total <= 0:
             return self.n, self.total
-        if self.last_total and n < self.last_n:
+        if self.seen and self._new_segment(n, total):
+            self.segments += 1
             self.offset += self.last_total
-        elif self.last_total and total != self.last_total and n == 0 and self.last_n > 0:
-            self.offset += self.last_total
+        self.seen = True
         self.last_n = n
         self.last_total = total
+        if self.plan:
+            # 按计划步数给每段划一段固定区间；计划外的额外段吃掉剩下的区间
+            self.total = sum(self.plan)
+            base = sum(self.plan[: self.segments])
+            span = self.plan[self.segments] if self.segments < len(self.plan) else self.total - base
+            step = base + round(min(1.0, n / total) * max(0, span))
+            self.n = max(self.n, min(step, self.total))
+            return self.n, self.total
         self.n = self.offset + n
         self.total = self.offset + total
         return self.n, self.total
 
 
 class _ShotBar:
-    """终端上只画一条合并后的进度；细节只进日志。"""
+    """终端上只画一条合并后的进度；细节只进日志。
 
-    def __init__(self, label: str) -> None:
+    ``plan`` 是各段预期步数（LTX distilled 为 8 + 3），给了分母就从头固定；
+    ``desc`` 限定只吃哪种 tqdm（默认全吃）。日志里加载权重等杂条不参与进度。
+    """
+
+    def __init__(
+        self,
+        label: str,
+        *,
+        plan: Sequence[int] | None = None,
+        desc: str | None = None,
+    ) -> None:
         from tqdm import tqdm
 
-        self.merge = StageMerge()
+        self.merge = StageMerge(plan)
+        self.desc = desc
         cols = shutil.get_terminal_size(fallback=(80, 24)).columns
         self.bar = tqdm(
-            total=1,
+            total=max(1, self.merge.total),
             desc=label,
             unit="step",
             file=sys.stderr,
@@ -99,6 +134,12 @@ class _ShotBar:
         )
         self.bar.set_postfix_str("准备", refresh=True)
 
+    def _owns(self, line: str) -> bool:
+        if not self.desc:
+            return True
+        match = _TQDM.match(line)
+        return bool(match) and match.group("desc").strip().startswith(self.desc)
+
     def handle(self, line: str) -> None:
         if _ERRORISH.match(line) or line.startswith("  File "):
             from tqdm import tqdm
@@ -106,7 +147,7 @@ class _ShotBar:
             tqdm.write(line, file=sys.stderr)
             return
         match = _TQDM.match(line)
-        if match:
+        if match and self._owns(line):
             n = int(match.group("n"))
             total = int(match.group("total"))
             done, overall = self.merge.update(n, total)
@@ -126,8 +167,9 @@ class _ShotBar:
                 short = short[:18]
             self.bar.set_postfix_str(short, refresh=True)
 
-    def close(self) -> None:
-        if self.merge.total:
+    def close(self, *, success: bool = True) -> None:
+        # 真跑完才补满；失败/被杀不要假装 100%
+        if success and self.merge.seen:
             self.bar.n = self.bar.total
         self.bar.set_postfix_str("", refresh=False)
         self.bar.close()
@@ -216,8 +258,13 @@ def run_tee(
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
     progress: str | None = None,
+    plan: Sequence[int] | None = None,
+    desc: str | None = None,
 ) -> int:
-    """运行命令。完整输出进 log；若给了 progress，终端只显示一条合并进度条。"""
+    """运行命令。完整输出进 log；若给了 progress，终端只显示一条合并进度条。
+
+    ``plan``：各段步数（分母一开始就固定）；``desc``：只统计这种 tqdm。
+    """
     log.parent.mkdir(parents=True, exist_ok=True)
     child_env = os.environ.copy() if env is None else dict(env)
     child_env.setdefault("PYTHONUNBUFFERED", "1")
@@ -238,7 +285,7 @@ def run_tee(
         os.close(master)
         raise
     os.close(slave)
-    shot: _ShotBar | None = _ShotBar(progress) if progress else None
+    shot: _ShotBar | None = _ShotBar(progress, plan=plan, desc=desc) if progress else None
     try:
         with log.open("wb") as handle:
             header = ""
@@ -249,8 +296,6 @@ def run_tee(
             handle.flush()
             _pump(master, proc, handle, shot=shot)
     finally:
-        if shot is not None:
-            shot.close()
         if proc.poll() is None:
             proc.terminate()
             try:
@@ -258,6 +303,8 @@ def run_tee(
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+        if shot is not None:
+            shot.close(success=proc.returncode == 0)
         os.close(master)
     return proc.returncode if proc.returncode is not None else proc.wait()
 
