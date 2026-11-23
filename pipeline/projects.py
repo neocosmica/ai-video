@@ -38,7 +38,7 @@ def check_name(name: str) -> str:
     if not name or not SAFE_NAME.match(name):
         raise SystemExit(f"项目名不合法：{name!r}（只用中英文、数字、连字符、下划线）")
     if name == "webui":
-        raise SystemExit("项目名不能叫 webui：那是控制台自己的目录")
+        raise SystemExit("项目名不能叫 webui：那是控制台前端文件的目录")
     return name
 
 
@@ -170,7 +170,7 @@ def list_projects() -> list[dict]:
     seen: set[str] = set()
     if PROJECTS_DIR.is_dir():
         for path in sorted(PROJECTS_DIR.iterdir()):
-            if path.name.startswith(".") or not path.is_dir() or path.name == "webui":
+            if path.name.startswith(".") or not path.is_dir():
                 continue
             # 只有产物的同名文件夹：把它当成上层项目的产物目录合并，不单列为一个项目
             if is_artifacts_only(path):

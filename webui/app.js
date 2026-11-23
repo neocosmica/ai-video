@@ -1,4 +1,5 @@
-/* 小说 → 竖屏短剧 控制台（无构建、无依赖） */
+/* 小说 → 竖屏短剧 控制台（无构建、无依赖）
+   打开网页第一件事：选项目；之后所有东西都属于这个项目。 */
 "use strict";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -15,8 +16,11 @@ const STAGE_LABELS = {
 };
 
 const state = {
-  tasks: [],
-  projects: { projects: [], novels: [], storyboards: [] },
+  project: "", // 当前打开的项目名（projects/<片名> 的 <片名>）
+  tasks: [], // 只装当前项目的任务
+  projects: [],
+  novels: [],
+  storyboards: [],
   selectedTaskId: null,
   logOffset: 0,
   followLog: true,
@@ -27,10 +31,6 @@ const state = {
   sbPath: "",
   polling: null,
 };
-
-function projectName() {
-  return $("#project-name").value.trim();
-}
 
 // ---------------------------------------------------------------- utilities
 function esc(text) {
@@ -65,12 +65,16 @@ function toast(msg, bad = false) {
 // ---------------------------------------------------------------- projects
 async function refreshState() {
   try {
-    const data = await api("/api/state");
-    state.tasks = data.tasks || [];
-    state.projects = data.projects || state.projects;
+    const q = state.project ? `?project=${encodeURIComponent(state.project)}` : "";
+    const data = await api(`/api/state${q}`);
+    state.projects = data.projects || [];
+    state.novels = data.novels || [];
+    state.storyboards = data.storyboards || [];
+    if (state.project) state.tasks = data.tasks || [];
     setConn(true);
-    renderTasks();
+    renderProjects();
     renderDatalists();
+    renderTasks();
     renderShotsIfVisible();
   } catch (err) {
     setConn(false);
@@ -83,13 +87,126 @@ function setConn(on) {
   el.textContent = on ? "● 已连接" : "● 未连接（服务未启动？）";
 }
 
+let projectsSig = "";
+
+function renderProjects() {
+  const wrap = $("#project-grid");
+  const sig = JSON.stringify([
+    state.project,
+    state.projects.map((p) => [p.name, p.path, p.has_final, p.has_storyboard, !!p.novel, p.tasks, p.last_activity]),
+  ]);
+  if (sig === projectsSig) return;
+  projectsSig = sig;
+  if (!state.projects.length) {
+    wrap.innerHTML = `<div class="empty">还没有项目。下面新建一个。</div>`;
+    return;
+  }
+  wrap.innerHTML = state.projects.map((p) => {
+    const t = p.tasks || { done: 0, running: 0, failed: 0, total: 0 };
+    const badges = [
+      p.novel ? "📖 小说" : "",
+      p.has_storyboard ? "📋 分镜" : "",
+      p.has_final ? "🎬 成片" : "",
+    ].filter(Boolean).join("　");
+    const stat = [
+      t.running ? `<span class="dot run">${t.running} 运行中…</span>` : "",
+      t.done ? `<span class="dot done">${t.done} 完成</span>` : "",
+      t.failed ? `<span class="dot fail">${t.failed} 失败</span>` : "",
+      !t.total ? `<span class="dot">还没跑过任务</span>` : "",
+    ].join("");
+    const active = p.name === state.project ? " active" : "";
+    return `<div class="project-card${active}" data-name="${esc(p.name)}" data-path="${esc(p.path)}">
+      <div class="p-name">${esc(p.name)}${p.legacy ? ' <span class="hint">（旧布局）</span>' : ""}</div>
+      <div class="p-meta hint mono">${esc(p.path)}/</div>
+      <div class="p-badges">${badges || '<span class="hint">空项目</span>'}</div>
+      <div class="p-stat">${stat}</div>
+    </div>`;
+  }).join("");
+  $$(".project-card", wrap).forEach((el) => {
+    el.addEventListener("click", () => openProject(el.dataset.name, el.dataset.path));
+  });
+}
+
 function renderDatalists() {
-  $("#project-list").innerHTML = (state.projects.projects || [])
-    .map((p) => `<option value="${esc(p.name)}">${esc(p.path)}${p.legacy ? "（旧布局）" : ""}</option>`).join("");
-  $("#novel-list").innerHTML = (state.projects.novels || [])
+  $("#novel-list").innerHTML = (state.novels || [])
     .map((n) => `<option value="${esc(n.path)}">${esc(n.name)}</option>`).join("");
-  $("#sb-list").innerHTML = (state.projects.storyboards || [])
+  $("#sb-list").innerHTML = (state.storyboards || [])
     .map((n) => `<option value="${esc(n.path)}">${esc(n.name)}</option>`).join("");
+}
+
+async function createProject() {
+  const name = $("#new-project-name").value.trim();
+  if (!name) { pickerMsg("先填片名", true); return; }
+  try {
+    const p = await api("/api/projects/new", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, title: name }),
+    });
+    $("#new-project-name").value = "";
+    await refreshState();
+    openProject(p.name, p.path);
+  } catch (err) {
+    pickerMsg(`新建失败：${err.message}`, true);
+  }
+}
+
+function pickerMsg(msg, bad = false) {
+  const el = $("#picker-msg");
+  el.hidden = false;
+  el.textContent = msg;
+  el.style.color = bad ? "var(--bad)" : "var(--muted)";
+}
+
+// 选项目 → 工作区所有字段归位到这个项目
+async function openProject(name, path) {
+  state.project = name;
+  state.currentOut = path || `projects/${name}`;
+  state.currentStoryboard = `${state.currentOut}/storyboard.json`;
+  state.selectedTaskId = null;
+  state.logOffset = 0;
+  stageTrackSig = "";
+  liveItemsSig = "";
+  tasksSig = "";
+  $("#log").textContent = "";
+  $("#project-picker").hidden = true;
+  $("#workspace").hidden = false;
+  $("#col-tasks").hidden = false;
+  $("#shots-card").hidden = false;
+  $("#task-detail-card").hidden = true;
+  $("#current-project-name").textContent = `${state.currentOut}/`;
+  $("#title").value = name;
+  $("#novel-path").value = state.novels.some((n) => n.path === `${state.currentOut}/novel.txt`)
+    ? `${state.currentOut}/novel.txt` : "";
+  $("#novel-text").value = "";
+  $("#storyboard-path").value = `${state.currentOut}/storyboard.json`;
+  clearShotCards();
+  shotsLastOut = "";
+  try {
+    await api("/api/project/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+  } catch {}
+  await refreshState();
+  renderShots();
+  scheduleShotsAutoRefresh();
+}
+
+function backToProjects() {
+  state.project = "";
+  state.selectedTaskId = null;
+  if (state.polling) { clearInterval(state.polling); state.polling = null; }
+  if (shotsTimer) { clearInterval(shotsTimer); shotsTimer = null; }
+  $("#workspace").hidden = true;
+  $("#col-tasks").hidden = true;
+  $("#shots-card").hidden = true;
+  $("#sb-editor-card").hidden = true;
+  $("#task-detail-card").hidden = true;
+  $("#project-picker").hidden = false;
+  projectsSig = "";
+  refreshState();
 }
 
 // ---------------------------------------------------------------- start form
@@ -109,26 +226,6 @@ function renderStagePicks() {
   }
 }
 
-// 选项目 → 自动补 novel / storyboard / 项目文件夹；也支持从小说路径倒推项目名
-function syncProject() {
-  const novelVal = $("#novel-path").value.trim();
-  let name = projectName();
-  if (!name && novelVal) {
-    const m = novelVal.match(/^projects\/([^/]+)\//);
-    if (m) name = m[1];
-  }
-  if (name) {
-    if (!$("#project-name").value.trim()) $("#project-name").value = name;
-    const base = `projects/${name}`;
-    if (!$("#out-dir").value.trim() || $("#out-dir").value.startsWith("output/")) {
-      $("#out-dir").value = base;
-    }
-    if (!$("#novel-path").value.trim()) $("#novel-path").value = `${base}/novel.txt`;
-    if (!$("#storyboard-path").value.trim()) $("#storyboard-path").value = `${base}/storyboard.json`;
-  }
-  state.currentOut = $("#out-dir").value.trim();
-}
-
 async function loadNovel() {
   const path = $("#novel-path").value.trim();
   if (!path) { toast("先填小说文件路径", true); return; }
@@ -140,7 +237,6 @@ async function loadNovel() {
     });
     $("#novel-text").value = data.content;
     toast(`已载入 ${path}（${data.content.length} 字）`);
-    syncProject();
   } catch (err) {
     toast(`载入失败：${err.message}`, true);
   }
@@ -149,19 +245,15 @@ async function loadNovel() {
 async function startTask() {
   const payload = {
     title: $("#title").value.trim(),
-    name: projectName(),
+    name: state.project,
     novel: $("#novel-path").value.trim(),
     novel_text: $("#novel-text").value.trim(),
     storyboard: $("#storyboard-path").value.trim(),
-    out: $("#out-dir").value.trim(),
+    out: state.currentOut,
     stages: [...state.selectedStages],
     only: $("#only-shots").value.trim(),
     force: $("#force").checked,
   };
-  if (!payload.name && !payload.out) {
-    toast("先填项目名（或项目文件夹）", true);
-    return;
-  }
   if (!payload.novel && !payload.novel_text) {
     toast("请先载入小说或直接粘贴片段", true);
     return;
@@ -192,11 +284,11 @@ function renderTasks() {
   if (!state.tasks.length) {
     if (tasksSig !== "empty") {
       tasksSig = "empty";
-      wrap.innerHTML = `<div class="empty">还没有任务。左侧启动一个。</div>`;
+      wrap.innerHTML = `<div class="empty">这个项目还没有任务。左侧启动一个。</div>`;
     }
     return;
   }
-  // 内容没变就不重建 DOM：任务列表每 4s 轮询一次，重建会让列表闪烁
+  // 内容没变就不重建 DOM：任务列表轮询时重建会让列表闪烁
   const sig = JSON.stringify([
     state.selectedTaskId,
     state.tasks.map((t) => [t.id, t.name, t.status, t.created_at, (t.stages || []).map((s) => [s.key, s.status])]),
@@ -332,7 +424,6 @@ function renderLiveItems(job) {
     const stepText = i.total > 1 ? `${i.step}/${i.total}` : "";
     const pct = i.status === "done" ? 100 : i.pct || 0;
     const eta = i.status === "running" ? fmtEta(i.eta_s) : i.status === "done" ? "✓" : "✕";
-    const stageTag = (i.id || "").split(":")[0];
     return `<div class="live-item ${cls}">
       <span class="li-label" title="${esc(i.label || "")}">${esc(i.label || i.id)}</span>
       <span class="li-step mono">${stepText}</span>
@@ -436,12 +527,11 @@ async function rerunFailed() {
 async function clearTasks() {
   try {
     const res = await api("/api/tasks/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-    toast(res.kept ? `已清空历史记录（运行中的 ${res.kept} 个任务保留）` : "已清空历史记录");
+    toast(res.kept ? `已清空本项目的记录（运行中的 ${res.kept} 个任务保留）` : "已清空本项目的记录");
     if (!state.tasks.some((t) => t.id === state.selectedTaskId && t.status === "running")) {
       // 当前选中的任务被清掉时，收起详情面板
       state.selectedTaskId = null;
       $("#task-detail-card").hidden = true;
-      $("#shots-card").hidden = true;
       $("#log").textContent = "";
     }
     await refreshState();
@@ -478,9 +568,7 @@ function mediaSig(entry) {
 }
 
 function renderShotsIfVisible() {
-  const job = state.tasks.find((t) => t.id === state.selectedTaskId);
-  if (!job) return;
-  // 只要跑过媒体类阶段（或已有产物）就显示镜头卡；screenplay-only 也有 storyboard 可看
+  if (!state.project) return;
   $("#shots-card").hidden = false;
   renderShots();
   scheduleShotsAutoRefresh();
@@ -494,7 +582,7 @@ function scheduleShotsAutoRefresh() {
 
 async function renderShots() {
   const out = state.currentOut;
-  if (!out) return;
+  if (!out || !state.project) return;
   const seq = ++renderShotsSeq;
   $("#shots-out-label").textContent = out;
   // 换了输出目录：旧卡片全部清掉，避免闪现上一个片的产物
@@ -550,7 +638,7 @@ async function renderShots() {
   if (!shots.length) {
     clearShotCards();
     if (!grid.querySelector(":scope > .empty")) {
-      grid.innerHTML = `<div class="empty">还没有产物。等任务跑到「静帧生成」后这里会出现每个镜头的图 / 视频 / 配音。</div>`;
+      grid.innerHTML = `<div class="empty">还没有产物。启动任务跑到「静帧生成」后，这里会出现每个镜头的图 / 视频 / 配音。</div>`;
     }
     return;
   }
@@ -689,11 +777,10 @@ async function rerunShots(shots, stages) {
 // ---------------------------------------------------------------- storyboard editor
 async function openStoryboardEditor() {
   let path = $("#storyboard-path").value.trim();
-  const out = $("#out-dir").value.trim() || state.currentOut;
+  const out = state.currentOut;
   if (!path && out) path = `${out}/storyboard.json`;
-  const name = projectName() || (out ? out.split("/").pop() : "");
-  if (!path && name) path = `projects/${name}/storyboard.json`;
-  if (!path) { toast("先填项目名、分镜文件路径或项目文件夹", true); return; }
+  if (!path) { toast("先选项目", true); return; }
+  const name = state.project || (out ? out.split("/").pop() : "");
   let sb;
   try {
     const data = await api("/api/storyboard/read", {
@@ -723,8 +810,7 @@ function renderStoryboardEditor() {
   const sb = state.sbData;
   if (!sb) return;
   const summary = $("#sb-summary");
-  const limitText = "";
-  summary.textContent = `${sb.characters?.length || 0} 个角色 · ${sb.shots?.length || 0} 镜 · ${limitText}${sb.title ? ` · 《${sb.title}》` : ""}`;
+  summary.textContent = `${sb.characters?.length || 0} 个角色 · ${sb.shots?.length || 0} 镜${sb.title ? ` · 《${sb.title}》` : ""}`;
   const wrap = $("#sb-shots");
   wrap.innerHTML = "";
 
@@ -852,13 +938,6 @@ async function loadBudget() {
 }
 
 function bind() {
-  $("#project-name").addEventListener("input", syncProject);
-  $("#project-name").addEventListener("change", syncProject);
-  $("#title").addEventListener("input", () => {
-    // 片名没单独填时，顺手当作项目名
-    if (!projectName()) syncProject();
-  });
-  $("#novel-path").addEventListener("change", syncProject);
   $("#novel-load").addEventListener("click", loadNovel);
   $("#start-btn").addEventListener("click", startTask);
   $("#storyboard-edit").addEventListener("click", openStoryboardEditor);
@@ -869,6 +948,11 @@ function bind() {
   $("#task-rerun-failed").addEventListener("click", rerunFailed);
   $("#tasks-clear").addEventListener("click", clearTasks);
   $("#auto-refresh")?.addEventListener("change", scheduleShotsAutoRefresh);
+  $("#new-project-btn").addEventListener("click", createProject);
+  $("#new-project-name").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") createProject();
+  });
+  $("#back-to-projects").addEventListener("click", backToProjects);
 }
 
 bind();

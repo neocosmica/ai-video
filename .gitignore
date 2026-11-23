@@ -18,7 +18,6 @@ projects/**
 !projects/*/novel.txt
 !projects/*/storyboard.json
 !projects/*/project.json
-projects/webui/
 
 # 编辑器 / 缓存
 .idea/

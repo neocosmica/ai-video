@@ -44,7 +44,9 @@ body {
 }
 @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } }
 .col { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.col[hidden] { display: none; }
 #shots-card { grid-column: 1 / -1; }
+#shots-card[hidden] { display: none; }
 /* 每栏最后一张可见卡片弹性撑满剩余高度，使两栏底边始终对齐 */
 .col > .card:last-child:not([hidden]) { flex: 1; }
 .col > .card:not([hidden]):has(+ .card[hidden]) { flex: 1; }
@@ -140,6 +142,34 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .t-stages .dot.run { color: var(--run); }
 .t-stages .dot.fail { color: var(--bad); }
 .empty { color: var(--muted); padding: 14px 4px; }
+
+/* 项目选择页 */
+#back-to-projects { padding: 2px 10px; font-size: 12px; margin-right: 8px; }
+#current-project-name { color: var(--accent); }
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 12px;
+}
+.project-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--panel-2);
+}
+.project-card:hover { border-color: var(--accent); }
+.project-card.active { border-color: var(--accent); background: rgba(91,140,255,.08); }
+.project-card .p-name { font-weight: 600; font-size: 15px; }
+.project-card .p-meta { font-size: 11px; }
+.project-card .p-badges { font-size: 12px; }
+.project-card .p-stat { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; }
+.project-card .p-stat .dot.done { color: var(--ok); }
+.project-card .p-stat .dot.run { color: var(--run); }
+.project-card .p-stat .dot.fail { color: var(--bad); }
 
 /* 阶段轨道 */
 .stage-track { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 12px; }
@@ -254,7 +284,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .shot-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .shot-actions button { font-size: 11px; padding: 3px 8px; }
 
-/* 分镜编辑器 */
+/* 分镜编辑器（浮层） */
+#sb-editor-card { position: fixed; inset: 5% 8%; z-index: 50; overflow: auto; box-shadow: 0 12px 48px rgba(0,0,0,.5); }
 .sb-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
 .sb-summary { font-size: 12px; color: var(--muted); margin-bottom: 10px; white-space: pre-wrap; }
 .sb-shots { display: flex; flex-direction: column; gap: 10px; max-height: 560px; overflow: auto; }

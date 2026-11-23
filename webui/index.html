@@ -14,20 +14,29 @@
 </header>
 
 <main class="layout">
-  <!-- 左列：新建任务 -->
-  <section class="col" id="col-new">
+  <!-- 项目选择页：打开网页第一件事 -->
+  <section class="card" id="project-picker" style="grid-column:1/-1">
+    <h2>① 选择项目 <span class="hint">（每个项目一个文件夹 projects/<片名>/，小说、分镜、成片、任务历史都在里面）</span></h2>
+    <div id="project-grid" class="project-grid"></div>
+    <div class="row" style="margin-top:14px">
+      <label>或新建项目</label>
+      <div class="fileline">
+        <input id="new-project-name" placeholder="片名，例：雨夜重逢（自动建 projects/雨夜重逢/）" />
+        <button id="new-project-btn" class="primary">＋ 新建</button>
+      </div>
+    </div>
+    <div id="picker-msg" class="error" hidden></div>
+  </section>
+
+  <!-- 项目工作区：选定项目后显示 -->
+  <section class="col" id="workspace" hidden>
     <div class="card">
-      <h2>① 填写小说片段</h2>
+      <h2><button id="back-to-projects" class="ghost" title="返回项目选择">← 项目</button>
+        <span id="current-project-name" class="mono"></span>
+        <span class="hint">小说 / 分镜 / 成片 / 任务历史都在 projects/<片名>/</span></h2>
       <div class="row">
         <label>片名</label>
         <input id="title" placeholder="例：雨夜重逢" />
-      </div>
-      <div class="row">
-        <label>项目 <span class="hint">（每个项目一个文件夹 projects/<片名>/）</span></label>
-        <div class="fileline">
-          <input id="project-name" list="project-list" placeholder="例：demo（已有项目可从下拉选）" />
-          <datalist id="project-list"></datalist>
-        </div>
       </div>
       <div class="row">
         <label>小说文件 <span class="hint">（默认 <项目文件夹>/novel.txt）</span></label>
@@ -50,10 +59,6 @@
         </div>
       </div>
       <div class="row">
-        <label>项目文件夹 <span class="hint">（小说、分镜、成片都在这里）</span></label>
-        <input id="out-dir" placeholder="projects/xxx" />
-      </div>
-      <div class="row">
         <label>执行阶段</label>
         <div class="stages" id="stage-picks"></div>
       </div>
@@ -67,25 +72,13 @@
       </div>
       <div id="start-error" class="error" hidden></div>
     </div>
-
-    <div class="card" id="sb-editor-card" hidden>
-      <h2>分镜编辑器 <span id="sb-path-label" class="mono hint"></span></h2>
-      <div class="sb-toolbar">
-        <button id="sb-save" class="primary">保存</button>
-        <button id="sb-validate" class="ghost">硬校验（--strict）</button>
-        <button id="sb-close" class="ghost">关闭</button>
-        <span id="sb-msg" class="hint"></span>
-      </div>
-      <div id="sb-summary" class="sb-summary"></div>
-      <div id="sb-shots" class="sb-shots"></div>
-    </div>
   </section>
 
-  <!-- 右列：任务与进度 -->
-  <section class="col" id="col-tasks">
+  <!-- 右列：任务与进度（属于当前项目） -->
+  <section class="col" id="col-tasks" hidden>
     <div class="card">
-      <h2>② 任务与进度 <button id="tasks-clear" class="ghost" style="float:right;font-size:12px;padding:2px 10px;">🧹 清空记录</button></h2>
-      <div id="task-list" class="task-list"><div class="empty">还没有任务。左侧启动一个。</div></div>
+      <h2>② 任务与进度 <button id="tasks-clear" class="ghost" style="float:right;font-size:12px;padding:2px 10px;">🧹 清空本项目记录</button></h2>
+      <div id="task-list" class="task-list"><div class="empty">这个项目还没有任务。左侧启动一个。</div></div>
     </div>
     <div class="card" id="task-detail-card" hidden>
       <h2 id="task-detail-title">任务</h2>
@@ -105,7 +98,7 @@
     </div>
   </section>
 
-  <!-- 底部：镜头产物，横跨左右两栏 -->
+  <!-- 底部：镜头产物，横跨左右两栏（属于当前项目） -->
   <div class="card" id="shots-card" hidden>
     <h2>③ 镜头产物 <span id="shots-out-label" class="mono hint"></span></h2>
     <div class="actions" style="margin:0 0 10px">
@@ -113,6 +106,19 @@
       <span id="final-badge" class="badge" hidden>🎬 final.mp4 已生成</span>
     </div>
     <div id="shots-grid" class="shots-grid"></div>
+  </div>
+
+  <!-- 分镜编辑器：浮层 -->
+  <div class="card" id="sb-editor-card" hidden>
+    <h2>分镜编辑器 <span id="sb-path-label" class="mono hint"></span></h2>
+    <div class="sb-toolbar">
+      <button id="sb-save" class="primary">保存</button>
+      <button id="sb-validate" class="ghost">硬校验（--strict）</button>
+      <button id="sb-close" class="ghost">关闭</button>
+      <span id="sb-msg" class="hint"></span>
+    </div>
+    <div id="sb-summary" class="sb-summary"></div>
+    <div id="sb-shots" class="sb-shots"></div>
   </div>
 </main>
 

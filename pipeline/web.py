@@ -9,7 +9,8 @@
 看实时进度、对失败步骤单独重跑。
 
 每个项目一个独立文件夹 `projects/<片名>/`（小说、分镜、产物都在里面）；
-任务记录写入 `projects/webui/state.json`，重启服务不丢历史。
+任务历史也属于项目：写在 `<项目>/work/webui/state.json`，重启服务不丢，
+打开网页第一步是选项目，之后看到的任务、镜头产物都是这个项目的。
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ apply_mirrors()
 
 from pipeline.projects import (
     PROJECTS_DIRNAME,
+    artifacts_dir,
     artifacts_sub,
     novel_candidates,
     project_dir,
@@ -40,10 +42,12 @@ from pipeline.projects import (
 from pipeline.util import ROOT, resolve
 
 WEB_DIR = ROOT / "webui"
-STATE_DIR = ROOT / PROJECTS_DIRNAME / "webui"
-STATE_PATH = STATE_DIR / "state.json"
+# 任务历史跟项目走：<项目>/work/webui/state.json；历史任务是只读快照，
+# 所以服务重启后哪怕项目文件夹被挪走，也只是少了几条历史记录而已。
+STATE_DIRNAME = "webui"
+STATE_FILENAME = "state.json"
 LOG_TAIL_LINES = 4000  # 内存里每任务保留的日志行数
-HISTORY = 30  # state.json 里最多保留多少条任务记录
+HISTORY = 30  # 每个项目 state.json 里最多保留多少条任务记录
 
 # 与 pipeline.run.STAGES 保持一致；单独在这里声明是为了 import 轻量
 STAGES = ("screenplay", "images", "audio", "videos", "music", "assemble")
@@ -406,6 +410,8 @@ class Job:
 _JOBS: dict[str, Job] = {}
 _LOCK = threading.Lock()
 _CHANGE_QUEUES: list[queue.Queue] = []
+# 当前网页打开的项目名下的任务 id：清空记录时只清这些，别的项目不受影响
+CURRENT_PROJECT_JOB_IDS: set[str] = set()
 
 
 def notify_change() -> None:
@@ -418,23 +424,79 @@ def notify_change() -> None:
             pass
 
 
+def state_path_for(out: str) -> Path:
+    """某个项目的任务历史文件：<项目>/work/webui/state.json。"""
+    return artifacts_dir(out) / STATE_DIRNAME / STATE_FILENAME
+
+
+def job_out(job: Job) -> str:
+    """任务的归属项目文件夹（新建任务在 __init__ 里也存了 out）。"""
+    return getattr(job, "out", "") or ""
+
+
+def project_of_job(job: Job) -> str:
+    """任务归属的项目名（projects/<片名> 的 <片名>；旧布局任务取相对路径）。"""
+    out = job_out(job).replace("\\", "/").strip("/")
+    if out == f"{PROJECTS_DIRNAME}/{STATE_DIRNAME}":
+        return ""  # 旧的全局历史不挂到任何项目下
+    if out.startswith(f"{PROJECTS_DIRNAME}/"):
+        return out[len(PROJECTS_DIRNAME) + 1:].split("/")[0]
+    return out
+
+
+def jobs_for_project(name: str) -> list[Job]:
+    """某个项目名下的任务（内存里的；新任务启动后项目文件夹一定存在）。"""
+    prefix = f"{PROJECTS_DIRNAME}/{name}"
+    with _LOCK:
+        jobs = sorted(_JOBS.values(), key=lambda j: j.created_at, reverse=True)
+    if not name:
+        return [j for j in jobs if not project_of_job(j)]
+    return [
+        j for j in jobs
+        if project_of_job(j) == name
+        # 旧布局 output/<片名> 的任务与同名新布局项目互认
+        or (j.out == f"output/{name}")
+    ]
+
+
 def get_job(task_id: str) -> Job | None:
     with _LOCK:
         return _JOBS.get(task_id)
 
 
-def all_jobs() -> list[Job]:
+def jobs_outside_projects() -> list[Job]:
+    """不属于任何项目的任务（老的全局历史、旧布局无同名项目等）。"""
     with _LOCK:
-        return sorted(_JOBS.values(), key=lambda j: j.created_at, reverse=True)
+        jobs = sorted(_JOBS.values(), key=lambda j: j.created_at, reverse=True)
+    known = {item["name"] for item in _all_projects()["projects"]}
+    known.add(STATE_DIRNAME)
+    return [
+        j for j in jobs
+        if not project_of_job(j) and j.out != f"{PROJECTS_DIRNAME}/{STATE_DIRNAME}"
+        and Path(j.out or "").name not in known
+    ]
 
 
 def clear_finished_tasks() -> dict:
-    """清掉非运行中的历史任务记录（产物文件不动）；运行中的保留。"""
+    """清空当前打开项目的非运行中任务记录（产物文件不动）；运行中的保留。"""
     with _LOCK:
         running = [j for j in _JOBS.values() if j.status == "running"]
-        _JOBS.clear()
-        for job in running:
-            _JOBS[job.id] = job
+        keep_ids = {j.id for j in running}
+        removed = [
+            j for jid, j in _JOBS.items()
+            if jid not in keep_ids and (jid in CURRENT_PROJECT_JOB_IDS or not CURRENT_PROJECT_JOB_IDS)
+        ]
+        for j in removed:
+            del _JOBS[j.id]
+    # 空桶也要重写落盘，否则下次选项目时旧 state.json 又把记录带回来
+    outs = {j.out for j in removed}
+    for out in outs:
+        try:
+            path = state_path_for(out)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"tasks": {}}, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception:
+            pass
     _persist()
     return {"ok": True, "kept": len(running)}
 
@@ -442,44 +504,103 @@ def clear_finished_tasks() -> dict:
 def register_job(job: Job) -> None:
     with _LOCK:
         _JOBS[job.id] = job
+        CURRENT_PROJECT_JOB_IDS.add(job.id)
     _persist()
 
 
-def _persist() -> None:
+def load_project_tasks(name: str) -> list[Job]:
+    """读某项目的 state.json → 恢复成只读历史任务，返回该项目的全部任务。
+
+    服务重启后内存是空的，网页第一次选某个项目时按需恢复它的历史；
+    运行中的旧记录会被标成「中断」。
+    """
+    path = state_path_for(f"{PROJECTS_DIRNAME}/{name}")
+    restored: list[Job] = []
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        for task_id, snap in (data.get("tasks") or {}).items():
+            if get_job(task_id):
+                continue  # 内存里已经有了（例如刚重启后仍在跑的任务）
+            if snap.get("status") == "running":
+                snap["status"] = "interrupted"
+                snap["error"] = "服务重启，任务中断；请重跑需要的阶段"
+                for stage in snap.get("stages") or []:
+                    if stage.get("status") == "running":
+                        stage["status"] = "failed"
+            try:
+                created = float(snap.get("created_at") or 0)
+            except (TypeError, ValueError):
+                created = 0.0
+            job = _RestoredJob(snap, created)
+            with _LOCK:
+                _JOBS[task_id] = job
+                CURRENT_PROJECT_JOB_IDS.add(job.id)
+            restored.append(job)
+    if restored:
+        _persist()  # 把「中断」标记立刻写回 state.json
+    return jobs_for_project(name)
+
+
+def migrate_legacy_state() -> None:
+    """旧的全局 projects/webui/state.json → 各项目 work/webui/state.json。
+
+    按 snap["out"] 归属分发；一次迁移完把旧文件挪成 legacy.json 留底。
+    """
+    legacy_path = ROOT / PROJECTS_DIRNAME / STATE_DIRNAME / STATE_FILENAME
+    if not legacy_path.exists():
+        return
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tasks = {j.id: j.snapshot() for j in all_jobs()}
-        if len(tasks) > HISTORY:
-            keep = sorted(tasks.items(), key=lambda kv: kv[1].get("created_at", 0), reverse=True)[:HISTORY]
-            tasks = dict(keep)
-        tmp = STATE_PATH.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"tasks": tasks}, ensure_ascii=False, indent=1), encoding="utf-8")
-        tmp.replace(STATE_PATH)
+        data = json.loads(legacy_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    moved = 0
+    for _task_id, snap in (data.get("tasks") or {}).items():
+        out = str(snap.get("out") or "").strip()
+        if not out or out == f"{PROJECTS_DIRNAME}/{STATE_DIRNAME}":
+            continue
+        path = state_path_for(out)
+        try:
+            bucket = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"tasks": {}}
+            bucket.setdefault("tasks", {})
+            bucket["tasks"][snap.get("id") or uuid.uuid4().hex[:12]] = snap
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(bucket, ensure_ascii=False, indent=1), encoding="utf-8")
+            tmp.replace(path)
+            moved += 1
+        except Exception:
+            continue
+    if moved:
+        legacy_path.replace(legacy_path.with_name("legacy.json"))
+    elif legacy_path.exists():
+        legacy_path.replace(legacy_path.with_name("legacy.json"))
+
+
+def _persist() -> None:
+    """把任务历史写回各自项目的 <项目>/work/webui/state.json。"""
+    try:
+        buckets: dict[str, dict] = {}
+        with _LOCK:
+            jobs = list(_JOBS.values())
+        for job in jobs:
+            out = job_out(job)
+            if not out:
+                continue
+            buckets.setdefault(out, {})[job.id] = job.snapshot()
+        for out, tasks in buckets.items():
+            path = state_path_for(out)
+            if len(tasks) > HISTORY:
+                keep = sorted(tasks.items(), key=lambda kv: kv[1].get("created_at", 0), reverse=True)[:HISTORY]
+                tasks = dict(keep)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"tasks": tasks}, ensure_ascii=False, indent=1), encoding="utf-8")
+            tmp.replace(path)
     except Exception:
         pass
-
-
-def restore_state() -> None:
-    """重启服务后，把 state.json 里的历史任务标记为中断。"""
-    if not STATE_PATH.exists():
-        return
-    try:
-        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return
-    for task_id, snap in (data.get("tasks") or {}).items():
-        if snap.get("status") == "running":
-            snap["status"] = "interrupted"
-            snap["error"] = "服务重启，任务中断；请重跑需要的阶段"
-            for stage in snap.get("stages") or []:
-                if stage.get("status") == "running":
-                    stage["status"] = "failed"
-        try:
-            created = float(snap.get("created_at") or 0)
-        except (TypeError, ValueError):
-            created = 0.0
-        with _LOCK:
-            _JOBS[task_id] = _RestoredJob(snap, created)
 
 
 class _RestoredJob(Job):
@@ -647,21 +768,67 @@ def list_input_files() -> dict:
     return {"novels": novels, "storyboards": storyboards}
 
 
+def _project_file_options() -> dict:
+    """小说 / 分镜备选清单：各项目里的 novel.txt 与 storyboard.json（含旧 input/）。"""
+    from pipeline.projects import list_projects as scan_projects
+
+    novels = list_input_files()["novels"]
+    storyboards = list_input_files()["storyboards"]
+    for item in scan_projects():
+        if item.get("novel"):
+            novels.append({"name": f"{item['name']}/novel", "path": item["novel"]})
+        if item.get("has_storyboard"):
+            storyboards.append(
+                {"name": f"{item['name']}/storyboard", "path": f"{item['path']}/storyboard.json"}
+            )
+    return {"novels": novels, "storyboards": storyboards}
+
+
 def _all_projects() -> dict:
-    """项目清单 + 旧布局文件（兼容选择器），供 /api/state 一次拉全。"""
+    """项目清单 + 每个项目的任务统计，供项目选择页一次拉全。"""
     from pipeline.projects import list_projects as scan_projects
 
     projects = scan_projects()
-    legacy = list_input_files()
-    novels = legacy["novels"]
-    storyboards = legacy["storyboards"]
     for item in projects:
-        if item.get("novel"):
-            novels.append({"name": f"{item['name']}/novel", "path": item["novel"]})
-        sb = f"{item['path']}/storyboard.json"
-        if item.get("has_storyboard"):
-            storyboards.append({"name": f"{item['name']}/storyboard", "path": sb})
-    return {"projects": projects, "novels": novels, "storyboards": storyboards}
+        path = state_path_for(item["path"])
+        done = running = failed = 0
+        last = None
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+            for snap in (data.get("tasks") or {}).values():
+                status = snap.get("status")
+                if status == "running":
+                    running += 1
+                elif status == "failed" or status == "interrupted":
+                    failed += 1
+                else:
+                    done += 1
+                created = snap.get("created_at") or 0
+                if created > (last or 0):
+                    last = created
+        item["tasks"] = {"done": done, "running": running, "failed": failed, "total": done + running + failed}
+        item["last_activity"] = last
+    return {"projects": projects}
+
+
+def create_project_api(data: dict) -> dict:
+    """网页上新建项目文件夹。"""
+    from pipeline.projects import create_project
+
+    name = str(data.get("name") or "").strip()
+    if not name:
+        raise ValueError("项目名不能为空")
+    title = str(data.get("title") or "").strip()
+    directory = create_project(name, title=title)
+    return {
+        "name": directory.name,
+        "path": f"{PROJECTS_DIRNAME}/{directory.name}",
+        "novel": f"{PROJECTS_DIRNAME}/{directory.name}/novel.txt",
+        "storyboard": f"{PROJECTS_DIRNAME}/{directory.name}/storyboard.json",
+    }
 
 
 _SAFE_PATH = re.compile(r"^[\w\-./\u4e00-\u9fff]+$")
@@ -917,17 +1084,7 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/media":
                 self._json(self.api_media(query))
             elif path == "/api/state":
-                self._json(
-                    {
-                        "projects": _all_projects(),
-                        "tasks": [j.snapshot() for j in all_jobs()],
-                        "server_time": time.time(),
-                    }
-                )
-            elif path == "/api/projects":
-                pass  # included in /api/state
-            elif path.startswith("/media/"):
-                self._serve_media(path[len("/media/"):])
+                self._json(self.api_state(query))
             elif path == "/api/budget":
                 self._json(budget_info())
             elif path == "/api/events":
@@ -936,6 +1093,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._api_log(path.rsplit("/", 1)[-1], query)
             elif path.startswith("/api/log-stream/"):
                 self._stream_job_log(path.rsplit("/", 1)[-1])
+            elif path.startswith("/media/"):
+                self._serve_media(path[len("/media/"):])
             else:
                 self._json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -954,6 +1113,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(self.stop_task(data))
             elif path == "/api/tasks/clear":
                 self._json(clear_finished_tasks())
+            elif path == "/api/project/select":
+                self._json(self.select_project(data))
+            elif path == "/api/projects/new":
+                self._json(create_project_api(data))
             elif path == "/api/file/read":
                 rel = str(data.get("path") or "")
                 self._json({"path": rel, "content": read_text(rel)})
@@ -984,6 +1147,34 @@ class _Handler(BaseHTTPRequestHandler):
             self._json_error(exc)
 
     # -- API ---------------------------------------------------------------
+    def api_state(self, query: str) -> dict:
+        """选了项目 → 返回该项目的一切（任务、项目卡片、小说/分镜备选）。"""
+        from urllib.parse import parse_qs, unquote
+
+        params = parse_qs(query)
+        name = unquote(params.get("project", [""])[0]).strip()
+        tasks = load_project_tasks(name) if name else jobs_outside_projects()
+        file_options = _project_file_options()
+        return {
+            "project": name,
+            "projects": _all_projects()["projects"],
+            "novels": file_options["novels"],
+            "storyboards": file_options["storyboards"],
+            "tasks": [j.snapshot() for j in tasks],
+            "server_time": time.time(),
+        }
+
+    def select_project(self, data: dict) -> dict:
+        """记住网页当前打开的项目：清空记录只清它名下的任务。"""
+        name = str(data.get("name") or "").strip()
+        with _LOCK:
+            keep = {j.id for j in _JOBS.values() if j.status == "running"}
+            CURRENT_PROJECT_JOB_IDS.clear()
+            CURRENT_PROJECT_JOB_IDS.update(keep)
+        if name:
+            load_project_tasks(name)
+        return {"ok": True, "project": name}
+
     def create_task(self, data: dict) -> dict:
         title = str(data.get("title") or "").strip()
         name = str(data.get("name") or "").strip() or _slugify(title)
@@ -1190,7 +1381,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def serve(host: str, port: int) -> None:
-    restore_state()
+    migrate_legacy_state()
     WEB_DIR.mkdir(parents=True, exist_ok=True)
     if not (WEB_DIR / "index.html").exists():
         raise SystemExit(f"缺少网页文件：{WEB_DIR / 'index.html'}")
