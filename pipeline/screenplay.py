@@ -1,11 +1,22 @@
+"""校验已写好的分镜 JSON，并打印每个对白镜头的预估时长（写分镜时用它自查）。
+
+不跑成片、不加载模型，秒级返回：
+
+    ./scripts/run.sh screenplay --out output/<片名> --novel input/<小说>.txt \\
+        --storyboard input/<片名>.json
+
+超长台词只提示、不报错：audio 阶段会自动在静音处切段。想少一次返工就照提示先拆好。
+"""
+
 from __future__ import annotations
 
 import argparse
 import re
+import shutil
 from pathlib import Path
 
 from pipeline.config import Settings
-from pipeline.util import dump_json, has_cjk, load_json, resolve, stable_seed
+from pipeline.util import dump_json, has_cjk, load_json, resolve, snap_frames, stable_seed
 
 
 SCHEMA_HINT = """分镜不由本机 LLM 生成。请让 Cursor Agent 阅读小说后写入 storyboard.json（演示可写 input/demo_storyboard.json）。
@@ -38,10 +49,18 @@ SCHEMA_HINT = """分镜不由本机 LLM 生成。请让 Cursor Agent 阅读小�
 }
 
 音色：女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric。情绪写在镜头上，影响 TTS instruct。
-约束：竖屏短剧，每镜约 2 秒；能少就少；motion_prompt 与 music_prompt 必须是英文。
-硬性要求：小说里所有引号对白（「」 “” ""）必须原样出现在某个镜头的 dialogue 里，一句重要对白一个镜头；不要合并丢掉后半句。
-写好后一键成片（对白先于视频，有台词镜走 LTX a2v；不再需要 Agent）：
-./scripts/run.sh produce --storyboard input/demo_storyboard.json --novel input/novel.txt --out output/demo
+约束：竖屏短剧，每镜约 2 秒（空镜）；motion_prompt 与 music_prompt 必须是英文。
+台词长度：**按小说原样写，不要为了时长改写、删字或压短**。配音语速和语气由原文与 emotion 决定，
+镜头时长跟着配音走；一句话太长就按语义在标点处分成相邻几个镜头，让运镜跟得上，但文字不许变。
+对白硬性要求：小说里所有引号对白（「」 “” ""）必须原样出现在某个镜头的 dialogue 里，
+允许跨相邻镜头连续覆盖，禁止漏句删字。
+写分镜前先拿单镜上限（只读总内存配置，秒级）：
+./scripts/run.sh budget --out output/xxx
+写完用 --strict 硬校验（超额度会给出可照抄的拆法，不许删字）：
+./scripts/run.sh screenplay --strict --storyboard input/xxx_storyboard.json --novel input/xxx.txt --out output/xxx
+然后一句话成片：
+./scripts/run.sh produce --storyboard input/xxx_storyboard.json --novel input/xxx.txt --out output/xxx
+（audio 阶段按实测配音定镜头长度，必要时在句中停顿处自动切段，绝不静默截台词。）
 """
 
 # 中文弯引号、直角引号、直引号
@@ -62,7 +81,115 @@ def extract_novel_dialogues(text: str) -> list[str]:
 
 
 def _coverage_blob(shots: list[dict]) -> str:
-    return "\n".join(str(shot.get("dialogue") or "") for shot in shots)
+    # 不加分隔符：同一句台词允许按标点拆到相邻镜头里，拼回来仍算覆盖
+    return _spoken_key("".join(str(shot.get("dialogue") or "") for shot in shots))
+
+
+_SPOKEN_STRIP = re.compile(r"[\s\W_]+", re.UNICODE)
+
+
+def _spoken_key(text: str) -> str:
+    return _SPOKEN_STRIP.sub("", text or "")
+
+
+def count_spoken_chars(text: str) -> int:
+    """只数会被念出来的字：去掉空白、标点和引号。"""
+    return len(_spoken_key(text))
+
+
+# Qwen3-TTS 中文实测语速（含句中停顿），单位：字/秒。
+# 用它把「多少个字」换算成「大概念几秒」，写分镜时就能预判会不会超。
+CHARS_PER_SECOND = 2.4
+
+
+def estimate_speech_seconds(text: str, chars_per_second: float = CHARS_PER_SECOND) -> float:
+    """按实测语速估这句台词要念多久。"""
+    return count_spoken_chars(text) / max(0.1, float(chars_per_second))
+
+
+def dialogue_char_limit(
+    max_frames: int,
+    fps: int,
+    chars_per_second: float = CHARS_PER_SECOND,
+) -> int:
+    """单镜台词字数上限：按实测中文 TTS 语速和单镜最长帧数估。
+
+    这是「不用拆镜」的安全额度；超过也不报错，audio 阶段会自动拆。
+    """
+    seconds = max(1.0, float(max_frames) / max(1, int(fps)))
+    return max(4, int(seconds * chars_per_second))
+
+
+def report_dialogue_budget(
+    shots: list[dict],
+    limit: int,
+    max_seconds: float,
+    *,
+    tolerance: float = 1.15,
+    strict: bool = False,
+) -> None:
+    """打印每个对白镜头的预估时长，供写分镜时有个时间概念。
+
+    默认只提示、不失败。``strict=True`` 时：超额度镜头给出可照抄的拆法并以退出码 1 失败，
+    强迫写分镜时就把长对白拆成相邻多镜（台词原样，不许删字）。
+
+    ``tolerance``：略微超出（默认 15% 以内）不提示，避免为 0.2 秒把句子拆碎。
+    """
+    from pipeline.dialogue import plan_segments
+
+    soft_cap = max_seconds * tolerance
+    rows: list[str] = []
+    long_shots: list[tuple[str, str, int, float, list[str]]] = []
+    for shot in shots:
+        line = str(shot.get("dialogue") or "").strip()
+        if not line:
+            continue
+        seconds = estimate_speech_seconds(line)
+        chars = count_spoken_chars(line)
+        sid = str(shot.get("id") or "?")
+        if seconds > soft_cap or (strict and chars > limit):
+            pieces = plan_segments(line, limit)
+            plan = " / ".join(piece.strip() for piece in pieces) if len(pieces) > 1 else line
+            long_shots.append((sid, line, chars, seconds, pieces if len(pieces) > 1 else [line]))
+            rows.append(
+                f"  ~ {sid}：{chars} 字 ≈ {seconds:.1f}s（镜头参考 {max_seconds:.1f}s / {limit} 字）"
+                f"→ 若想分镜可断在：{plan}"
+            )
+        else:
+            rows.append(f"    {sid}：{chars} 字 ≈ {seconds:.1f}s")
+    if not rows:
+        return
+    print(
+        f"对白时长预估（语速 {CHARS_PER_SECOND} 字/秒，仅供参考；镜头会跟着配音长度走）："
+    )
+    print("\n".join(rows))
+    if not long_shots:
+        return
+    if strict:
+        blocks: list[str] = []
+        for sid, _line, chars, seconds, pieces in long_shots:
+            blocks.append(
+                f"{sid}：{chars} 字 ≈ {seconds:.1f}s，超过单镜额度 {limit} 字"
+            )
+            blocks.append("  请拆成相邻镜头，台词原样不要删字：")
+            for index, piece in enumerate(pieces):
+                if index == 0:
+                    label = sid
+                elif index < 26:
+                    label = f"{sid}{'abcdefghijklmnopqrstuvwxyz'[index]}"
+                else:
+                    label = f"{sid}_p{index + 1}"
+                blocks.append(f"    {label}  → {piece.strip()}")
+        raise SystemExit(
+            "分镜有镜头对白超过单镜额度（--strict）。"
+            "**不要删字压短**，按下面断点拆成相邻镜头，每镜换景别/角度：\n"
+            + "\n".join(blocks)
+        )
+    print(
+        f"提示：上面 {len(long_shots)} 个镜头对白较长。**不需要为时长改写台词**——配音按原文一次念完，"
+        "镜头时长跟着配音走；audio 阶段还会在句中停顿处自动切段拆镜（同一次配音，语调连贯）。"
+        "只有想控制运镜节奏时，才按上面的断点自己分镜。"
+    )
 
 
 def assert_dialogue_coverage(novel_text: str, shots: list[dict]) -> None:
@@ -71,7 +198,7 @@ def assert_dialogue_coverage(novel_text: str, shots: list[dict]) -> None:
     if not expected:
         return
     blob = _coverage_blob(shots)
-    missing = [line for line in expected if line not in blob]
+    missing = [line for line in expected if _spoken_key(line) not in blob]
     if missing:
         listed = "\n".join(f"- {line}" for line in missing)
         raise SystemExit(
@@ -144,7 +271,15 @@ def _normalize_characters(chars: list[dict]) -> list[dict]:
     return out
 
 
-def normalize_storyboard(data: dict, *, novel_path: Path | None, max_shots: int) -> dict:
+def normalize_storyboard(
+    data: dict,
+    *,
+    novel_path: Path | None,
+    max_shots: int,
+    dialogue_limit: int | None = None,
+    max_seconds: float | None = None,
+    strict: bool = False,
+) -> dict:
     if not isinstance(data, dict):
         raise SystemExit("storyboard.json 必须是一个 JSON 对象")
     characters = _normalize_characters(data.get("characters") or [])
@@ -183,7 +318,7 @@ def normalize_storyboard(data: dict, *, novel_path: Path | None, max_shots: int)
             shot["emotion"] = emotion
         elif shot["dialogue"]:
             shot["emotion"] = "calm"
-        for key in ("video", "video_error"):
+        for key in ("video", "video_error", "reuse_frame"):
             if key in raw:
                 shot[key] = raw[key]
         shots.append(shot)
@@ -203,6 +338,13 @@ def normalize_storyboard(data: dict, *, novel_path: Path | None, max_shots: int)
             novel_file = Path(candidate)
     if novel_file and novel_file.exists():
         assert_dialogue_coverage(novel_file.read_text(encoding="utf-8"), shots)
+    if dialogue_limit is not None:
+        report_dialogue_budget(
+            shots,
+            dialogue_limit,
+            float(max_seconds or 0.0),
+            strict=strict,
+        )
     spoken = sum(1 for shot in shots if shot.get("dialogue"))
     return {
         "title": title,
@@ -210,6 +352,8 @@ def normalize_storyboard(data: dict, *, novel_path: Path | None, max_shots: int)
         "music_prompt": music_prompt,
         "novel": str(novel_path) if novel_path else str(data.get("novel") or ""),
         "max_shots": max_shots,
+        "dialogue_char_limit": dialogue_limit,
+        "shot_max_seconds": round(float(max_seconds), 2) if max_seconds else None,
         "truncated": bool(data.get("truncated", False)) or len(shots_in) > max_shots,
         "dialogue_lines": spoken,
         "characters": characters,
@@ -217,13 +361,30 @@ def normalize_storyboard(data: dict, *, novel_path: Path | None, max_shots: int)
     }
 
 
-def validate_or_explain(story_path: Path, novel_path: Path | None, settings: Settings, force: bool) -> Path:
+def validate_or_explain(
+    story_path: Path,
+    novel_path: Path | None,
+    settings: Settings,
+    force: bool,
+    *,
+    strict: bool = False,
+) -> Path:
     if not story_path.exists():
         raise SystemExit(
             f"还没有分镜文件：{story_path}\n\n{SCHEMA_HINT}"
         )
     raw = load_json(story_path)
-    normalized = normalize_storyboard(raw, novel_path=novel_path, max_shots=settings.max_shots)
+    fps = max(1, settings.video_fps)
+    max_seconds = snap_frames(settings.video_frames_max) / fps
+    limit = dialogue_char_limit(settings.video_frames_max, fps)
+    normalized = normalize_storyboard(
+        raw,
+        novel_path=novel_path,
+        max_shots=settings.max_shots,
+        dialogue_limit=limit,
+        max_seconds=max_seconds,
+        strict=strict,
+    )
     if force or raw != normalized:
         dump_json(story_path, normalized)
         print(
@@ -249,8 +410,26 @@ def cmd_screenplay(args: argparse.Namespace) -> None:
     out.mkdir(parents=True, exist_ok=True)
     # 若未显式传小说，仍尝试用 storyboard 里的 novel 字段做对白覆盖检查
     story_path = out / "storyboard.json"
+    src = getattr(args, "storyboard", None)
+    if src:
+        candidate = resolve(src)
+        if not candidate.exists():
+            raise SystemExit(f"找不到分镜：{candidate}")
+        if candidate.resolve() != story_path.resolve():
+            if story_path.exists() and not getattr(args, "force", False):
+                print(f"输出目录已有分镜，保留不覆盖：{story_path}")
+            else:
+                story_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(candidate, story_path)
+                print(f"已放入分镜：{candidate} → {story_path}")
     if (novel is None or not novel.exists()) and story_path.exists():
         linked = str(load_json(story_path).get("novel") or "").strip()
         if linked:
             novel = Path(linked)
-    validate_or_explain(story_path, novel if novel and novel.exists() else None, settings, args.force)
+    validate_or_explain(
+        story_path,
+        novel if novel and novel.exists() else None,
+        settings,
+        args.force,
+        strict=bool(getattr(args, "strict", False)),
+    )
