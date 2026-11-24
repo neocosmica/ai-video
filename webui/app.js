@@ -946,7 +946,8 @@ function renderLiveItems(job) {
       "live-item",
       i.status === "done" ? "done" : "",
       i.status === "failed" ? "failed" : "",
-      i.status === "running" || i.id === currentId ? "current" : "",
+      // 只给真正 running 的项标 current；已完成的不要因 current_step_id 残留高亮/抢焦
+      i.status === "running" ? "current" : "",
       i.status === "pending" ? "pending" : "",
     ].filter(Boolean).join(" ");
     parts.push(`<div class="${cls}">
@@ -957,8 +958,13 @@ function renderLiveItems(job) {
     </div>`);
   }
   wrap.innerHTML = parts.join("");
+  // 只改 #live-items 的 scrollTop，不调用 scrollIntoView（会带动整页）
   const cur = wrap.querySelector(".live-item.current");
-  if (cur) cur.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  if (cur) {
+    const delta = cur.getBoundingClientRect().top - wrap.getBoundingClientRect().top + wrap.scrollTop;
+    const top = delta - (wrap.clientHeight - cur.offsetHeight) / 2;
+    wrap.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+  }
 }
 
 function startLogPolling(id) {
@@ -1935,21 +1941,58 @@ function castInitial(ch) {
 }
 
 function castAvatarUrl(ch, info = {}) {
+  // 只认 /api/media 扫到的真实文件；删了就不返回 URL，避免浏览器缓存假图
   const id = String(ch.id || "").trim();
   if (!id) return "";
-  const portraits = info.portraits || {};
-  if (portraits[id]) return portraits[id];
-  // 产物目录约定：work/characters/<id>.png（服务端 media 也会扫这一层）
-  const out = String(info.out || state.currentOut || "").replace(/\/+$/, "");
-  if (out) return `/media/${out}/work/characters/${encodeURIComponent(id)}.png`;
-  // 再回退：该角色出场的第一镜静帧
-  const shots = Array.isArray(info.shots) ? info.shots : [];
-  const frames = info.framesById || {};
-  for (const shot of shots) {
-    const list = shot.characters || [];
-    if (list.includes(id) && frames[shot.id]) return frames[shot.id];
+  const entry = (info.portraits || {})[id];
+  if (!entry) return "";
+  const url = typeof entry === "string" ? entry : String(entry.url || "");
+  if (!url) return "";
+  const mtime = typeof entry === "object" ? entry.mtime : null;
+  if (mtime == null || mtime === "") return url;
+  return `${url}${url.includes("?") ? "&" : "?"}t=${mtime}`;
+}
+
+function ensureCastAvatarFallback(box, ch) {
+  let fb = $(".cast-avatar-fallback", box);
+  if (!fb) {
+    fb = document.createElement("span");
+    fb.className = "cast-avatar-fallback";
+    box.appendChild(fb);
   }
-  return "";
+  fb.textContent = castInitial(ch);
+  return fb;
+}
+
+function syncCastAvatar(card, info = {}) {
+  const ch = card?._ch;
+  const box = $(".cast-avatar", card);
+  if (!ch || !box) return;
+  const url = castAvatarUrl(ch, info);
+  const fb = ensureCastAvatarFallback(box, ch);
+  let img = $(".cast-avatar-img", box);
+  if (!url) {
+    if (img) img.remove();
+    fb.hidden = false;
+    return;
+  }
+  if (!img) {
+    img = document.createElement("img");
+    img.className = "cast-avatar-img";
+    img.loading = "lazy";
+    img.addEventListener("error", () => {
+      img.remove();
+      fb.hidden = false;
+    });
+    box.insertBefore(img, fb);
+  }
+  img.alt = ch.name || ch.id || "角色";
+  if (img.dataset.src !== url) {
+    img.dataset.src = url;
+    img.src = url;
+    img.style.display = "";
+    fb.hidden = true;
+  }
 }
 
 function isCastEditing() {
@@ -2042,6 +2085,11 @@ function syncCastDisplays(card) {
   });
   const initial = $(".cast-avatar-fallback", card);
   if (initial) initial.textContent = castInitial(ch);
+}
+
+function syncCastCardMedia(card, info = {}) {
+  syncCastDisplays(card);
+  syncCastAvatar(card, info);
 }
 
 function isCastFieldEditing(wrap) {
@@ -2222,8 +2270,9 @@ function castCardHtml(ch, info = {}) {
   const avatar = castAvatarUrl(ch, info);
   const initial = esc(castInitial(ch));
   const name = esc(ch.name || ch.id || "角色");
+  // 头像只在产物清单里有文件时才挂 img；加载失败则退回首字
   const avatarHtml = avatar
-    ? `<img class="cast-avatar-img" src="${esc(avatar)}" alt="${name}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.hidden=false">
+    ? `<img class="cast-avatar-img" src="${esc(avatar)}" data-src="${esc(avatar)}" alt="${name}" loading="lazy" onerror="const box=this.parentElement;const fb=box&&box.querySelector('.cast-avatar-fallback');this.remove();if(fb)fb.hidden=false">
        <span class="cast-avatar-fallback" hidden>${initial}</span>`
     : `<span class="cast-avatar-fallback">${initial}</span>`;
   const idShown = castFieldShown(ch, "id");
@@ -2334,11 +2383,11 @@ function renderFinalMeta(info = {}) {
     if (isCastEditing()) {
       // 编辑中不重建，避免打断输入
     } else if (castEl.dataset.sig === castListSig(chars) && castEl.querySelector(".cast-card")) {
-      // 名单未变：只同步展示文案 / 头像
+      // 名单未变：同步文案；头像按产物清单增删/换 mtime 刷新
       $$(".cast-card", castEl).forEach((card, i) => {
         if (chars[i]) {
           card._ch = chars[i];
-          syncCastDisplays(card);
+          syncCastCardMedia(card, info);
         }
       });
     } else {
@@ -2469,7 +2518,7 @@ async function renderShots() {
   if (seq !== renderShotsSeq) return;
   const portraits = {};
   for (const c of media?.characters || []) {
-    if (c?.id && c?.url) portraits[c.id] = c.url;
+    if (c?.id && c?.url) portraits[c.id] = { url: c.url, mtime: c.mtime };
   }
   const framesById = {};
   for (const f of media?.frames || []) {
