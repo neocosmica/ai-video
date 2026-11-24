@@ -1,28 +1,31 @@
 """项目目录约定：每部短片一个独立文件夹，与它相关的内容都放在这个文件夹里。
 
-    projects/
+    ~/AI短视频项目/
       demo/
         project.json      # 项目元数据（新建时生成）
-        novel.txt         # 小说原文（或 demo_novel.txt 等任何 .txt）
-        storyboard.json   # 分镜（produce 会把外部分镜拷到这里）
+        novel.txt         # 小说原文
+        storyboard.json   # 分镜
         final.mp4         # 成片
-        frames/ clips/ audio/ ...   # 流水线产物
+        work/             # 过程产物：frames/ clips/ audio/ ...
 
-所有项目都放在根目录的 `projects/` 下；旧布局 `input/` + `output/<片名>/`
-仍能读（见 ``legacy_project`` / ``list_projects``），但新项目一律用新布局。
+所有项目默认放在主目录的「AI短视频项目」下（可用 ``NOVEL_VIDEO_PROJECTS`` 覆盖）。
+旧布局 ``ROOT/projects/``、``output/<片名>/`` 仍能读，但新项目一律用主目录布局。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
 from pathlib import Path
 
-from pipeline.util import ROOT
+from pipeline.util import ROOT, resolve
 
+# 对外逻辑前缀（仅兼容旧任务记录）；新写入一律用绝对路径
 PROJECTS_DIRNAME = "projects"
-PROJECTS_DIR = ROOT / PROJECTS_DIRNAME
+PROJECTS_FOLDER_NAME = "AI短视频项目"
 PROJECT_META = "project.json"
 # 过程产物子文件夹：帧、片段、配音、日志、中间合成文件都收进 <项目>/work/
 WORK_DIRNAME = "work"
@@ -42,14 +45,55 @@ def check_name(name: str) -> str:
     return name
 
 
+_MIGRATE_DONE = False
+
+
+def _projects_root() -> Path:
+    override = (os.environ.get("NOVEL_VIDEO_PROJECTS") or "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / PROJECTS_FOLDER_NAME).resolve()
+
+
 def projects_dir() -> Path:
-    """根目录下的项目文件夹 projects/，没有就创建。"""
-    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-    return PROJECTS_DIR
+    """用户项目根目录（默认 ~/AI短视频项目），没有就创建。
+
+    首次访问时把仓库里旧的 ``projects/`` 迁过来（目标已有同名则跳过）。
+    """
+    global _MIGRATE_DONE
+    root = _projects_root()
+    root.mkdir(parents=True, exist_ok=True)
+    if not _MIGRATE_DONE:
+        _MIGRATE_DONE = True
+        try:
+            migrate_repo_projects(source=legacy_repo_projects_dir())
+        except Exception:
+            pass
+    return root
+
+
+def display_path(path: str | Path) -> str:
+    """给人看的路径：主目录缩成 ~。"""
+    p = Path(path).expanduser()
+    try:
+        p = p.resolve()
+    except OSError:
+        p = Path(os.path.abspath(str(p)))
+    home = Path.home().resolve()
+    try:
+        rel = p.relative_to(home)
+        return f"~/{rel.as_posix()}"
+    except ValueError:
+        return p.as_posix()
+
+
+def project_path_str(name: str) -> str:
+    """项目文件夹的绝对路径字符串（接口 / 任务记录用）。"""
+    return str(project_dir(name).resolve())
 
 
 def project_dir(name: str) -> Path:
-    """某个项目的文件夹 projects/<name>/，没有就创建。"""
+    """某个项目的文件夹 <项目根>/<name>/。"""
     return projects_dir() / check_name(name)
 
 
@@ -61,6 +105,11 @@ def storyboard_path(name: str) -> Path:
     return project_dir(name) / "storyboard.json"
 
 
+def legacy_repo_projects_dir() -> Path:
+    """仓库里旧的 projects/（迁移源）。"""
+    return ROOT / PROJECTS_DIRNAME
+
+
 def legacy_project(name: str) -> Path:
     """旧布局的项目目录 output/<name>/（不再新建，仅供兼容读取）。"""
     return ROOT / "output" / check_name(name)
@@ -69,12 +118,11 @@ def legacy_project(name: str) -> Path:
 def artifacts_dir(out: str | Path) -> Path:
     """流水线过程产物的根目录：<out>/work/。
 
-    `out` 可以是绝对路径，也可以是相对仓库根的路径（同 pipeline.util.resolve）。
+    `out` 可以是绝对路径，也可以是相对路径（同 pipeline.util.resolve）。
     项目顶层只保留 novel.txt / storyboard.json / final.mp4 / project.json，
     其余一律进 work/。
     """
-    base = Path(out) if Path(out).is_absolute() else ROOT / out
-    return base / WORK_DIRNAME
+    return resolve(out) / WORK_DIRNAME
 
 
 def artifacts_sub(out: str | Path, *parts: str) -> Path:
@@ -117,8 +165,6 @@ def _rm_path(path: Path, removed: list[str], root: Path) -> None:
     except ValueError:
         rel = str(path)
     if path.is_dir():
-        import shutil
-
         shutil.rmtree(path)
     else:
         path.unlink()
@@ -149,7 +195,7 @@ def clear_artifacts(
     不删除：novel.txt、storyboard.json、project.json、work/webui/（任务历史）。
     ``only`` 有值时只清这些镜头 id 对应的帧/音/视频文件。
     """
-    base = Path(out) if Path(out).is_absolute() else ROOT / out
+    base = resolve(out)
     work = artifacts_dir(base)
     removed: list[str] = []
     only_ids = _parse_only_ids(only)
@@ -250,21 +296,15 @@ def write_meta(directory: Path, **fields) -> None:
 
 
 def _describe(path: Path) -> dict:
-    try:
-        rel = str(path.relative_to(ROOT))
-    except ValueError:
-        rel = str(path)
+    abs_path = str(path.resolve())
     novel = find_novel(path)
-    try:
-        novel_rel = str(novel.relative_to(ROOT)) if novel else ""
-    except ValueError:
-        novel_rel = str(novel) if novel else ""
     return {
         "name": path.name,
-        "path": rel,
+        "path": abs_path,
+        "display_path": display_path(path),
         "has_final": (path / "final.mp4").exists(),
         "has_storyboard": (path / "storyboard.json").exists(),
-        "novel": novel_rel,
+        "novel": str(novel.resolve()) if novel else "",
         "has_work": has_work_dir(path),
     }
 
@@ -285,11 +325,12 @@ def has_work_dir(directory: Path) -> bool:
 
 
 def list_projects() -> list[dict]:
-    """列出全部项目（新布局 projects/<片名>/ 优先，旧布局 output/<片名>/ 兼容列出）。"""
+    """列出全部项目（主目录项目根优先，旧布局 output/<片名>/ 兼容列出）。"""
     items: list[dict] = []
     seen: set[str] = set()
-    if PROJECTS_DIR.is_dir():
-        for path in sorted(PROJECTS_DIR.iterdir()):
+    root = projects_dir()
+    if root.is_dir():
+        for path in sorted(root.iterdir()):
             if path.name.startswith(".") or not path.is_dir():
                 continue
             # 只有产物的同名文件夹：把它当成上层项目的产物目录合并，不单列为一个项目
@@ -300,8 +341,6 @@ def list_projects() -> list[dict]:
                 ]
                 if len(inner) == 1:
                     item = _describe(inner[0])
-                    item["path"] = f"{PROJECTS_DIRNAME}/{path.name}/{inner[0].name}"
-                    item["final_only"] = True
                     items.append(item)
                     seen.add(inner[0].name)
                     continue
@@ -332,23 +371,24 @@ def apply_project_defaults(args: argparse.Namespace) -> None:
     """--project <片名> → 补齐 --out / --novel / --storyboard 的项目文件夹默认值。
 
     规则（显式传参永远优先）：
-    - --out 缺省 → ``projects/<片名>``；传了 --project 而 --out 还是旧默认的
-      ``output/<片名>`` 时，也改到 ``projects/<片名>``；
-    - --novel 缺省 → ``projects/<片名>/novel.txt``（存在才用）；
-    - --storyboard 缺省 → ``projects/<片名>/storyboard.json``（存在才用）。
+    - --out 缺省 → 绝对路径 ``<项目根>/<片名>``；传了 --project 而 --out 还是旧默认的
+      ``output/<片名>`` / ``projects/<片名>`` 时，也改到绝对路径；
+    - --novel 缺省 → ``<项目>/novel.txt``（存在才用）；
+    - --storyboard 缺省 → ``<项目>/storyboard.json``（存在才用）。
     """
     name = getattr(args, "project", None)
     if not name:
         return
     name = check_name(name)
     directory = project_dir(name)
+    abs_out = str(directory.resolve())
     out = getattr(args, "out", None)
-    if not out or out == f"output/{name}":
-        args.out = f"{PROJECTS_DIRNAME}/{name}"
+    if not out or out in {f"output/{name}", f"{PROJECTS_DIRNAME}/{name}"}:
+        args.out = abs_out
     if getattr(args, "novel", None) is None and (directory / "novel.txt").exists():
-        args.novel = f"{PROJECTS_DIRNAME}/{name}/novel.txt"
+        args.novel = str((directory / "novel.txt").resolve())
     if getattr(args, "storyboard", None) is None and (directory / "storyboard.json").exists():
-        args.storyboard = f"{PROJECTS_DIRNAME}/{name}/storyboard.json"
+        args.storyboard = str((directory / "storyboard.json").resolve())
 
 
 def cmd_projects(args: argparse.Namespace) -> None:
@@ -361,10 +401,12 @@ def cmd_projects(args: argparse.Namespace) -> None:
         print(f"  成片跑完后在：{directory / 'final.mp4'}")
         return
     items = list_projects()
+    root = projects_dir()
     if not items:
         print(f"还没有项目。新建一个：./scripts/run.sh projects --new <片名>")
+        print(f"项目根目录：{display_path(root)}")
         return
-    print(f"项目根目录：{PROJECTS_DIR}")
+    print(f"项目根目录：{display_path(root)}")
     for item in items:
         flags = []
         if item.get("novel"):
@@ -375,6 +417,83 @@ def cmd_projects(args: argparse.Namespace) -> None:
             flags.append("成片")
         if item.get("has_work"):
             flags.append("产物")
-        legacy = "（旧布局 output/，建议迁到 projects/）" if item.get("legacy") else ""
-        misplaced = "（产物在嵌套子文件夹，建议拍平到 " + f"{PROJECTS_DIRNAME}/{item['name']}/" + "）" if item.get("final_only") else ""
-        print(f"- {item['name']}：{item['path']}/  [{'、'.join(flags) or '空'}]{legacy}{misplaced}")
+        legacy = "（旧布局 output/，建议迁到主目录项目根）" if item.get("legacy") else ""
+        shown = item.get("display_path") or item["path"]
+        print(f"- {item['name']}：{shown}/  [{'、'.join(flags) or '空'}]{legacy}")
+
+
+# ---------------------------------------------------------------------------
+# 仓库 projects/ → ~/AI短视频项目 迁移
+# ---------------------------------------------------------------------------
+
+_TEXT_REWRITE_SUFFIXES = {".json", ".txt", ".ass", ".log", ".md"}
+
+
+def _rewrite_paths_in_text(text: str, mapping: list[tuple[str, str]]) -> str:
+    """按从长到短替换旧绝对路径 / projects/ 前缀。"""
+    out = text
+    for old, new in mapping:
+        if old and old in out:
+            out = out.replace(old, new)
+    return out
+
+
+def _rewrite_file_paths(path: Path, mapping: list[tuple[str, str]]) -> bool:
+    if path.suffix.lower() not in _TEXT_REWRITE_SUFFIXES:
+        return False
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    new = _rewrite_paths_in_text(raw, mapping)
+    if new == raw:
+        return False
+    path.write_text(new, encoding="utf-8")
+    return True
+
+
+def _build_path_mapping(old_dir: Path, new_dir: Path) -> list[tuple[str, str]]:
+    """生成 (旧, 新) 替换对，长的在前。"""
+    pairs: list[tuple[str, str]] = []
+    old_abs = str(old_dir.resolve())
+    new_abs = str(new_dir.resolve())
+    pairs.append((old_abs, new_abs))
+    # 相对逻辑前缀 projects/<name>
+    rel = f"{PROJECTS_DIRNAME}/{old_dir.name}"
+    pairs.append((rel + "/", new_abs + "/"))
+    pairs.append((rel, new_abs))
+    # 按长度降序，避免短前缀先吃掉长路径
+    pairs.sort(key=lambda x: len(x[0]), reverse=True)
+    return pairs
+
+
+def migrate_repo_projects(*, source: Path | None = None) -> list[str]:
+    """把仓库 ``projects/`` 下的项目移到主目录项目根，并改写路径字符串。
+
+    目标已有同名文件夹则跳过。返回已迁移的项目名列表。
+    """
+    global _MIGRATE_DONE
+    src_root = source or legacy_repo_projects_dir()
+    if not src_root.is_dir():
+        _MIGRATE_DONE = True
+        return []
+    dest_root = _projects_root()
+    dest_root.mkdir(parents=True, exist_ok=True)
+    moved: list[str] = []
+    for child in sorted(src_root.iterdir()):
+        if child.name.startswith(".") or not child.is_dir():
+            continue
+        if child.name == "webui":
+            continue
+        dest = dest_root / child.name
+        if dest.exists():
+            continue
+        mapping = _build_path_mapping(child, dest)
+        shutil.move(str(child), str(dest))
+        # 改写迁过去之后的文本文件
+        for path in dest.rglob("*"):
+            if path.is_file():
+                _rewrite_file_paths(path, mapping)
+        moved.append(child.name)
+    _MIGRATE_DONE = True
+    return moved

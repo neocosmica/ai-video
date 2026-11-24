@@ -21,7 +21,7 @@ alwaysApply: true
 ./scripts/run.sh budget --project scifi
 ```
 
-1. 小说放 `projects/<片名>/novel.txt`。分镜可由管线生成：
+1. 小说放 `~/AI短视频项目/<片名>/novel.txt`（首次启动会从仓库旧 `projects/` 迁过去）。分镜可由管线生成：
 
 ```bash
 ./scripts/run.sh storyboard --project scifi

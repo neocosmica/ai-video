@@ -4,26 +4,26 @@
 
 ## 怎么用
 
-1. 双击仓库根目录的 **`AI短视频.app`**（可拖到程序坞 / 桌面）。
+1. 在仓库里跑一次 `./scripts/macos/pack-app.sh`，再双击 **`AI短视频.app`**（可拖到程序坞 /「应用程序」；不必再放在仓库旁）。
 2. 首次打开会在「选择项目」页自动检查并安装依赖、下载模型（进度条）；插电、保持网络畅通（默认国内镜像）。
-3. 装好后选项目或新建 → 粘贴小说 → 生成/改分镜 → 勾选阶段 → 点「启动任务」。
-4. 菜单栏图标可打开网页、复制地址、退出；成片在对应项目文件夹的 `final.mp4`。
+3. 装好后选项目或新建 → 粘贴小说 → 生成/改分镜 → 勾选阶段 → 点「启动任务」。项目在 `~/AI短视频项目/`。
+4. 菜单栏图标可打开网页、复制地址、退出；生成中会显示实时进度%，打开网页会锁定进正在生成的项目；成片在对应项目文件夹的 `final.mp4`。
 
-须在本机已准备好的同一台 Mac 上使用。异常时可在页面点重试安装。
+须在本机已准备好的同一台 Mac 上使用。异常时可在页面点重试安装。更新源码后重新跑 `pack-app.sh` 以刷新 App 内副本。
 
 ## 项目怎么放
 
-每个项目一个文件夹，全部在 `projects/` 下；顶层只放源与成片，过程产物进 `work/`：
+每个项目一个文件夹，默认全部在主目录的 **`~/AI短视频项目/`** 下（可用环境变量 `NOVEL_VIDEO_PROJECTS` 改）；顶层只放源与成片，过程产物进 `work/`：
 
 ```
-projects/<片名>/
+~/AI短视频项目/<片名>/
   novel.txt
   storyboard.json
   final.mp4
   work/          # frames/ clips/ audio/ logs/ ...
 ```
 
-网页里新建项目即可；小说、分镜、任务历史、镜头产物都跟该项目走（任务历史在 `work/webui/state.json`）。
+网页里新建项目即可；小说、分镜、任务历史、镜头产物都跟该项目走（任务历史在 `work/webui/state.json`）。首次启动会把仓库里旧的 `projects/` 迁到这里。
 
 ## 页面流程
 
@@ -113,11 +113,13 @@ chmod +x scripts/setup.sh scripts/run.sh scripts/env.sh
 ./scripts/run.sh web --port 8790
 NOVEL_VIDEO_NO_MENUBAR=1 ./scripts/run.sh
 
-./scripts/run.sh projects --new <片名>
+./scripts/run.sh projects --new <片名>   # 建在 ~/AI短视频项目/<片名>/
 ./scripts/run.sh budget --project <片名>
 ./scripts/run.sh storyboard --project <片名>
 ./scripts/run.sh screenplay --strict --project <片名>
 ./scripts/run.sh produce --project <片名>
+./scripts/macos/pack-app.sh              # 把运行依赖打进 AI短视频.app
+./scripts/macos/make-dmg.sh              # 生成 dist/AI短视频.dmg（拖进应用程序）
 ```
 
 `produce` 串跑：`storyboard → screenplay → images → audio → videos → music → assemble`。已有分镜默认不覆盖，重写加 `--force`。

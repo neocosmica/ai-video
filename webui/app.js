@@ -17,7 +17,7 @@ const STAGE_LABELS = {
 };
 
 const state = {
-  project: "", // 当前打开的项目名（projects/<片名> 的 <片名>）
+  project: "", // 当前打开的项目名（~/AI短视频项目/<片名> 的文件夹名）
   tasks: [], // 历史任务（点一次启动算一条）
   queue: { items: [], updated_at: 0 }, // 左边待跑队列
   projects: [],
@@ -211,6 +211,12 @@ async function refreshState() {
   }
 }
 
+/** 刷新后若有生成任务则锁定进对应项目（勿嵌进 refreshState，以免 openProject 二次刷新被跳过） */
+async function refreshStateAndLock() {
+  await refreshState();
+  await ensureLockedOnGeneratingProject();
+}
+
 // 连接灯：已连接立刻亮；未连接延迟确认，避免 SSE 重连/瞬时请求失败高频闪
 let connShown = null; // null | true | false
 let connOffTimer = null;
@@ -270,7 +276,7 @@ function renderProjects() {
     const active = p.name === state.project ? " active" : "";
     return `<div class="project-card${active}" data-name="${esc(p.name)}" data-path="${esc(p.path)}">
       <div class="p-name">${esc(p.name)}${p.legacy ? ' <span class="hint">（旧布局）</span>' : ""}</div>
-      <div class="p-meta hint mono">${esc(p.path)}/</div>
+      <div class="p-meta hint mono">${esc(p.display_path || p.path)}/</div>
       <div class="p-badges">${badges || '<span class="hint">空项目</span>'}</div>
       <div class="p-stat">${stat}</div>
     </div>`;
@@ -388,14 +394,52 @@ function renderSetupBanner(st) {
   if (actions) actions.hidden = !failed;
 }
 
+function projectFromQuery() {
+  try {
+    return (new URLSearchParams(location.search).get("project") || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function findRunningProject() {
+  return (state.projects || []).find((p) => (p.tasks || {}).running > 0) || null;
+}
+
+/** 生成中锁定到该项目；否则可按 ?project= / 上次项目进入 */
+let lockProjectInFlight = false;
+
+async function ensureLockedOnGeneratingProject() {
+  if (lockProjectInFlight) return !!state.project && !!findRunningProject();
+  if (setupBusy() || state.setup?.status === "failed" || !state.setup?.ready) return false;
+  const running = findRunningProject();
+  if (!running) return false;
+  if (state.project === running.name) {
+    const runTask = (state.tasks || []).find((t) => t.status === "running");
+    if (runTask && state.selectedTaskId !== runTask.id) selectTask(runTask.id);
+    return true;
+  }
+  lockProjectInFlight = true;
+  try {
+    await openProject(running.name, running.path);
+    return state.project === running.name;
+  } finally {
+    lockProjectInFlight = false;
+  }
+}
+
 async function maybeOpenLastProjectAfterSetup() {
   if (!state.setup?.ready || state.project) return;
   if (!$("#project-picker") || $("#project-picker").hidden) return;
   await refreshState();
-  const runningProj = (state.projects || []).find((p) => (p.tasks || {}).running > 0);
+  const locked = await ensureLockedOnGeneratingProject();
+  if (locked || state.project) return;
+  const fromQuery = projectFromQuery();
   let last = "";
   try { last = localStorage.getItem("nv_last_project") || ""; } catch {}
-  const target = runningProj || (state.projects || []).find((p) => p.name === last);
+  const target =
+    (fromQuery && (state.projects || []).find((p) => p.name === fromQuery)) ||
+    (state.projects || []).find((p) => p.name === last);
   if (target) await openProject(target.name, target.path);
 }
 
@@ -505,7 +549,11 @@ async function openProject(name, path, { autoSelectRunning = true } = {}) {
     return;
   }
   state.project = name;
-  state.currentOut = path || `projects/${name}`;
+  state.currentOut = path || "";
+  if (!state.currentOut) {
+    toast("缺少项目路径");
+    return;
+  }
   state.currentStoryboard = projectStoryboardPath(state.currentOut);
   state.selectedTaskId = null;
   state.logOffset = 0;
@@ -556,6 +604,12 @@ async function openProject(name, path, { autoSelectRunning = true } = {}) {
 }
 
 function backToProjects() {
+  const running = findRunningProject();
+  if (running) {
+    toast(`「${running.name}」正在生成，已锁定在项目页`);
+    if (state.project !== running.name) ensureLockedOnGeneratingProject();
+    return;
+  }
   state.project = "";
   state.selectedTaskId = null;
   state.shotSb = null;
@@ -3445,7 +3499,8 @@ async function renderShots() {
   const out = state.currentOut;
   if (!out || !state.project) return;
   const seq = ++renderShotsSeq;
-  $("#shots-out-label").textContent = out;
+  const shown = (state.projects.find((p) => p.name === state.project) || {}).display_path || out;
+  $("#shots-out-label").textContent = shown;
   // 换了输出目录：旧卡片全部清掉，避免闪现上一个片的产物
   if (out !== shotsLastOut) {
     clearShotCards();
@@ -3455,7 +3510,7 @@ async function renderShots() {
   // 1) 拉产物清单
   let media = null;
   try {
-    // 只编码非路径分隔符，后端 safe_path 接受 projects/xxx 形式
+    // 只编码非路径分隔符，保留 /；绝对路径也可
     media = await api(`/api/media?out=${out.split("/").map(encodeURIComponent).join("/")}`);
     mediaCache = media;
   } catch (err) {
@@ -3711,6 +3766,48 @@ function closeRerunDialog() {
   rerunPlan = null;
 }
 
+function rerunPostChecks() {
+  return $$("#rerun-posts input[type=checkbox]");
+}
+
+function syncRerunItemMeta(input) {
+  const meta = input.closest(".rerun-item")?.querySelector(".ri-meta");
+  if (!meta) return;
+  const on = input.checked;
+  meta.textContent = on ? "勾选 · 将重做" : "未勾选 · 将过时";
+  meta.classList.toggle("stale", !on);
+}
+
+/** 后置总复选框：全选为勾上（文案「全不选」），部分勾为半选，一个都没勾则「全选」。 */
+function syncRerunPostsAll() {
+  const box = $("#rerun-posts-all");
+  const wrap = $("#rerun-posts-all-wrap");
+  const text = $("#rerun-posts-all-text");
+  if (!box || !wrap) return;
+  const inputs = rerunPostChecks();
+  if (!inputs.length) {
+    wrap.hidden = true;
+    box.checked = false;
+    box.indeterminate = false;
+    if (text) text.textContent = "全选";
+    return;
+  }
+  wrap.hidden = false;
+  const n = inputs.filter((el) => el.checked).length;
+  const all = n === inputs.length;
+  box.checked = all;
+  box.indeterminate = n > 0 && !all;
+  if (text) text.textContent = all ? "全不选" : "全选";
+}
+
+function setAllRerunPosts(on) {
+  rerunPostChecks().forEach((input) => {
+    input.checked = on;
+    syncRerunItemMeta(input);
+  });
+  syncRerunPostsAll();
+}
+
 function renderRerunItem(node, { required = false, target = false, checked = false } = {}) {
   const id = `rerun-${node.kind}-${node.id || "x"}`;
   const meta = target
@@ -3748,6 +3845,7 @@ async function openRerunDialog(target) {
   $("#rerun-prereqs").innerHTML = "";
   $("#rerun-target").innerHTML = "";
   $("#rerun-posts").innerHTML = "";
+  syncRerunPostsAll();
   dlg.showModal();
   try {
     const plan = await api("/api/artifact/plan", {
@@ -3777,17 +3875,15 @@ async function openRerunDialog(target) {
       postWrap.innerHTML = `<div class="rerun-empty">无后置影响</div>`;
     } else {
       postWrap.innerHTML = plan.posts
-        .map((p) => renderRerunItem(p, { checked: true }))
+        .map((p) => renderRerunItem(p, { checked: p.suggested !== false }))
         .join("");
       postWrap.querySelectorAll("input[type=checkbox]").forEach((input) => {
         input.addEventListener("change", () => {
-          const meta = input.closest(".rerun-item")?.querySelector(".ri-meta");
-          if (meta) {
-            meta.textContent = input.checked ? "勾选 · 将重做" : "未勾选 · 将过时";
-            meta.classList.toggle("stale", !input.checked);
-          }
+          syncRerunItemMeta(input);
+          syncRerunPostsAll();
         });
       });
+      syncRerunPostsAll();
     }
     okBtn.disabled = false;
   } catch (err) {
@@ -3856,7 +3952,7 @@ function connectEvents() {
       if (sseRefreshTimer) return;
       sseRefreshTimer = setTimeout(() => {
         sseRefreshTimer = null;
-        refreshState();
+        refreshStateAndLock();
       }, 1500);
     } catch {}
   };
@@ -3934,6 +4030,13 @@ function bind() {
   bindMusicPlayer();
   $("#music-rerun")?.addEventListener("click", () => openRerunDialog({ kind: "music", id: "" }));
   $("#final-rerun")?.addEventListener("click", () => openRerunDialog({ kind: "final", id: "" }));
+  $("#rerun-posts-all")?.addEventListener("click", () => {
+    const inputs = rerunPostChecks();
+    const next = !(inputs.length > 0 && inputs.every((el) => el.checked));
+    // 原生切换在 click 的默认动作里发生，可能盖掉同步写入的 checked。
+    // 等这次点击结束后再按「是否已经全选」写入最终状态。
+    setTimeout(() => setAllRerunPosts(next), 0);
+  });
   $("#rerun-form")?.addEventListener("submit", (ev) => {
     const submitter = ev.submitter;
     const value = submitter?.value || "cancel";
@@ -3964,19 +4067,20 @@ bind();
 renderStagePicks();
 loadBudget();
 connectEvents();
-setInterval(refreshState, 4000);
+setInterval(refreshStateAndLock, 4000);
 
 (async function boot() {
   const setup = await refreshSetup();
   await refreshState();
   // 依赖未齐时停在项目选择页，展示安装进度
   if (!setup?.ready) return;
-  // 有运行中的项目优先打开；否则恢复上次打开的项目
-  const runningProj = (state.projects || []).find((p) => (p.tasks || {}).running > 0);
+  // 生成中 → 锁定进该项目；否则 ?project= / 上次项目
+  if (await ensureLockedOnGeneratingProject()) return;
+  const fromQuery = projectFromQuery();
   let last = "";
   try { last = localStorage.getItem("nv_last_project") || ""; } catch {}
-  const target = runningProj || (state.projects || []).find((p) => p.name === last);
-  if (target) {
-    await openProject(target.name, target.path);
-  }
+  const target =
+    (fromQuery && (state.projects || []).find((p) => p.name === fromQuery)) ||
+    (state.projects || []).find((p) => p.name === last);
+  if (target) await openProject(target.name, target.path);
 })();

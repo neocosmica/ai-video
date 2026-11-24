@@ -467,8 +467,11 @@ def cmd_selftest(_: argparse.Namespace) -> None:
 
     assert resolve_snapshot("") is None
     assert (ROOT / "scripts" / "apply_ltx_gemma_patch.py").exists(), "缺少 LTX 补丁脚本"
-    assert (ROOT / "projects" / "demo" / "storyboard.json").exists(), "缺少演示分镜"
-    assert (ROOT / "projects" / "demo" / "novel.txt").exists(), "缺少演示小说"
+    from pipeline.projects import project_dir, projects_dir
+
+    demo_dir = project_dir("demo")
+    assert (demo_dir / "storyboard.json").exists(), f"缺少演示分镜：{demo_dir}"
+    assert (demo_dir / "novel.txt").exists(), f"缺少演示小说：{demo_dir}"
     from pipeline.run import STAGES, install_storyboard
     from pipeline.util import frames_for_duration
 
@@ -556,9 +559,9 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     # 进度引擎：权重和、步内上升、过期 leave 不压下一镜
     from pipeline.progress_model import STAGE_WEIGHTS, ProgressEngine, build_plan
 
-    demo_steps = build_plan(ROOT / "projects" / "demo")
+    demo_steps = build_plan(demo_dir)
     assert abs(sum(s["weight"] for s in demo_steps) - sum(STAGE_WEIGHTS.values())) < 1e-3
-    eng = ProgressEngine(str(ROOT / "projects" / "demo"), task_id="selftest")
+    eng = ProgressEngine(str(demo_dir), task_id="selftest")
     eng.feed_line("分镜静帧 s001")
     eng.feed_line("静帧 s001:  50%|████| 2/4 [00:20<00:20, 10s/it]")
     snap1 = eng.snapshot()
@@ -580,10 +583,10 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     eng.feed_line("混音成片")
     mux = next(s for s in eng.snapshot()["steps"] if s["id"] == "assemble:mux")
     assert mux["status"] == "running", mux
-    eng.feed_line("成片：projects/demo/final.mp4，约 1.0 秒")
+    eng.feed_line(f"成片：{demo_dir}/final.mp4，约 1.0 秒")
     mux = next(s for s in eng.snapshot()["steps"] if s["id"] == "assemble:mux")
     assert mux["status"] == "done" and mux["pct"] == 100.0, mux
-    eng2 = ProgressEngine(str(ROOT / "projects" / "demo"), task_id="selftest-finalize")
+    eng2 = ProgressEngine(str(demo_dir), task_id="selftest-finalize")
     eng2.feed_line("整理 s001")
     eng2.finalize(success=True)
     left = [s for s in eng2.snapshot()["steps"] if s["status"] == "pending"]
@@ -592,7 +595,7 @@ def cmd_selftest(_: argparse.Namespace) -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         dest = Path(tmp) / "storyboard.json"
-        install_storyboard(tmp, str(ROOT / "projects" / "demo" / "storyboard.json"))
+        install_storyboard(tmp, str(demo_dir / "storyboard.json"))
         assert dest.exists(), "produce 应能把分镜拷进输出目录"
 
     # 项目文件夹约定：--project 补默认路径、命名守卫、清单与 novel 猜测
@@ -604,16 +607,18 @@ def cmd_selftest(_: argparse.Namespace) -> None:
         has_work_dir,
         list_projects,
         novel_candidates,
+        project_path_str,
     )
 
+    abs_demo = project_path_str("demo")
     ns = argparse.Namespace(project="demo", out=None, novel=None, storyboard=None)
     apply_project_defaults(ns)
-    assert ns.out == "projects/demo", ns.out
-    assert ns.novel == "projects/demo/novel.txt", ns.novel
-    assert ns.storyboard == "projects/demo/storyboard.json", ns.storyboard
+    assert ns.out == abs_demo, ns.out
+    assert ns.novel == str((demo_dir / "novel.txt").resolve()), ns.novel
+    assert ns.storyboard == str((demo_dir / "storyboard.json").resolve()), ns.storyboard
     ns2 = argparse.Namespace(project="demo", out="output/demo", novel=None, storyboard=None)
     apply_project_defaults(ns2)
-    assert ns2.out == "projects/demo", ns2.out
+    assert ns2.out == abs_demo, ns2.out
     ns3 = argparse.Namespace(project="demo", out="somewhere/else", novel=None, storyboard=None)
     apply_project_defaults(ns3)
     assert ns3.out == "somewhere/else", ns3.out
@@ -621,7 +626,6 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     assert artifacts_dir("projects/x").name == "work", artifacts_dir("projects/x")
     assert artifacts_sub("projects/x", "audio", "voice") == artifacts_dir("projects/x") / "audio" / "voice"
     assert artifacts_dir(Path("/abs/out")) == Path("/abs/out/work")
-    demo_dir = ROOT / "projects" / "demo"
     assert (demo_dir / "novel.txt").exists() and (demo_dir / "storyboard.json").exists()
     assert (demo_dir / "final.mp4").exists()
     assert has_work_dir(demo_dir), "demo 项目应有 work/ 过程产物目录"
@@ -637,6 +641,7 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     assert cands and cands[0] == demo_dir / "novel.txt", cands
     names = {item["name"] for item in list_projects()}
     assert "demo" in names and "scifi" in names, names
+    assert projects_dir().name == "AI短视频项目" or "NOVEL_VIDEO_PROJECTS" in __import__("os").environ
     for label, path in (
         ("main", main_venv_path()),
         ("ltx", ltx_venv_path()),
@@ -672,9 +677,9 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument(
             "--project",
             default=None,
-            help="项目名：等价于 --out projects/<名>，novel/storyboard 也默认取该项目文件夹",
+            help="项目名：等价于 --out ~/AI短视频项目/<名>，novel/storyboard 也默认取该项目文件夹",
         )
-        p.add_argument("--out", default=None, help="这一部片子的输出目录（默认 projects/<片名>）")
+        p.add_argument("--out", default=None, help="这一部片子的输出目录（默认 ~/AI短视频项目/<片名>）")
         p.add_argument("--force", action="store_true", help="重做已有的分镜、静帧和镜头")
         if novel:
             p.add_argument("--novel", default=None, help="小说路径（默认 <项目文件夹>/novel.txt）")
@@ -769,15 +774,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="按本机总内存查 token 预算表，现算单镜最长帧数 / 台词额度（不加载模型）",
     )
     budget.add_argument("--config", default=None, help="配置文件，默认项目里的 config.json")
-    budget.add_argument("--project", default=None, help="项目名：打印 projects/<片名> 供后续 produce 使用")
+    budget.add_argument("--project", default=None, help="项目名：打印 ~/AI短视频项目/<片名> 供后续 produce 使用")
     budget.add_argument("--out", default=None, help="片子输出目录（可选，仅打印路径）")
     budget.set_defaults(func=cmd_budget)
 
     projects = sub.add_parser(
         "projects",
-        help="列出 projects/ 下的全部项目（--new 新建一个项目文件夹）",
+        help="列出 ~/AI短视频项目/ 下的全部项目（--new 新建一个项目文件夹）",
     )
-    projects.add_argument("--new", default=None, help="新建项目文件夹 projects/<片名>/")
+    projects.add_argument("--new", default=None, help="新建项目文件夹 ~/AI短视频项目/<片名>/")
     projects.add_argument("--title", default=None, help="项目标题（写进 project.json）")
     projects.set_defaults(func=cmd_projects)
 

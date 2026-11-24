@@ -6,16 +6,37 @@ HOST="127.0.0.1"
 PORT="8790"
 URL="http://${HOST}:${PORT}/"
 
-# Contents/MacOS → Contents → .app → 仓库根
-ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+APP_CONTENTS="$(cd "$(dirname "$0")/.." && pwd)"
+APP_BUNDLE="$(cd "$APP_CONTENTS/.." && pwd)"
+PACKED_ROOT="$APP_CONTENTS/Resources/runtime"
+
+# 优先包内 runtime；未打包时回退到仓库根（App 仍在仓库旁）
+if [[ -x "$PACKED_ROOT/scripts/run.sh" ]]; then
+  ROOT="$PACKED_ROOT"
+else
+  ROOT="$(cd "$APP_BUNDLE/.." && pwd)"
+fi
 cd "$ROOT"
 
-LOG_DIR="$ROOT/webui"
-LOG="$LOG_DIR/server.log"
-PID_FILE="$LOG_DIR/server.pid"
+SUPPORT="$HOME/Library/Application Support/AI短视频"
+mkdir -p "$SUPPORT"
+LOG="$SUPPORT/server.log"
+PID_FILE="$SUPPORT/server.pid"
 
 ready() {
   curl -fsS --max-time 1 "$URL" >/dev/null 2>&1
+}
+
+# 生成中则带 ?project=，前端会锁定进该项目页
+open_console() {
+  local proj=""
+  proj="$(curl -fsS --max-time 1 "http://${HOST}:${PORT}/api/menubar" 2>/dev/null \
+    | /usr/bin/python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("project") or "")' 2>/dev/null || true)"
+  if [[ -n "$proj" ]]; then
+    open "${URL}?project=$(printf '%s' "$proj" | /usr/bin/python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip()))')"
+  else
+    open "$URL"
+  fi
 }
 
 alert() {
@@ -40,7 +61,7 @@ pid_alive() {
 }
 
 if [[ ! -x "$ROOT/scripts/run.sh" ]]; then
-  alert "打不开 AI短视频" "找不到可执行的 scripts/run.sh。请确认「AI短视频.app」仍在仓库根目录。"
+  alert "打不开 AI短视频" "找不到可执行的 scripts/run.sh。请先在仓库里跑 scripts/macos/pack-app.sh，或把 App 放回仓库根目录。"
   exit 1
 fi
 
@@ -51,12 +72,11 @@ if [[ ! -x "$HELPER" && -x "$ROOT/scripts/macos/build-menubar-helper.sh" ]]; the
 fi
 
 if ready; then
-  open "$URL"
+  open_console
   notify "AI短视频" "控制台已在运行，已打开网页"
   exit 0
 fi
 
-mkdir -p "$LOG_DIR"
 # 清掉失效 pid 记录
 if [[ -f "$PID_FILE" ]]; then
   old="$(cat "$PID_FILE" 2>/dev/null || true)"
@@ -65,13 +85,13 @@ if [[ -f "$PID_FILE" ]]; then
   fi
 fi
 
-# 后台起服务（菜单栏「退出」会停掉该进程）；日志进 webui/server.log
+# 后台起服务（菜单栏「退出」会停掉该进程）；日志进 Application Support
 nohup "$ROOT/scripts/run.sh" --host "$HOST" --port "$PORT" >>"$LOG" 2>&1 &
 echo $! >"$PID_FILE"
 
 for _ in {1..90}; do
   if ready; then
-    open "$URL"
+    open_console
     notify "AI短视频" "控制台已启动（菜单栏可打开网页 / 退出）"
     exit 0
   fi

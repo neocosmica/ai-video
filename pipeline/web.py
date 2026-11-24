@@ -6,10 +6,10 @@
     ./scripts/run.sh --port 8790              # 浏览器打开 http://127.0.0.1:8790
 
 职责边界：小说可经本机 MLX 聊天模型写成分镜（storyboard 阶段）；也可手写/
-Agent 维护 `projects/<片名>/storyboard.json`。本界面负责填小说、改分镜、起任务、
+Agent 维护项目文件夹里的 `storyboard.json`。本界面负责填小说、改分镜、起任务、
 看实时进度、对失败步骤单独重跑。
 
-每个项目一个独立文件夹 `projects/<片名>/`（小说、分镜、产物都在里面）；
+每个项目一个独立文件夹，默认在 ``~/AI短视频项目/<片名>/``（小说、分镜、产物都在里面）；
 任务历史也属于项目：写在 `<项目>/work/webui/state.json`，重启服务不丢，
 打开网页第一步是选项目，之后看到的任务、镜头产物都是这个项目的。
 """
@@ -43,10 +43,14 @@ from pipeline.projects import (
     PROJECTS_DIRNAME,
     artifacts_dir,
     artifacts_sub,
+    display_path,
+    migrate_repo_projects,
     novel_candidates,
     project_dir,
+    project_path_str,
+    projects_dir,
 )
-from pipeline.util import ROOT, resolve
+from pipeline.util import ROOT, resolve, under_allowed_root
 
 WEB_DIR = ROOT / "webui"
 # 任务历史跟项目走：<项目>/work/webui/state.json；历史任务是只读快照，
@@ -507,7 +511,11 @@ _QUEUE_ARMED: set[str] = set()
 
 
 def _norm_out(out: str) -> str:
-    return (out or "").replace("\\", "/").strip("/")
+    """队列 armed 集合用的规范化路径（保留绝对路径前导 /）。"""
+    text = (out or "").replace("\\", "/")
+    if text.startswith("/"):
+        return text.rstrip("/") or "/"
+    return text.strip("/")
 
 
 def arm_queue(out: str) -> None:
@@ -534,6 +542,55 @@ def notify_change() -> None:
             pass
 
 
+_ACTIVE_ATTACH_AT = 0.0
+
+
+def active_run_info() -> dict:
+    """菜单栏 / 打开网页用：当前是否有生成任务、总进度%、所属项目。
+
+    多任务在跑时取最近启动的一条。
+    """
+    global _ACTIVE_ATTACH_AT
+    now = time.time()
+    # 轻量轮询别每次全盘挂载；隔几秒补一次外部 produce
+    if now - _ACTIVE_ATTACH_AT >= 3.0:
+        _ACTIVE_ATTACH_AT = now
+        try:
+            attach_external_jobs(None)
+        except Exception:
+            pass
+    with _LOCK:
+        running = [j for j in _JOBS.values() if j.status == "running"]
+    if not running:
+        return {
+            "running": False,
+            "pct": None,
+            "project": None,
+            "out": None,
+            "task_id": None,
+            "current": None,
+            "detail": None,
+        }
+    running.sort(key=lambda j: float(getattr(j, "started_at", None) or getattr(j, "created_at", 0) or 0), reverse=True)
+    job = running[0]
+    snap = job.snapshot()
+    prog = snap.get("progress") or {}
+    try:
+        pct = float(prog.get("overall_pct") if prog.get("overall_pct") is not None else 0.0)
+    except (TypeError, ValueError):
+        pct = 0.0
+    pct = max(0.0, min(100.0, pct))
+    return {
+        "running": True,
+        "pct": round(pct, 1),
+        "project": project_of_job(job) or None,
+        "out": snap.get("out") or job_out(job) or None,
+        "task_id": snap.get("id"),
+        "current": prog.get("current") or snap.get("current_stage"),
+        "detail": snap.get("detail") or snap.get("name"),
+    }
+
+
 def state_path_for(out: str) -> Path:
     """某个项目的任务历史文件：<项目>/work/webui/state.json。"""
     return artifacts_dir(out) / STATE_DIRNAME / STATE_FILENAME
@@ -545,18 +602,18 @@ def job_out(job: Job) -> str:
 
 
 def project_of_job(job: Job) -> str:
-    """任务归属的项目名（projects/<片名> 的 <片名>；旧布局任务取相对路径）。"""
-    out = job_out(job).replace("\\", "/").strip("/")
-    if out == f"{PROJECTS_DIRNAME}/{STATE_DIRNAME}":
+    """任务归属的项目名（文件夹名；旧相对路径 / 绝对路径都能认）。"""
+    from pipeline.live import project_name_from_out
+
+    out = job_out(job).replace("\\", "/").strip()
+    if out in {f"{PROJECTS_DIRNAME}/{STATE_DIRNAME}", STATE_DIRNAME}:
         return ""  # 旧的全局历史不挂到任何项目下
-    if out.startswith(f"{PROJECTS_DIRNAME}/"):
-        return out[len(PROJECTS_DIRNAME) + 1:].split("/")[0]
-    return out
+    return project_name_from_out(out)
 
 
 def jobs_for_project(name: str) -> list[Job]:
     """某个项目名下的任务（内存里的；新任务启动后项目文件夹一定存在）。"""
-    prefix = f"{PROJECTS_DIRNAME}/{name}"
+    abs_out = project_path_str(name) if name else ""
     with _LOCK:
         jobs = sorted(_JOBS.values(), key=lambda j: j.created_at, reverse=True)
     if not name:
@@ -564,8 +621,9 @@ def jobs_for_project(name: str) -> list[Job]:
     return [
         j for j in jobs
         if project_of_job(j) == name
-        # 旧布局 output/<片名> 的任务与同名新布局项目互认
-        or (j.out == f"output/{name}")
+        # 旧布局 output/<片名> / projects/<片名> 与同名新布局项目互认
+        or (j.out in {f"output/{name}", f"{PROJECTS_DIRNAME}/{name}", abs_out})
+        or resolve(j.out or "") == Path(abs_out)
     ]
 
 
@@ -582,7 +640,8 @@ def jobs_outside_projects() -> list[Job]:
     known.add(STATE_DIRNAME)
     return [
         j for j in jobs
-        if not project_of_job(j) and j.out != f"{PROJECTS_DIRNAME}/{STATE_DIRNAME}"
+        if not project_of_job(j)
+        and j.out not in {f"{PROJECTS_DIRNAME}/{STATE_DIRNAME}", STATE_DIRNAME}
         and Path(j.out or "").name not in known
     ]
 
@@ -789,7 +848,7 @@ def load_project_tasks(name: str) -> list[Job]:
     """
     from pipeline.live import pid_alive
 
-    path = state_path_for(f"{PROJECTS_DIRNAME}/{name}")
+    path = state_path_for(project_path_str(name))
     restored: list[Job] = []
     dirty = False
     if path.exists():
@@ -914,17 +973,17 @@ def attach_external_jobs(name: str | None = None) -> list[Job]:
 
     # live.json：进程扫描不到时也能靠文件发现（刚写完、或 ps 权限问题）
     outs: set[str] = set(by_out)
-    projects_root = ROOT / PROJECTS_DIRNAME
+    projects_root = projects_dir()
     if projects_root.is_dir():
         for child in projects_root.iterdir():
-            if not child.is_dir():
+            if not child.is_dir() or child.name.startswith("."):
                 continue
             if name and child.name != name:
                 continue
-            rel = f"{PROJECTS_DIRNAME}/{child.name}"
-            live = read_live(rel)
+            abs_out = str(child.resolve())
+            live = read_live(abs_out)
             if live and (live.get("status") == "running" or pid_alive(live.get("pid"))):
-                outs.add(rel)
+                outs.add(abs_out)
 
     for out in outs:
         proj = project_name_from_out(out)
@@ -1487,24 +1546,30 @@ def create_project_api(data: dict) -> dict:
         raise ValueError("项目名不能为空")
     title = str(data.get("title") or "").strip()
     directory = create_project(name, title=title)
+    abs_dir = str(directory.resolve())
     return {
         "name": directory.name,
-        "path": f"{PROJECTS_DIRNAME}/{directory.name}",
-        "novel": f"{PROJECTS_DIRNAME}/{directory.name}/novel.txt",
-        "storyboard": f"{PROJECTS_DIRNAME}/{directory.name}/storyboard.json",
+        "path": abs_dir,
+        "display_path": display_path(directory),
+        "novel": str((directory / "novel.txt").resolve()),
+        "storyboard": str((directory / "storyboard.json").resolve()),
     }
 
 
-_SAFE_PATH = re.compile(r"^[\w\-./\u4e00-\u9fff]+$")
+_SAFE_PATH = re.compile(r"^[\w\-./\u4e00-\u9fff~]+$")
 
 
 def safe_path(rel: str) -> Path:
+    """解析媒体/文本路径：允许运行根、用户项目根；兼容旧 projects/ 前缀。"""
     rel = (rel or "").strip().replace("\\", "/")
     if not rel or not _SAFE_PATH.match(rel):
         raise ValueError(f"不接受的路径：{rel!r}")
-    path = (ROOT / rel).resolve()
-    root = ROOT.resolve()
-    if root != path and root not in path.parents:
+    # 允许 ~/…
+    if rel.startswith("~/"):
+        path = Path(rel).expanduser().resolve()
+    else:
+        path = resolve(rel)
+    if not under_allowed_root(path):
         raise ValueError(f"路径越界：{rel}")
     return path
 
@@ -1651,8 +1716,11 @@ def validate_storyboard(
                 break
         if novel_path is None and src is not None:
             stem = strip_storyboard_suffix(src.stem)
-            for cand_name in (f"{PROJECTS_DIRNAME}/{stem}/novel.txt", f"input/{stem}_novel.txt", f"input/{stem}.txt"):
-                cand = ROOT / cand_name
+            for cand in (
+                project_dir(stem) / "novel.txt",
+                ROOT / f"input/{stem}_novel.txt",
+                ROOT / f"input/{stem}.txt",
+            ):
                 if cand.exists():
                     novel_path = cand
                     break
@@ -1861,9 +1929,11 @@ class _Handler(BaseHTTPRequestHandler):
     }
 
     def _serve_media(self, rel: str) -> None:
-        """只读地暴露项目目录下的产物（projects/ 与旧 input/、output/）。"""
+        """只读地暴露项目目录下的产物（用户项目根与运行根）。"""
+        from urllib.parse import unquote
+
         try:
-            path = safe_path(rel)
+            path = safe_path(unquote(rel))
         except (ValueError, FileNotFoundError):
             self._json({"error": "bad path"}, 400)
             return
@@ -1927,6 +1997,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(self.api_media(query))
             elif path == "/api/state":
                 self._json(self.api_state(query))
+            elif path == "/api/menubar":
+                self._json(active_run_info())
             elif path == "/api/budget":
                 self._json(budget_info())
             elif path == "/api/setup/status":
@@ -2047,10 +2119,11 @@ class _Handler(BaseHTTPRequestHandler):
         queue = {"items": [], "updated_at": 0}
         if name:
             tasks = load_project_tasks(name)
+            out = project_path_str(name)
             try:
-                queue = annotate_removable(f"{PROJECTS_DIRNAME}/{name}", load_queue(f"{PROJECTS_DIRNAME}/{name}"))
+                queue = annotate_removable(out, load_queue(out))
             except Exception:
-                queue = load_queue(f"{PROJECTS_DIRNAME}/{name}")
+                queue = load_queue(out)
         else:
             # 项目选择页也要发现外部 produce，卡片才能显示「运行中」
             try:
@@ -2066,6 +2139,7 @@ class _Handler(BaseHTTPRequestHandler):
             "storyboards": file_options["storyboards"],
             "tasks": [j.snapshot() for j in tasks],
             "queue": queue,
+            "active_run": active_run_info(),
             "server_time": time.time(),
         }
 
@@ -2083,8 +2157,8 @@ class _Handler(BaseHTTPRequestHandler):
     def create_task(self, data: dict) -> dict:
         title = str(data.get("title") or "").strip()
         name = str(data.get("name") or "").strip() or _slugify(title)
-        # 新任务一律落在项目文件夹 projects/<片名>/
-        out = str(data.get("out") or "").strip() or f"{PROJECTS_DIRNAME}/{_slugify(name)}"
+        # 新任务一律落在用户项目根下的项目文件夹
+        out = str(data.get("out") or "").strip() or project_path_str(_slugify(name) or name)
         novel = str(data.get("novel") or "").strip()
         storyboard = str(data.get("storyboard") or "").strip()
         only = str(data.get("only") or "").strip() or None
@@ -2353,6 +2427,22 @@ class _Handler(BaseHTTPRequestHandler):
             raise ValueError("缺少 out 参数")
         base = safe_path(out_rel)
 
+        from urllib.parse import quote
+
+        def _media_entry(file_path: Path, *, entry_id: str | None = None) -> dict:
+            abs_path = str(file_path.resolve())
+            url = "/media/" + quote(abs_path, safe="/")
+            st = file_path.stat()
+            item = {
+                "path": abs_path,
+                "url": url,
+                "mtime": int(st.st_mtime),
+                "size": st.st_size,
+            }
+            if entry_id is not None:
+                item["id"] = entry_id
+            return item
+
         def _scan(rel_dir: str, exts: tuple[str, ...]) -> list[dict]:
             d = artifacts_sub(base, rel_dir)
             if not d.is_dir():
@@ -2360,43 +2450,17 @@ class _Handler(BaseHTTPRequestHandler):
             found = []
             for f in sorted(d.iterdir()):
                 if f.is_file() and f.suffix.lower() in exts:
-                    rel = f"{out_rel.rstrip('/')}/work/{rel_dir}/{f.name}".replace("\\", "/")
-                    found.append(
-                        {
-                            "id": f.stem,
-                            "path": rel,
-                            "url": "/media/" + rel,
-                            "mtime": int(f.stat().st_mtime),
-                            "size": f.stat().st_size,
-                        }
-                    )
+                    found.append(_media_entry(f, entry_id=f.stem))
             return found
 
         final_path = base / "final.mp4"
-        final = None
-        if final_path.is_file():
-            rel = f"{out_rel.rstrip('/')}/final.mp4".replace("\\", "/")
-            st = final_path.stat()
-            final = {
-                "path": rel,
-                "url": "/media/" + rel,
-                "mtime": int(st.st_mtime),
-                "size": st.st_size,
-            }
+        final = _media_entry(final_path) if final_path.is_file() else None
         music = None
         for name in ("bgm.wav", "music.wav"):
             path = artifacts_sub(base, "audio", name)
             if not path.is_file():
                 continue
-            rel = f"{out_rel.rstrip('/')}/work/audio/{name}".replace("\\", "/")
-            st = path.stat()
-            music = {
-                "id": "bgm",
-                "path": rel,
-                "url": "/media/" + rel,
-                "mtime": int(st.st_mtime),
-                "size": st.st_size,
-            }
+            music = _media_entry(path, entry_id="bgm")
             break
         return {
             "frames": _scan("frames", (".png", ".jpg", ".jpeg", ".webp")),
@@ -2572,6 +2636,12 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def serve(host: str, port: int) -> None:
+    try:
+        moved = migrate_repo_projects()
+        if moved:
+            print(f"已迁移项目到 {display_path(projects_dir())}：{', '.join(moved)}", flush=True)
+    except Exception as exc:
+        print(f"项目迁移跳过：{exc}", flush=True)
     migrate_legacy_state()
     WEB_DIR.mkdir(parents=True, exist_ok=True)
     if not (WEB_DIR / "index.html").exists():
@@ -2604,12 +2674,16 @@ def serve(host: str, port: int) -> None:
 
     menubar = start_menubar(url)
     if menubar is not None:
-        # HTTP 在后台线程；主线程等菜单栏「退出」或 Ctrl+C / SIGTERM
+        # HTTP 在后台线程；主线程盯菜单栏。用户点「退出」会 SIGTERM 本进程。
         http_thread = threading.Thread(target=server.serve_forever, name="webui-http", daemon=True)
         http_thread.start()
         print("菜单栏已就绪：打开网页 / 退出", flush=True)
 
+        stopping = False
+
         def _sigterm(_signum, _frame) -> None:
+            nonlocal stopping
+            stopping = True
             raise KeyboardInterrupt
 
         prev_term = None
@@ -2617,15 +2691,25 @@ def serve(host: str, port: int) -> None:
             import signal
 
             prev_term = signal.signal(signal.SIGTERM, _sigterm)
-            while True:
+            while not stopping:
                 try:
                     code = menubar.wait(timeout=0.5)
                 except subprocess.TimeoutExpired:
                     continue
-                if code is not None:
+                if code is None:
+                    continue
+                # helper 自己挂了（非用户退出）：重启，别把网页服务拖死
+                if stopping:
+                    break
+                print("菜单栏助手已退出，正在重启…", flush=True)
+                menubar = start_menubar(url)
+                if menubar is None:
+                    print("菜单栏助手无法重启，网页服务继续运行（Ctrl+C 停止）", flush=True)
+                    while not stopping:
+                        time.sleep(0.5)
                     break
         except KeyboardInterrupt:
-            pass
+            stopping = True
         finally:
             if prev_term is not None:
                 try:
@@ -2634,7 +2718,7 @@ def serve(host: str, port: int) -> None:
                     signal.signal(signal.SIGTERM, prev_term)
                 except Exception:
                     pass
-            if menubar.poll() is None:
+            if menubar is not None and menubar.poll() is None:
                 menubar.terminate()
                 try:
                     menubar.wait(timeout=2)

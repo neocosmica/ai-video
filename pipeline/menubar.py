@@ -29,10 +29,24 @@ def menubar_enabled() -> bool:
 
 
 def start_menubar(url: str, *, title: str = "AI短视频") -> subprocess.Popen | None:
-    """拉起菜单栏助手；失败返回 None（调用方回退到纯 HTTP）。"""
+    """拉起菜单栏助手；失败返回 None（调用方回退到纯 HTTP）。
+
+    helper 会轮询 ``{url}/api/menubar`` 显示进度%；「打开网页」带上正在生成的项目。
+    """
     if not menubar_enabled():
         return None
-    cmd = [str(HELPER), "--url", url, "--title", title, "--parent-pid", str(os.getpid())]
+    base = url.rstrip("/")
+    cmd = [
+        str(HELPER),
+        "--url",
+        base + "/",
+        "--status-url",
+        base + "/api/menubar",
+        "--title",
+        title,
+        "--parent-pid",
+        str(os.getpid()),
+    ]
     if ICON_TEMPLATE.is_file():
         cmd.extend(["--icon", str(ICON_TEMPLATE)])
     try:

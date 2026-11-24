@@ -154,7 +154,7 @@ def direct_post(story: dict, kind: str, nid: str = "") -> list[tuple[str, str]]:
     """一层后继。"""
     shots = _shot_map(story)
     if kind == "storyboard":
-        # 重写分镜会使现有角色图 / 镜头产物过时；后置默认勾选，用户可取消
+        # 重写分镜会使现有角色图 / 镜头产物过时；对话框里这些后置默认不勾
         posts: list[tuple[str, str]] = []
         for cid in _char_map(story):
             posts.append(("portrait", cid))
@@ -232,7 +232,7 @@ def validate_target(story: dict, kind: str, nid: str = "", *, out: str | Path | 
         return f"未知产物类型：{kind}"
     if kind == "storyboard":
         if out is not None and not _novel_ready(out):
-            return "还没有小说正文：请先在上方填写并保存，或确保 projects/<片>/novel.txt 有内容"
+            return "还没有小说正文：请先在上方填写并保存，或确保 ~/AI短视频项目/<片>/novel.txt 有内容"
         return None
     shots = _shot_map(story)
     chars = _char_map(story)
@@ -292,6 +292,8 @@ def plan_rerun(out: str | Path, *, kind: str, id: str = "") -> dict:
             }
         )
 
+    # 从小说生成分镜会牵出整条后置链，默认不勾；其他目标的后置默认全勾
+    suggest_posts = kind != "storyboard"
     posts = []
     for pk, pid in post_nodes:
         posts.append(
@@ -299,8 +301,7 @@ def plan_rerun(out: str | Path, *, kind: str, id: str = "") -> dict:
                 "kind": pk,
                 "id": pid,
                 "label": node_label(story, pk, pid),
-                # 后置默认全勾；用户可在对话框取消
-                "suggested": True,
+                "suggested": suggest_posts,
                 "path": str(artifact_path(out, pk, pid)),
             }
         )
@@ -324,7 +325,13 @@ def _summary(target: dict, prereqs: list[dict], posts: list[dict]) -> str:
     if ready:
         parts.append("已有前置将跳过：" + "、".join(ready))
     if posts:
-        parts.append("后置默认全选（可取消）：" + "、".join(p["label"] for p in posts))
+        chosen = [p["label"] for p in posts if p.get("suggested")]
+        if len(chosen) == len(posts):
+            parts.append("后置默认全选（可取消）：" + "、".join(chosen))
+        elif not chosen:
+            parts.append("后置默认全不选（可勾选）：" + "、".join(p["label"] for p in posts))
+        else:
+            parts.append("后置默认勾选：" + "、".join(chosen))
     return "；".join(parts)
 
 

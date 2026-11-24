@@ -17,11 +17,11 @@ novel.txt → budget → storyboard（本机 LLM）→ screenplay --strict → �
 
 ### 1. 输入输出约定
 
-**每个项目一个独立文件夹，所有和这部片相关的内容都在里面**；全部项目放在根目录的 `projects/` 下。
+**每个项目一个独立文件夹，所有和这部片相关的内容都在里面**；默认全部在主目录的 `~/AI短视频项目/` 下（`NOVEL_VIDEO_PROJECTS` 可改）。
 项目顶层只放「源」和「成片」，过程产物全部收进 `work/`：
 
 ```
-projects/
+~/AI短视频项目/
   demo/            # 一个项目 = 一个文件夹
     novel.txt        # 小说
     storyboard.json  # 分镜（produce 也会把外部分镜拷到这里）
@@ -33,13 +33,13 @@ projects/
 
 | 用途 | 路径 |
 |---|---|
-| 项目文件夹 | `projects/<片名>/` |
-| 小说 | `projects/<片名>/novel.txt` |
-| 分镜 | `projects/<片名>/storyboard.json` |
-| 成片 | `projects/<片名>/final.mp4` |
-| 过程产物 | `projects/<片名>/work/`（帧、片段、配音、日志；脚本自动管理） |
+| 项目文件夹 | `~/AI短视频项目/<片名>/` |
+| 小说 | `~/AI短视频项目/<片名>/novel.txt` |
+| 分镜 | `~/AI短视频项目/<片名>/storyboard.json` |
+| 成片 | `~/AI短视频项目/<片名>/final.mp4` |
+| 过程产物 | `~/AI短视频项目/<片名>/work/`（帧、片段、配音、日志；脚本自动管理） |
 
-新建项目：`./scripts/run.sh projects --new <片名>`。CLI 全部子命令都支持 `--project <片名>`，等价于 `--out projects/<片名>` 并自动补 novel/storyboard 默认路径。
+新建项目：`./scripts/run.sh projects --new <片名>`。CLI 全部子命令都支持 `--project <片名>`，等价于 `--out` 指向该绝对路径并自动补 novel/storyboard。首次启动会把仓库旧 `projects/` 迁到主目录。更新 App：`./scripts/macos/pack-app.sh`。
 
 首次部署：`./scripts/setup.sh` → `./scripts/run.sh doctor` → `./scripts/run.sh selftest`。
 

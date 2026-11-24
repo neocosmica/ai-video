@@ -10,8 +10,61 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def resolve(path: str | Path) -> Path:
-    p = Path(path)
-    return p if p.is_absolute() else ROOT / p
+    """相对路径相对运行根；``projects/<名>/…`` 映射到用户项目根；绝对路径原样。"""
+    if isinstance(path, Path):
+        if path.is_absolute():
+            return path
+        text = path.as_posix()
+    else:
+        text = str(path or "").strip().replace("\\", "/")
+        if not text:
+            return ROOT
+        p = Path(text)
+        if p.is_absolute():
+            return p
+    # 旧相对前缀 projects/<片名>/… → ~/AI短视频项目/<片名>/…
+    if text == "projects" or text.startswith("projects/"):
+        from pipeline.projects import projects_dir
+
+        rest = "" if text == "projects" else text[len("projects/") :]
+        base = projects_dir()
+        return (base / rest).resolve() if rest else base
+    return (ROOT / text).resolve() if text else ROOT
+
+
+def allowed_data_roots() -> list[Path]:
+    """safe_path 允许落在其下的根：运行根 + 用户项目根 + 旧仓库 projects/。"""
+    roots = [ROOT.resolve()]
+    try:
+        from pipeline.projects import legacy_repo_projects_dir, projects_dir
+
+        roots.append(projects_dir().resolve())
+        legacy = legacy_repo_projects_dir()
+        if legacy.exists():
+            roots.append(legacy.resolve())
+    except Exception:
+        pass
+    # Application Support 日志等
+    support = Path.home() / "Library" / "Application Support" / "AI短视频"
+    roots.append(support.resolve())
+    # 去重保序
+    seen: set[str] = set()
+    out: list[Path] = []
+    for r in roots:
+        key = str(r)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
+def under_allowed_root(path: Path) -> bool:
+    resolved = path.resolve()
+    for root in allowed_data_roots():
+        if resolved == root or root in resolved.parents:
+            return True
+    return False
 
 
 def dump_json(path: Path, data: object) -> None:

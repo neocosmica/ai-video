@@ -17,7 +17,7 @@
 <main class="layout">
   <!-- 项目选择页：打开网页第一件事 -->
   <section class="card" id="project-picker" style="grid-column:1/-1">
-    <h2>① 选择项目 <span class="hint">（每个项目一个文件夹 projects/<片名>/，小说、分镜、成片、任务历史都在里面）</span></h2>
+    <h2>① 选择项目 <span class="hint">（每个项目一个文件夹 ~/AI短视频项目/<片名>/，小说、分镜、成片、任务历史都在里面）</span></h2>
     <div id="setup-banner" class="setup-banner" hidden>
       <div class="setup-banner-head">
         <strong id="setup-title">正在检查本机依赖与模型…</strong>
@@ -34,7 +34,7 @@
     <div class="row" style="margin-top:14px">
       <label>或新建项目</label>
       <div class="fileline">
-        <input id="new-project-name" placeholder="片名，例：雨夜重逢（自动建 projects/雨夜重逢/）" />
+        <input id="new-project-name" placeholder="片名，例：雨夜重逢（自动建 ~/AI短视频项目/雨夜重逢/）" />
         <button id="new-project-btn" class="primary">＋ 新建</button>
       </div>
     </div>
@@ -269,7 +269,14 @@
       <div id="rerun-target" class="rerun-list"></div>
     </section>
     <section class="rerun-section" id="rerun-post-sec">
-      <h4>后置 <span class="hint">传递影响 · 可选 · 未勾选仍会过时</span></h4>
+      <h4>
+        <span>后置</span>
+        <span class="hint">传递影响 · 可选 · 未勾选仍会过时</span>
+        <label class="rerun-all" id="rerun-posts-all-wrap" hidden>
+          <input type="checkbox" id="rerun-posts-all" aria-controls="rerun-posts">
+          <span id="rerun-posts-all-text">全选</span>
+        </label>
+      </h4>
       <div id="rerun-posts" class="rerun-list"></div>
     </section>
     <p class="hint rerun-foot">确认后加入左边待跑队列（自动补缺失前置、去重）；点「启动任务」再跑。未勾选的后置会与新结果不一致。</p>

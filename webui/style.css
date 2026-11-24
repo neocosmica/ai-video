@@ -1511,6 +1511,21 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   margin: 0 0 8px;
   font-size: 13px;
   font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.rerun-section h4 .hint { font-weight: 400; }
+.rerun-all:not([hidden]) {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
 }
 .rerun-list {
   display: flex;

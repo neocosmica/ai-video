@@ -13,7 +13,7 @@ import re
 import time
 from pathlib import Path
 
-from pipeline.projects import PROJECTS_DIRNAME, artifacts_dir, artifacts_sub
+from pipeline.projects import PROJECTS_DIRNAME, artifacts_dir, artifacts_sub, project_path_str
 from pipeline.util import ROOT, resolve
 
 LIVE_FILENAME = "live.json"
@@ -63,7 +63,7 @@ def write_live(out: str | Path, patch: dict) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True)
     cur = read_live(out) or {}
     cur.update(patch)
-    cur["out"] = str(out).replace("\\", "/").strip("/")
+    cur["out"] = out_rel(out)
     cur["updated_at"] = time.time()
     if "started_at" not in cur:
         cur["started_at"] = cur["updated_at"]
@@ -127,15 +127,13 @@ def mark_stage(out: str | Path, stage: str, stages: list[str] | tuple[str, ...] 
 
 
 def out_rel(out: str | Path) -> str:
+    """规范化项目路径：优先绝对路径（给人看、给任务记录用）。"""
     path = resolve(out)
-    try:
-        return str(path.relative_to(ROOT)).replace("\\", "/")
-    except ValueError:
-        return str(path).replace("\\", "/")
+    return str(path).replace("\\", "/")
 
 
 def project_name_from_out(out: str) -> str:
-    text = (out or "").replace("\\", "/").strip("/")
+    text = (out or "").replace("\\", "/").strip()
     if text.startswith(f"{PROJECTS_DIRNAME}/"):
         return text[len(PROJECTS_DIRNAME) + 1 :].split("/")[0]
     return Path(text).name
@@ -177,10 +175,9 @@ def discover_produce_processes() -> list[dict]:
         kind, rest = mm.group(1), mm.group(2)
         out = _parse_out_from_argv(rest)
         if not out and kind == "produce":
-            # produce --project X → projects/X
             pm = re.search(r"--project\s+(\S+)", rest)
             if pm:
-                out = f"{PROJECTS_DIRNAME}/{pm.group(1).strip()}"
+                out = project_path_str(pm.group(1).strip().strip("'\""))
         if not out:
             continue
         found.append(
@@ -211,10 +208,10 @@ def discover_produce_processes() -> list[dict]:
 def _parse_out_from_argv(rest: str) -> str | None:
     m = re.search(r"--out\s+(\S+)", rest)
     if m:
-        return m.group(1).strip().strip("'\"")
+        return out_rel(m.group(1).strip().strip("'\""))
     m = re.search(r"--project\s+(\S+)", rest)
     if m:
-        return f"{PROJECTS_DIRNAME}/{m.group(1).strip().strip("'\"")}"
+        return project_path_str(m.group(1).strip().strip("'\""))
     return None
 
 
