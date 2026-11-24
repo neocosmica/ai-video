@@ -31,6 +31,8 @@ WEIGHT_SPECS: list[dict[str, Any]] = [
         "repo": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
         "allow_patterns": None,
         "required_files": (),
+        # 只有 tokenizer/config 的残缺快照不能算就绪（mlx 会报 No safetensors）
+        "weight_globs": ("model*.safetensors",),
     },
     {
         "id": "flux",
@@ -45,6 +47,7 @@ WEIGHT_SPECS: list[dict[str, Any]] = [
         "repo": "mlx-community/gemma-3-12b-it-4bit",
         "allow_patterns": None,
         "required_files": (),
+        "weight_globs": ("model*.safetensors",),
     },
     {
         "id": "tts",
@@ -52,6 +55,7 @@ WEIGHT_SPECS: list[dict[str, Any]] = [
         "repo": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit",
         "allow_patterns": None,
         "required_files": (),
+        "weight_globs": ("model*.safetensors",),
     },
     {
         "id": "ltx",
@@ -145,15 +149,14 @@ _WORKER_LOCK = threading.Lock()
 
 
 def _weight_ok(spec: dict[str, Any]) -> tuple[bool, str]:
-    from pipeline.hf_cache import resolve_snapshot
+    from pipeline.hf_cache import resolve_snapshot, snapshot_ready
 
     snap = resolve_snapshot(str(spec["repo"]))
-    if snap is None:
-        return False, "未下载"
-    for name in spec.get("required_files") or ():
-        if not (snap / name).is_file():
-            return False, f"缺 {name}"
-    return True, str(snap)
+    return snapshot_ready(
+        snap,
+        required_files=tuple(spec.get("required_files") or ()),
+        weight_globs=tuple(spec.get("weight_globs") or ()),
+    )
 
 
 def _pkg_items() -> list[dict[str, Any]]:
@@ -316,7 +319,7 @@ def _download_weight(spec: dict[str, Any], set_msg: Callable[[str, float], None]
     set_msg(f"已就绪：{spec['label']}", base_pct + span)
 
 
-def _install_loop() -> None:
+def _install_loop(*, force: bool = False) -> None:
     def set_msg(message: str, pct: float) -> None:
         _STATE.update(status="installing", message=message, pct=min(99.0, max(0.0, pct)), error="")
 
@@ -326,11 +329,15 @@ def _install_loop() -> None:
         items = report["items"]
         _STATE.update(items=items)
         missing = [it for it in items if not it["ok"]]
-        if not missing:
+        # 自动检查说齐了就停。手动「安装依赖」带 force：判断可能失误，仍按清单再拉一遍。
+        if not missing and not force:
             _STATE.update(status="ready", pct=100.0, message="依赖与模型已就绪", items=items, error="")
             return
 
-        set_msg(f"发现缺 {len(missing)} 项，开始补装…", 3.0)
+        if not missing and force:
+            set_msg("检查显示已就绪，仍重新拉取依赖与模型（已有文件会跳过）…", 3.0)
+        else:
+            set_msg(f"发现缺 {len(missing)} 项，开始补装…", 3.0)
 
         pkg_missing = [it for it in missing if it["kind"] == "pkg"]
         # 包/环境缺：先 uv sync；更重的 LTX/MusicGen/ffmpeg 仍建议完整 setup
@@ -363,14 +370,15 @@ def _install_loop() -> None:
             if code != 0:
                 raise RuntimeError(f"setup.sh 退出码 {code}")
         else:
-            if any(it["id"] in {"mlx-lm", "mflux"} for it in pkg_missing):
+            if force or any(it["id"] in {"mlx-lm", "mflux"} for it in pkg_missing):
                 _run_uv_sync(set_msg)
 
-            weight_missing = [
-                spec
-                for spec in WEIGHT_SPECS
-                if not _weight_ok(spec)[0]
-            ]
+            # force：全部重拉，不信任「已有」的判断（残缺快照会被补上）
+            weight_missing = (
+                list(WEIGHT_SPECS)
+                if force
+                else [spec for spec in WEIGHT_SPECS if not _weight_ok(spec)[0]]
+            )
             n = max(1, len(weight_missing))
             for i, spec in enumerate(weight_missing):
                 base = 10.0 + (80.0 * i / n)
@@ -409,7 +417,12 @@ def ensure_async(*, force: bool = False) -> dict[str, Any]:
             if cur["ready"]:
                 return setup_status()
         _STATE.update(status="installing", message="准备安装…", pct=1.0, error="")
-        _WORKER = threading.Thread(target=_install_loop, name="novel-video-bootstrap", daemon=True)
+        _WORKER = threading.Thread(
+            target=_install_loop,
+            kwargs={"force": force},
+            name="novel-video-bootstrap",
+            daemon=True,
+        )
         _WORKER.start()
     return setup_status()
 

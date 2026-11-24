@@ -18,6 +18,10 @@
   <!-- 项目选择页：打开网页第一件事 -->
   <section class="card" id="project-picker" style="grid-column:1/-1">
     <h2>① 选择项目 <span class="hint">（每个项目一个文件夹 ~/AI短视频项目/<片名>/，小说、分镜、成片、任务历史都在里面）</span></h2>
+    <div class="setup-entry">
+      <button type="button" id="setup-install" class="ghost">安装依赖</button>
+      <span id="setup-entry-hint" class="hint">即使检查显示已就绪，也可以再装一次，用来补上下载不完整的模型。</span>
+    </div>
     <div id="setup-banner" class="setup-banner" hidden>
       <div class="setup-banner-head">
         <strong id="setup-title">正在检查本机依赖与模型…</strong>

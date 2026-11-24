@@ -408,6 +408,14 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 /* 项目选择页 */
 #back-to-projects { padding: 2px 10px; font-size: 12px; margin-right: 8px; }
 #current-project-name { color: var(--accent); }
+.setup-entry {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 0 0 14px;
+}
+.setup-entry .hint { font-size: 12px; line-height: 1.45; }
 .setup-banner {
   margin: 0 0 16px;
   padding: 14px 16px;

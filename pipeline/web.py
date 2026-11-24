@@ -50,7 +50,7 @@ from pipeline.projects import (
     project_path_str,
     projects_dir,
 )
-from pipeline.util import ROOT, resolve, under_allowed_root
+from pipeline.util import ROOT, cite_path, resolve, under_allowed_root
 
 WEB_DIR = ROOT / "webui"
 # 任务历史跟项目走：<项目>/work/webui/state.json；历史任务是只读快照，
@@ -1641,15 +1641,15 @@ def materialize_web_draft(
             encoding="utf-8",
         )
         if has_shot:
-            draft_rel = str(run_sb.relative_to(ROOT)).replace("\\", "/")
+            draft_rel = cite_path(run_sb)
             install_storyboard(out, draft_rel, force=True)
-            sb_rel = str((base / "storyboard.json").relative_to(ROOT)).replace("\\", "/")
+            sb_rel = cite_path(base / "storyboard.json")
         else:
             sb_rel = None
     if novel_text is not None:
         run_novel = webui / "run_novel.txt"
         run_novel.write_text(str(novel_text).rstrip() + "\n", encoding="utf-8")
-        novel_rel = str(run_novel.relative_to(ROOT)).replace("\\", "/")
+        novel_rel = cite_path(run_novel)
     return sb_rel, novel_rel
 
 
@@ -2379,7 +2379,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not novel:
             project_novel = resolve(out) / "novel.txt"
             if project_novel.is_file() and project_novel.read_text(encoding="utf-8").strip():
-                novel = str(project_novel.relative_to(ROOT)).replace("\\", "/")
+                novel = cite_path(project_novel)
         cmd, log_path, stage_keys = build_artifact_groups_cmd(
             out=out, groups=groups, novel=novel or None
         )

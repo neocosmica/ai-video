@@ -128,11 +128,22 @@ def _load_mlx(model_id: str):
         ) from exc
 
     print(f"加载分镜 LLM：{model_id}", flush=True)
-    # 优先本机 hub 缓存，避免镜像配额下卡住
-    from pipeline.hf_cache import resolve_snapshot
+    # 优先本机 hub 缓存。快照目录可能只有 config/tokenizer，没有 model*.safetensors；
+    # 直接 load 会 FileNotFoundError: No safetensors found。缺了就补下再加载。
+    from pipeline.hf_cache import ensure_snapshot
 
-    path = resolve_snapshot(model_id)
-    model, tokenizer = load(str(path) if path else model_id)
+    path = ensure_snapshot(
+        model_id,
+        weight_globs=("model*.safetensors",),
+        label="分镜语言模型",
+    )
+    try:
+        model, tokenizer = load(str(path))
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            f"分镜模型权重打不开：{exc}\n"
+            f"可删掉该目录后重开，让它重新下载：{path}"
+        ) from exc
     return model, tokenizer, generate, make_sampler
 
 

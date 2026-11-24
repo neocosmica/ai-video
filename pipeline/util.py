@@ -32,6 +32,25 @@ def resolve(path: str | Path) -> Path:
     return (ROOT / text).resolve() if text else ROOT
 
 
+def cite_path(path: str | Path) -> str:
+    """交给 ``resolve()`` 的路径字符串。
+
+    仓库里的文件用相对运行根的路径。打包进 ``AI短视频.app`` 之后，
+    项目在 ``~/AI短视频项目``，不在 ``Contents/Resources/runtime`` 下面，
+    ``Path.relative_to(ROOT)`` 会抛 ``ValueError: ... is not in the subpath of ...``。
+    这时返回绝对路径，``resolve()`` 会原样打开。
+    """
+    p = path if isinstance(path, Path) else Path(str(path))
+    try:
+        p = p.resolve()
+    except OSError:
+        p = Path(str(p))
+    try:
+        return p.relative_to(ROOT).as_posix()
+    except ValueError:
+        return p.as_posix()
+
+
 def allowed_data_roots() -> list[Path]:
     """safe_path 允许落在其下的根：运行根 + 用户项目根 + 旧仓库 projects/。"""
     roots = [ROOT.resolve()]

@@ -25,7 +25,7 @@ from pipeline.screenplay import (
     extract_novel_dialogues,
 )
 from pipeline.storyboard_gen import DEFAULT_LLM_MODEL, cmd_storyboard
-from pipeline.util import ROOT, chunk_novel, extract_json, resolve
+from pipeline.util import ROOT, chunk_novel, cite_path, extract_json, resolve
 from pipeline.video import cmd_videos
 from pipeline.web import cmd_web
 
@@ -93,12 +93,16 @@ def cmd_doctor(_: argparse.Namespace) -> None:
             f"（{'可用' if menubar_enabled() else '缺二进制，跑 scripts/macos/build-menubar-helper.sh'}）"
         )
     print(f"LTX 代码：{settings.ltx_dir}（{'存在' if settings.ltx_dir.exists() else '缺失'}）")
-    from pipeline.hf_cache import resolve_snapshot
+    from pipeline.hf_cache import resolve_snapshot, snapshot_ready
 
     llm_snap = resolve_snapshot(settings.llm_model or DEFAULT_LLM_MODEL)
-    print(
-        f"分镜 LLM 权重：{'有 ' + str(llm_snap) if llm_snap else '未下载（setup.sh 会拉）'}"
-    )
+    llm_ok, llm_detail = snapshot_ready(llm_snap, weight_globs=("model*.safetensors",))
+    if llm_ok:
+        print(f"分镜 LLM 权重：有 {llm_snap}")
+    elif llm_snap is not None:
+        print(f"分镜 LLM 权重：缓存残缺（{llm_detail}）{llm_snap}")
+    else:
+        print("分镜 LLM 权重：未下载（setup.sh 会拉）")
     try:
         import mlx_lm  # noqa: F401
 
@@ -462,10 +466,24 @@ def cmd_selftest(_: argparse.Namespace) -> None:
             finally:
                 mg_mod.tqdm = original_tqdm
 
-    from pipeline.hf_cache import resolve_snapshot
+    from pipeline.hf_cache import iter_weight_files, resolve_snapshot, snapshot_ready
     from pipeline.runtime import main_venv_path, musicgen_venv_path, ltx_venv_path
 
     assert resolve_snapshot("") is None
+    with tempfile.TemporaryDirectory() as tmp:
+        bare = Path(tmp)
+        (bare / "config.json").write_text("{}", encoding="utf-8")
+        (bare / "model.safetensors.index.json").write_text("{}", encoding="utf-8")
+        assert iter_weight_files(bare, "model*.safetensors") == []
+        ok, detail = snapshot_ready(bare, weight_globs=("model*.safetensors",))
+        assert not ok and "model*.safetensors" in detail, detail
+        (bare / "model.safetensors").write_bytes(b"x")
+        dangling = bare / "model-00001-of-00002.safetensors"
+        dangling.symlink_to(bare / "missing-blob")
+        names = {path.name for path in iter_weight_files(bare, "model*.safetensors")}
+        assert names == {"model.safetensors"}, names
+        ok, _ = snapshot_ready(bare, weight_globs=("model*.safetensors",))
+        assert ok
     assert (ROOT / "scripts" / "apply_ltx_gemma_patch.py").exists(), "缺少 LTX 补丁脚本"
     from pipeline.projects import project_dir, projects_dir
 
@@ -642,6 +660,27 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     names = {item["name"] for item in list_projects()}
     assert "demo" in names and "scifi" in names, names
     assert projects_dir().name == "AI短视频项目" or "NOVEL_VIDEO_PROJECTS" in __import__("os").environ
+
+    # 网页暂存落在 ~/AI短视频项目，不在 App runtime / 仓库根下面。
+    # relative_to(ROOT) 会抛 “is not in the subpath”，入队对话框就显示「无法添加」。
+    inside = ROOT / "webui" / "index.html"
+    assert cite_path(inside) == "webui/index.html", cite_path(inside)
+    assert resolve(cite_path(inside)) == inside.resolve()
+    from pipeline.web import materialize_web_draft
+
+    with tempfile.TemporaryDirectory() as outside:
+        proj = Path(outside) / "反向救赎的时空书店"
+        proj.mkdir()
+        sb_rel, novel_rel = materialize_web_draft(
+            str(proj),
+            storyboard_data={"shots": [{"id": "s001", "dialogue": "你好"}]},
+            novel_text="她说：「你好」。",
+        )
+        assert novel_rel and Path(novel_rel).is_absolute(), novel_rel
+        assert resolve(novel_rel) == (proj / "work" / "webui" / "run_novel.txt").resolve()
+        assert "你好" in resolve(novel_rel).read_text(encoding="utf-8")
+        assert sb_rel and resolve(sb_rel) == (proj / "storyboard.json").resolve()
+        assert (proj / "storyboard.json").is_file()
     for label, path in (
         ("main", main_venv_path()),
         ("ltx", ltx_venv_path()),

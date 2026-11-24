@@ -392,6 +392,24 @@ function renderSetupBanner(st) {
     }
   }
   if (actions) actions.hidden = !failed;
+  syncSetupEntry();
+}
+
+/** 项目列表上的安装入口：检查显示已就绪时也留着，判断失误可以手动再装。 */
+function syncSetupEntry() {
+  const btn = $("#setup-install");
+  const hint = $("#setup-entry-hint");
+  if (!btn) return;
+  const failed = state.setup?.status === "failed";
+  const busy = setupBusy();
+  const ready = !!state.setup?.ready && !failed && !busy;
+  btn.disabled = busy;
+  btn.textContent = failed ? "重试安装" : busy ? "正在安装…" : "安装依赖";
+  if (!hint) return;
+  if (failed) hint.textContent = "安装失败，可再试一次。";
+  else if (busy) hint.textContent = "正在安装，请稍候。";
+  else if (ready) hint.textContent = "当前检查为已就绪。若仍缺模型或运行报错，点这里重新安装。";
+  else hint.textContent = "即使检查显示已就绪，也可以再装一次，用来补上下载不完整的模型。";
 }
 
 function projectFromQuery() {
@@ -4060,6 +4078,7 @@ function bind() {
     if (ev.key === "Enter") createProject();
   });
   $("#setup-retry")?.addEventListener("click", retrySetup);
+  $("#setup-install")?.addEventListener("click", retrySetup);
   $("#back-to-projects").addEventListener("click", backToProjects);
 }
 
