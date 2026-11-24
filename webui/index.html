@@ -74,7 +74,11 @@
           <section class="movie-section" id="final-music-section">
             <div class="movie-label-row">
               <h4 class="movie-label">配乐提示 <span class="hint">英文 · 无人声</span></h4>
-              <button type="button" id="music-rerun" class="ghost cast-add-btn" title="单跑配乐">↻ 配乐</button>
+              <div class="movie-label-actions">
+                <button type="button" id="music-play" class="ghost cast-add-btn" title="播放/暂停配乐" hidden>▶</button>
+                <button type="button" id="music-rerun" class="ghost cast-add-btn" title="单跑配乐">↻ 配乐</button>
+              </div>
+              <audio id="music-player" preload="metadata" hidden></audio>
             </div>
             <div class="movie-meta-iedit" data-f="music_prompt" title="点击编辑">
               <div id="music-display" class="movie-style movie-meta-display empty">点击填写 music_prompt</div>

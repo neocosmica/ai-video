@@ -726,12 +726,27 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .movie-label-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 8px 10px;
   margin-bottom: 8px;
 }
 .movie-label-row .movie-label { margin: 0; }
+.movie-label-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
 .cast-add-btn { font-size: 11px; padding: 2px 8px; }
+#music-play {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 11px;
+  line-height: 1;
+}
 .movie-cast {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));

@@ -2078,13 +2078,12 @@ function bindShotAudio(root) {
   };
   playBtn.addEventListener("click", () => {
     if (audio.paused) {
-      // 同时只播一个镜头配音
-      $$("audio").forEach((a) => {
-        if (a !== audio && !a.paused) a.pause();
-      });
-      $$(".shot-audio-play").forEach((b) => {
-        if (b !== playBtn) b.textContent = "▶";
-      });
+      // 同时只播一个镜头配音；也停掉配乐
+      pauseOtherShotAudio(audio);
+      const bgm = $("#music-player");
+      if (bgm && !bgm.paused) bgm.pause();
+      const bgmBtn = $("#music-play");
+      if (bgmBtn) bgmBtn.textContent = "▶";
       audio.play().catch(() => {});
       playBtn.textContent = "❚❚";
     } else {
@@ -2633,6 +2632,59 @@ function renderFinalMeta(info = {}) {
   setMusicSeedDisplay(musicSeed);
 }
 
+function pauseOtherShotAudio(except) {
+  $$("#shots-grid audio").forEach((a) => {
+    if (a !== except && !a.paused) a.pause();
+  });
+  $$(".shot-audio-play").forEach((b) => { b.textContent = "▶"; });
+}
+
+function syncMusicPlayer(musicEntry) {
+  const btn = $("#music-play");
+  const audio = $("#music-player");
+  if (!btn || !audio) return;
+  if (!musicEntry?.url) {
+    btn.hidden = true;
+    if (!audio.paused) audio.pause();
+    audio.removeAttribute("src");
+    delete audio.dataset.sig;
+    btn.textContent = "▶";
+    return;
+  }
+  btn.hidden = false;
+  const url = mediaUrl(musicEntry);
+  const sig = mediaSig(musicEntry);
+  if (audio.dataset.sig !== sig || audio.getAttribute("src") !== url) {
+    const wasPlaying = !audio.paused;
+    audio.src = url;
+    audio.dataset.sig = sig;
+    audio.load();
+    if (wasPlaying) audio.play().catch(() => {});
+  }
+}
+
+function bindMusicPlayer() {
+  const btn = $("#music-play");
+  const audio = $("#music-player");
+  if (!btn || !audio || btn._bound) return;
+  btn._bound = true;
+  btn.addEventListener("click", () => {
+    if (audio.paused) {
+      pauseOtherShotAudio(null);
+      const final = $("#final-player");
+      if (final && !final.paused) final.pause();
+      audio.play().catch(() => {});
+      btn.textContent = "❚❚";
+    } else {
+      audio.pause();
+      btn.textContent = "▶";
+    }
+  });
+  audio.addEventListener("ended", () => { btn.textContent = "▶"; });
+  audio.addEventListener("pause", () => { btn.textContent = "▶"; });
+  audio.addEventListener("play", () => { btn.textContent = "❚❚"; });
+}
+
 function renderFinalVideo(final, info = {}) {
   const wrap = $("#final-wrap");
   const badge = $("#final-badge");
@@ -2764,6 +2816,7 @@ async function renderShots() {
     portraits,
     framesById,
   });
+  syncMusicPlayer(media?.music || null);
   // 3) 进度（视频 n/total 等来自日志解析）
   const job = state.tasks.find((t) => t.id === state.selectedTaskId);
   const progItems = {};
@@ -3127,6 +3180,7 @@ function bind() {
   });
   $("#music-seed-input")?.addEventListener("blur", () => commitMusicSeed());
   $("#music-seed-reroll")?.addEventListener("click", rerollMusicSeed);
+  bindMusicPlayer();
   $("#music-rerun")?.addEventListener("click", () => openRerunDialog({ kind: "music", id: "" }));
   $("#final-rerun")?.addEventListener("click", () => openRerunDialog({ kind: "final", id: "" }));
   $("#rerun-form")?.addEventListener("submit", (ev) => {

@@ -1732,11 +1732,27 @@ class _Handler(BaseHTTPRequestHandler):
                 "mtime": int(st.st_mtime),
                 "size": st.st_size,
             }
+        music = None
+        for name in ("bgm.wav", "music.wav"):
+            path = artifacts_sub(base, "audio", name)
+            if not path.is_file():
+                continue
+            rel = f"{out_rel.rstrip('/')}/work/audio/{name}".replace("\\", "/")
+            st = path.stat()
+            music = {
+                "id": "bgm",
+                "path": rel,
+                "url": "/media/" + rel,
+                "mtime": int(st.st_mtime),
+                "size": st.st_size,
+            }
+            break
         return {
             "frames": _scan("frames", (".png", ".jpg", ".jpeg", ".webp")),
             "clips": _scan("clips", (".mp4",)),
             "voices": _scan("audio/voice", (".wav",)),
             "characters": _scan("characters", (".png", ".jpg", ".jpeg", ".webp")),
+            "music": music,
             "final": final,
         }
 
