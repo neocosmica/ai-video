@@ -627,10 +627,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   background: transparent;
 }
 .movie-card {
-  display: grid;
-  /* 左列宽由视频比例决定；上下与右侧信息栏齐平 */
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 0;
+  display: flex;
+  flex-direction: row;
   align-items: stretch;
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -641,36 +639,30 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
 }
 @media (max-width: 860px) {
-  .movie-card { grid-template-columns: 1fr; }
+  .movie-card { flex-direction: column; }
 }
 .movie-poster {
   position: relative;
+  flex: 0 0 auto;
+  width: 280px; /* 无片占位；有片时 JS 按右栏高度×视频比例写宽 */
+  min-width: 0;
   align-self: stretch;
-  height: auto;
-  min-height: 100%;
-  width: auto;
-  max-width: min(56vw, 560px);
   background: #05060a;
   border-right: 1px solid var(--border);
   overflow: hidden;
-  /* 无片占位；有片时 JS 写入真实 aspect-ratio，高度跟信息栏 → 上下左贴边 */
   aspect-ratio: 9 / 16;
-  min-width: 280px;
 }
-.movie-poster:has(.final-player[src]) {
-  min-width: 0;
-  height: 100%;
-  /* aspect-ratio 由 syncFinalPlayerAspect 写入；宽度 = 高度 × 比例 */
+.movie-poster.has-video {
+  aspect-ratio: auto;
 }
 @media (max-width: 860px) {
   .movie-poster {
     border-right: none;
     border-bottom: 1px solid var(--border);
-    width: 100%;
+    width: 100% !important;
     max-width: none;
-    min-width: 0;
-    height: auto;
     max-height: min(72vh, 720px);
+    aspect-ratio: auto;
   }
 }
 .final-player {
@@ -684,8 +676,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   border: 0;
   border-radius: 0;
   background: #000;
+  /* 海报框已按视频比例定宽，contain 即铺满且比例正确 */
   object-fit: contain;
-  object-position: left center;
+  object-position: center center;
 }
 @media (max-width: 860px) {
   .final-player {
@@ -694,10 +687,10 @@ button:disabled { opacity: .45; cursor: not-allowed; }
     width: 100%;
     height: auto;
     max-height: min(72vh, 720px);
-    object-position: center top;
   }
 }
 .movie-info {
+  flex: 1 1 0%;
   display: flex;
   flex-direction: column;
   gap: 16px;

@@ -3116,17 +3116,45 @@ function bindMusicPlayer() {
   audio.addEventListener("play", () => { btn.textContent = "❚❚"; });
 }
 
-function syncFinalPlayerAspect(player) {
-  const poster = player?.closest?.(".movie-poster");
+function syncFinalPlayerLayout(player) {
+  /** 左列宽 = 右栏高度 × 视频宽高比；右栏 flex 吃剩，互不重叠。 */
+  if (!player) return;
+  const poster = player.closest?.(".movie-poster");
+  const card = poster?.closest?.(".movie-card");
+  const info = card?.querySelector?.(".movie-info");
   if (!poster) return;
-  const w = player.videoWidth || 0;
-  const h = player.videoHeight || 0;
-  if (w > 0 && h > 0) {
-    poster.style.aspectRatio = `${w} / ${h}`;
-    poster.dataset.ar = `${w}:${h}`;
-  } else {
+
+  const layout = () => {
     poster.style.removeProperty("aspect-ratio");
-    delete poster.dataset.ar;
+    const has = !!(player.getAttribute("src") && !player.hidden);
+    const vw = player.videoWidth || 0;
+    const vh = player.videoHeight || 0;
+    if (!has || !vw || !vh) {
+      poster.classList.remove("has-video");
+      poster.style.removeProperty("width");
+      return;
+    }
+    poster.classList.add("has-video");
+    if (window.matchMedia("(max-width: 860px)").matches) {
+      poster.style.removeProperty("width");
+      return;
+    }
+    const h = Math.max(info?.offsetHeight || 0, card?.clientHeight || 0);
+    if (h < 40) return;
+    const maxW = Math.min(Math.floor(window.innerWidth * 0.45), 560);
+    const w = Math.max(120, Math.min(maxW, Math.round((h * vw) / vh)));
+    poster.style.width = `${w}px`;
+  };
+
+  layout();
+  if (!poster._finalLayoutBound) {
+    poster._finalLayoutBound = true;
+    if (info && typeof ResizeObserver !== "undefined") {
+      poster._finalLayoutObs = new ResizeObserver(() => layout());
+      poster._finalLayoutObs.observe(info);
+    }
+    window.addEventListener("resize", layout);
+    player.addEventListener("loadedmetadata", layout);
   }
 }
 
@@ -3149,7 +3177,7 @@ function renderFinalVideo(final, info = {}) {
       player.removeAttribute("src");
       player.load();
     }
-    syncFinalPlayerAspect(player);
+    syncFinalPlayerLayout(player);
     if (link) link.hidden = true;
     if (meta) meta.textContent = "";
     return;
@@ -3167,7 +3195,6 @@ function renderFinalVideo(final, info = {}) {
       // 下一轮自动刷新再试（assemble 刚写完时偶发读到半截）
       delete player.dataset.sig;
     };
-    player.onloadedmetadata = () => syncFinalPlayerAspect(player);
     player.load();
     // 文件更新时尽量停在原位置；首次载入不自动播
     if (!paused && t > 0) {
@@ -3175,9 +3202,10 @@ function renderFinalVideo(final, info = {}) {
         try { player.currentTime = Math.min(t, player.duration || t); } catch {}
       }, { once: true });
     }
-  } else {
-    syncFinalPlayerAspect(player);
   }
+  syncFinalPlayerLayout(player);
+  // 右栏内容可能稍后撑开高度，再跟一帧
+  requestAnimationFrame(() => syncFinalPlayerLayout(player));
   if (link) {
     const title = (titleValue() || info.title || state.project || "final").trim() || "final";
     link.hidden = false;
