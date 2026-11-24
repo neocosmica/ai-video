@@ -17,8 +17,7 @@ projects/
 # App 内打包的运行副本（由 scripts/macos/pack-app.sh 生成）
 AI短视频.app/Contents/Resources/runtime/
 
-# 安装镜像（由 scripts/macos/make-dmg.sh 生成）
-dist/
+# 安装镜像 dist/AI短视频.dmg 入库，方便直接取用
 
 # 网页控制台后台进程
 webui/server.log
