@@ -17,7 +17,7 @@ from pipeline.projects import PROJECTS_DIRNAME, artifacts_dir, artifacts_sub
 from pipeline.util import ROOT, resolve
 
 LIVE_FILENAME = "live.json"
-STAGES = ("screenplay", "images", "audio", "videos", "music", "assemble")
+STAGES = ("storyboard", "screenplay", "images", "audio", "videos", "music", "assemble")
 
 _TQDM_LINE = re.compile(
     r"^(?P<desc>.+?):\s+\d+%\|.*?\|\s*(?P<n>\d+)/(?P<total>\d+)\s*"
@@ -256,16 +256,19 @@ def infer_stage_status(out: str | Path, stages: list[str] | None = None) -> dict
     except Exception:
         dialogue_ids = []
 
+    sb_ok = (base / "storyboard.json").exists()
     done_flags = {
-        "screenplay": (base / "storyboard.json").exists(),
+        "storyboard": sb_ok,
+        "screenplay": sb_ok,
         "images": bool(ids) and all(i in frames for i in ids),
         "audio": (not dialogue_ids) or all(i in voices for i in dialogue_ids),
         "videos": bool(ids) and all(i in clips for i in ids),
         "music": music.exists(),
         "assemble": final.exists(),
     }
-    # 部分完成也算「做过」：有任一产物则 screenplay/images 至少开始过
+    # 部分完成也算「做过」：有任一产物则 storyboard/screenplay/images 至少开始过
     started = {
+        "storyboard": done_flags["storyboard"],
         "screenplay": done_flags["screenplay"],
         "images": bool(frames) or done_flags["images"],
         "audio": bool(voices) or done_flags["audio"],
@@ -430,7 +433,23 @@ def infer_progress(out: str | Path, stage: str | None, *, live_item: dict | None
         return {"items": items, "stage_pct": stage_pct, "current": current}
     meta = _story_meta(out)
 
-    if stage == "screenplay":
+    if stage == "storyboard":
+        sb = resolve(out) / "storyboard.json"
+        stage_pct["storyboard"] = 100.0 if sb.exists() else 20.0
+        current = "生成分镜"
+        items.append(
+            {
+                "id": "misc:storyboard",
+                "label": "生成分镜",
+                "pct": stage_pct["storyboard"],
+                "step": 1 if sb.exists() else 0,
+                "total": 1,
+                "eta_s": None,
+                "status": "done" if sb.exists() else "running",
+            }
+        )
+
+    elif stage == "screenplay":
         sb = resolve(out) / "storyboard.json"
         stage_pct["screenplay"] = 100.0 if sb.exists() else 30.0
         current = "校验分镜"

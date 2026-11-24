@@ -255,6 +255,8 @@ snapshot_download(
 snapshot_download("mlx-community/gemma-3-12b-it-4bit")
 snapshot_download("mflux-community/flux2-klein-4b-mflux-q4")
 snapshot_download("mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit")
+# 小说→分镜：约 3.3 GB，16 GB Mac 可跑；与视频阶段 Gemma 分开，用完即释放
+snapshot_download("mlx-community/Qwen3-4B-Instruct-2507-4bit")
 # musicgen-mlx 只读 Audiocraft 的 state_dict.bin / compression_state_dict.bin。
 # pytorch_model.bin 与 model.safetensors 是同一套权重的 transformers 格式，约 4.5GB，不加载。
 snapshot_download(

@@ -32,6 +32,11 @@ class Settings:
     video_fps: int = 24
     video_low_ram: bool = True
     max_shots: int = 16
+    # 小说→分镜：Qwen3-4B Instruct 4bit ≈ 3.3 GB，16 GB 统一内存可跑
+    llm_model: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    # 短篇分镜 JSON 通常 1–2k tokens；过大只会拖慢首跑
+    llm_max_tokens: int = 2048
+    llm_temperature: float = 0.3
     tts_model: str = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"
     music_model: str = "facebook/musicgen-small"
     # 配乐一次生成的最长秒数；成片多长就生成多长，避免 -stream_loop 在中间留硬接缝

@@ -12,8 +12,9 @@ from typing import Iterable
 from pipeline.projects import artifacts_sub
 from pipeline.util import load_json, resolve
 
-KINDS = ("portrait", "frame", "voice", "clip", "music", "final")
+KINDS = ("storyboard", "portrait", "frame", "voice", "clip", "music", "final")
 KIND_LABELS = {
+    "storyboard": "分镜",
     "portrait": "肖像",
     "frame": "静帧",
     "voice": "配音",
@@ -34,11 +35,22 @@ def _parse_key(key: str) -> tuple[str, str]:
     return kind, nid
 
 
-def _load_story(out: str | Path) -> dict:
+def _load_story(out: str | Path, *, optional: bool = False) -> dict:
     path = resolve(out) / "storyboard.json"
     if not path.is_file():
+        if optional:
+            return {}
         raise FileNotFoundError(f"还没有分镜：{path}")
     return load_json(path)
+
+
+def _novel_ready(out: str | Path) -> bool:
+    """项目 novel.txt 或网页暂存 run_novel.txt 有正文即可。"""
+    base = resolve(out)
+    for path in (base / "novel.txt", artifacts_sub(base, "webui", "run_novel.txt")):
+        if path.is_file() and path.read_text(encoding="utf-8").strip():
+            return True
+    return False
 
 
 def _shot_map(story: dict) -> dict[str, dict]:
@@ -69,6 +81,8 @@ def _cast_ids(shot: dict | None) -> list[str]:
 
 def artifact_path(out: str | Path, kind: str, nid: str = "") -> Path:
     base = resolve(out)
+    if kind == "storyboard":
+        return base / "storyboard.json"
     if kind == "portrait":
         return artifacts_sub(base, "characters", f"{nid}.png")
     if kind == "frame":
@@ -86,6 +100,8 @@ def artifact_path(out: str | Path, kind: str, nid: str = "") -> Path:
 
 def node_label(story: dict, kind: str, nid: str = "") -> str:
     prefix = KIND_LABELS.get(kind, kind)
+    if kind == "storyboard":
+        return "从小说生成分镜"
     if kind == "portrait":
         ch = _char_map(story).get(nid) or {}
         name = str(ch.get("name") or nid).strip() or nid
@@ -101,29 +117,33 @@ def _exists(out: str | Path, kind: str, nid: str = "") -> bool:
 
 
 def direct_pre(story: dict, out: str | Path, kind: str, nid: str = "") -> list[tuple[str, str]]:
-    """一层前置。"""
+    """一层前置。只在最前插入分镜；其余边与原先一致。"""
     shots = _shot_map(story)
-    if kind == "portrait":
+    if kind == "storyboard":
         return []
+    # 其余产物都先依赖 storyboard.json（缺则生成 / 已有则跳过）
+    sb: list[tuple[str, str]] = [("storyboard", "")]
+    if kind == "portrait":
+        return sb
     if kind == "frame":
         shot = shots.get(nid)
         if not shot:
-            return []
-        return [("portrait", cid) for cid in _cast_ids(shot)]
+            return sb
+        return sb + [("portrait", cid) for cid in _cast_ids(shot)]
     if kind == "voice":
-        return []
+        return sb
     if kind == "clip":
         shot = shots.get(nid)
-        pre: list[tuple[str, str]] = [("frame", nid)]
+        pre: list[tuple[str, str]] = sb + [("frame", nid)]
         if _has_dialogue(shot):
             pre.append(("voice", nid))
         return pre
     if kind == "music":
         # 配乐只认计划片长：对白镜要有 voice（写入 video_frames）；空镜用默认帧，无产物前置
-        return [("voice", sid) for sid, shot in shots.items() if _has_dialogue(shot)]
+        return sb + [("voice", sid) for sid, shot in shots.items() if _has_dialogue(shot)]
     if kind == "final":
         # 有 music_prompt 就必须先有配乐；以前只在 bgm 已存在时才挂边，缺文件时对话框会漏掉 BGM
-        pre = [("clip", sid) for sid in shots]
+        pre = sb + [("clip", sid) for sid in shots]
         if str(story.get("music_prompt") or "").strip():
             pre.append(("music", ""))
         return pre
@@ -133,6 +153,21 @@ def direct_pre(story: dict, out: str | Path, kind: str, nid: str = "") -> list[t
 def direct_post(story: dict, kind: str, nid: str = "") -> list[tuple[str, str]]:
     """一层后继。"""
     shots = _shot_map(story)
+    if kind == "storyboard":
+        # 重写分镜会使现有角色图 / 镜头产物过时；后置默认勾选，用户可取消
+        posts: list[tuple[str, str]] = []
+        for cid in _char_map(story):
+            posts.append(("portrait", cid))
+        for sid, shot in shots.items():
+            posts.append(("frame", sid))
+            if _has_dialogue(shot):
+                posts.append(("voice", sid))
+            posts.append(("clip", sid))
+        if shots or str(story.get("music_prompt") or "").strip():
+            posts.append(("music", ""))
+        if shots:
+            posts.append(("final", ""))
+        return posts
     if kind == "portrait":
         return [
             ("frame", sid)
@@ -191,10 +226,14 @@ def _topo_sort(nodes: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
     return sorted(nodes, key=lambda n: (KIND_ORDER.get(n[0], 99), n[1] or ""))
 
 
-def validate_target(story: dict, kind: str, nid: str = "") -> str | None:
+def validate_target(story: dict, kind: str, nid: str = "", *, out: str | Path | None = None) -> str | None:
     """非法目标返回错误文案，合法返回 None。"""
     if kind not in KINDS:
         return f"未知产物类型：{kind}"
+    if kind == "storyboard":
+        if out is not None and not _novel_ready(out):
+            return "还没有小说正文：请先在上方填写并保存，或确保 projects/<片>/novel.txt 有内容"
+        return None
     shots = _shot_map(story)
     chars = _char_map(story)
     if kind == "portrait":
@@ -216,8 +255,9 @@ def plan_rerun(out: str | Path, *, kind: str, id: str = "") -> dict:
     """计算单跑计划：前向闭包 + 目标 + 后向闭包。"""
     kind = str(kind or "").strip()
     nid = str(id or "").strip()
-    story = _load_story(out)
-    err = validate_target(story, kind, nid)
+    # optional：缺 storyboard.json 时仍可规划，前置里出现「从小说生成分镜」
+    story = _load_story(out, optional=True)
+    err = validate_target(story, kind, nid, out=out)
     if err:
         return {
             "ok": False,
@@ -344,6 +384,7 @@ def execution_groups(
     frames: list[str] = []
     voices: list[str] = []
     clips: list[str] = []
+    want_storyboard = False
     want_music = False
     want_final = False
     force_portraits = False
@@ -355,7 +396,9 @@ def execution_groups(
         kind = n["kind"]
         nid = n.get("id") or ""
         force = bool(n.get("force"))
-        if kind == "portrait":
+        if kind == "storyboard":
+            want_storyboard = True
+        elif kind == "portrait":
             portraits.append(nid)
             force_portraits = force_portraits or force
         elif kind == "frame":
@@ -387,6 +430,9 @@ def execution_groups(
     voices = uniq(voices)
     clips = uniq(clips)
 
+    if want_storyboard:
+        groups.append({"stage": "storyboard", "force": True})
+        groups.append({"stage": "screenplay", "force": True})
     if portraits or frames:
         groups.append(
             {

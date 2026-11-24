@@ -1,30 +1,23 @@
 {
   "title": "雨夜重逢",
-  "style": "写实华语短剧，自然肤色，暴雨夜街角，便利店冷白灯与关东煮暖黄热气，浅景深，电影感，人脸清晰可见",
-  "music_prompt": "Sparse melancholic piano over soft rain and distant city hum, warm low strings swell gently, Chinese short-drama rainy reunion, instrumental only, no vocals, intimate cinematic underscore",
-  "music_seed": 534287682,
-  "novel": "/Users/wangxinyu/ai视频/projects/demo/novel.txt",
-  "max_shots": 16,
-  "dialogue_char_limit": 21,
-  "shot_max_seconds": 9.04,
-  "truncated": false,
-  "dialogue_lines": 3,
+  "style": "写实华语短剧，自然肤色，电影感光线，浅景深",
+  "music_prompt": "Sparse melancholic piano, soft rain, instrumental only, no vocals",
   "characters": [
     {
       "id": "linwan",
       "name": "林晚",
       "gender": "female",
-      "appearance": "年龄约二十多岁，女性，短发，肤色自然，穿着深色风衣，领子竖起",
-      "seed": 3651032805,
-      "voice": "Serena"
+      "voice": "Serena",
+      "appearance": "二十多岁女性，短发，深色风衣",
+      "seed": 4272014027
     },
     {
       "id": "zhouyu",
       "name": "周屿",
       "gender": "male",
-      "appearance": "年龄约二十多岁，男性，黑色短发，肤色自然，穿着便利店围裙，手指沾着墨水",
-      "seed": 1380277885,
-      "voice": "Dylan"
+      "voice": "Dylan",
+      "appearance": "三十岁男性，便利店围裙，手指沾墨水",
+      "seed": 1191136292
     }
   ],
   "shots": [
@@ -33,48 +26,49 @@
       "characters": [
         "linwan"
       ],
-      "location": "街角便利店门口",
-      "image_prompt": "中景，三分之四侧面，林晚竖起风衣领子推开便利店玻璃门，脸部清晰可见，雨水打在肩头，冷白灯光从门缝泻出",
-      "motion_prompt": "Locked-off camera, she opens the glass door and steps in, no zoom no dolly",
+      "location": "街角便利店外",
+      "image_prompt": "远景，雨中街道，雨滴滑落，风衣飘动，镜头微微上仰",
+      "motion_prompt": "Slow dolly in, raindrops falling steadily",
       "speaker": "",
       "dialogue": "",
-      "seed": 3723962860,
       "emotion": "calm",
+      "seed": 270992458,
+      "video_frames": 49,
       "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s001.mp4",
-      "video_frames": 49
+      "video_mode": "i2v"
     },
     {
       "id": "s002",
       "characters": [
-        "linwan",
-        "zhouyu"
+        "linwan"
       ],
-      "location": "便利店收银台",
-      "image_prompt": "中景，收银台两侧两人入画对视，脸部清晰，林晚握着热美式，周屿穿围裙抬头，关东煮热气糊在柜台，冷白灯",
-      "motion_prompt": "Locked-off camera, both freeze in eye contact with tiny facial micro-movement, no zoom no push-in",
+      "location": "便利店玻璃门旁",
+      "image_prompt": "中景，林晚短发，深色风衣，风衣领竖起，手推门，雨滴滑落",
+      "motion_prompt": "Camera follows her movement, slight sway",
       "speaker": "",
       "dialogue": "",
-      "seed": 3395481419,
-      "emotion": "nostalgic",
-      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s002.mp4",
+      "emotion": "calm",
+      "seed": 4259096257,
       "video_frames": 49,
+      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s002.mp4",
       "video_mode": "i2v"
     },
     {
       "id": "s003",
       "characters": [
-        "linwan"
+        "linwan",
+        "zhouyu"
       ],
-      "location": "便利店收银台",
-      "image_prompt": "中近景，略侧四分之三角度，林晚双手握紧纸杯，脸部清晰，嘴微微张开即将说话，眼神震惊又克制，冷白灯光映在侧脸",
-      "motion_prompt": "Locked-off camera, she speaks with natural lip motion, no zoom no focus rack",
+      "location": "便利店内",
+      "image_prompt": "中近景，林晚站在柜台前，手握热美式，眼神微怔，嘴微张",
+      "motion_prompt": "Slight camera tilt, natural blink",
       "speaker": "林晚",
       "dialogue": "你不是去了南方吗？",
-      "seed": 4059694021,
       "emotion": "surprised",
-      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s003.mp4",
-      "audio_duration": 1.48,
+      "seed": 3752370116,
+      "audio_duration": 1.42,
       "video_frames": 41,
+      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s003.mp4",
       "video_mode": "a2v"
     },
     {
@@ -82,49 +76,50 @@
       "characters": [
         "zhouyu"
       ],
-      "location": "便利店收银台",
-      "image_prompt": "中近景，略侧角度，周屿穿着围裙站在收银台后，脸部和嘴唇清晰，手指沾着墨水，嘴角轻笑着微微张开正说话，关东煮热气在背景升起",
-      "motion_prompt": "Locked-off camera, he speaks softly with clear lip motion.",
+      "location": "便利店内",
+      "image_prompt": "中近景，周屿穿围裙，手指沾墨水，低头微笑，嘴微张",
+      "motion_prompt": "Slow zoom in on his face, soft lighting",
       "speaker": "周屿",
       "dialogue": "去了。又回来了。",
-      "seed": 4248996497,
-      "emotion": "bitter",
-      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s004.mp4",
-      "audio_duration": 1.5,
+      "emotion": "warm",
+      "seed": 1945951772,
+      "audio_duration": 1.58,
       "video_frames": 41,
+      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s004.mp4",
       "video_mode": "a2v"
     },
     {
       "id": "s005",
       "characters": [
+        "linwan",
         "zhouyu"
       ],
-      "location": "便利店收银台",
-      "image_prompt": "中近景，周屿在收银台后脸部清晰入画，嘴微微张开低声说话，一只手把折好的纸条压到杯套下，关东煮热气与冷白灯",
-      "motion_prompt": "Locked-off camera, he whispers with clear lip motion while pressing the note, no zoom no rack focus",
+      "location": "便利店柜台",
+      "image_prompt": "中景，周屿将一张折纸压在杯套下，手指轻放，眼神低垂，嘴微张",
+      "motion_prompt": "Camera slowly pan to the cup, paper slightly wet",
       "speaker": "周屿",
       "dialogue": "下班等我。有些话，当时没讲完。",
-      "seed": 3088709990,
-      "emotion": "whisper",
+      "emotion": "nostalgic",
+      "seed": 3045261030,
+      "audio_duration": 3.16,
+      "video_frames": 81,
       "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s005.mp4",
-      "audio_duration": 3.24,
-      "video_frames": 81
+      "video_mode": "a2v"
     },
     {
       "id": "s006",
       "characters": [
-        "linwan",
-        "zhouyu"
+        "linwan"
       ],
-      "location": "便利店门口雨棚下",
-      "image_prompt": "中景，林晚站在雨棚下握着热美式，脸部清晰，侧身看向玻璃门内周屿的背影，雨水顺着棚沿落下",
-      "motion_prompt": "Locked-off camera, linwan watches through the glass with subtle eye movement, rain falls in background, no zoom no dolly",
+      "location": "便利店雨棚下",
+      "image_prompt": "中景，林晚立于雨棚下，风衣口袋微微鼓动，眼神凝望玻璃门，嘴微张",
+      "motion_prompt": "Camera slowly tracks her gaze, raindrops on glass",
       "speaker": "",
       "dialogue": "",
-      "seed": 1566617596,
-      "emotion": "nostalgic",
-      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s006.mp4",
+      "emotion": "sad",
+      "seed": 3051573658,
       "video_frames": 49,
+      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s006.mp4",
       "video_mode": "i2v"
     },
     {
@@ -132,16 +127,34 @@
       "characters": [
         "linwan"
       ],
-      "location": "便利店门口雨棚下",
-      "image_prompt": "中近景，略俯，林晚脸部清晰可见，低头将边角被雨水打湿的纸条放进深色风衣口袋，雨滴落在袖口",
-      "motion_prompt": "Locked-off camera, she tucks the damp note into her pocket with a small hand motion, no zoom no tilt",
+      "location": "便利店内",
+      "image_prompt": "近景，林晚低头，手指轻触风衣口袋，指尖微颤，面部清晰",
+      "motion_prompt": "Close-up, slow hand movement, natural breath",
       "speaker": "",
       "dialogue": "",
-      "seed": 1124031157,
-      "emotion": "warm",
-      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s007.mp4",
+      "emotion": "tense",
+      "seed": 4208706441,
       "video_frames": 49,
+      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s007.mp4",
+      "video_mode": "i2v"
+    },
+    {
+      "id": "s008",
+      "characters": [
+        "linwan"
+      ],
+      "location": "便利店门口",
+      "image_prompt": "中景，林晚站在雨中，风衣被风吹起，雨滴打在肩头，脸部清晰",
+      "motion_prompt": "Camera slowly pulls back, rain falling",
+      "speaker": "",
+      "dialogue": "",
+      "emotion": "calm",
+      "seed": 2289573208,
+      "video_frames": 49,
+      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s008.mp4",
       "video_mode": "i2v"
     }
-  ]
+  ],
+  "novel": "/Users/wangxinyu/ai视频/projects/demo/work/webui/run_novel.txt",
+  "music_seed": 3595908132
 }

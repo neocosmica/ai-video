@@ -628,7 +628,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 .movie-card {
   display: grid;
-  grid-template-columns: 440px minmax(0, 1fr);
+  /* 左列宽由视频比例决定；上下与右侧信息栏齐平 */
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 0;
   align-items: stretch;
   border: 1px solid var(--border);
@@ -639,30 +640,37 @@ button:disabled { opacity: .45; cursor: not-allowed; }
     linear-gradient(160deg, #151821 0%, var(--panel) 45%, #12151d 100%);
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
 }
-@media (max-width: 1100px) {
-  .movie-card { grid-template-columns: 380px minmax(0, 1fr); }
-}
-@media (max-width: 960px) {
-  .movie-card { grid-template-columns: 320px minmax(0, 1fr); }
-}
 @media (max-width: 860px) {
   .movie-card { grid-template-columns: 1fr; }
 }
 .movie-poster {
   position: relative;
-  width: 100%;
+  align-self: stretch;
+  height: auto;
   min-height: 100%;
-  aspect-ratio: 9 / 16;
+  width: auto;
+  max-width: min(56vw, 560px);
   background: #05060a;
   border-right: 1px solid var(--border);
   overflow: hidden;
+  /* 无片占位；有片时 JS 写入真实 aspect-ratio，高度跟信息栏 → 上下左贴边 */
+  aspect-ratio: 9 / 16;
+  min-width: 280px;
+}
+.movie-poster:has(.final-player[src]) {
+  min-width: 0;
+  height: 100%;
+  /* aspect-ratio 由 syncFinalPlayerAspect 写入；宽度 = 高度 × 比例 */
 }
 @media (max-width: 860px) {
   .movie-poster {
     border-right: none;
     border-bottom: 1px solid var(--border);
-    min-height: 0;
-    max-height: min(72vh, 640px);
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+    height: auto;
+    max-height: min(72vh, 720px);
   }
 }
 .final-player {
@@ -676,8 +684,18 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   border: 0;
   border-radius: 0;
   background: #000;
-  object-fit: cover;
-  object-position: center center;
+  object-fit: contain;
+  object-position: left center;
+}
+@media (max-width: 860px) {
+  .final-player {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    height: auto;
+    max-height: min(72vh, 720px);
+    object-position: center top;
+  }
 }
 .movie-info {
   display: flex;
@@ -807,6 +825,12 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   margin-bottom: 8px;
 }
 .movie-label-row .movie-label { margin: 0; }
+.movie-novel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
 .movie-label-actions {
   display: flex;
   align-items: center;
@@ -1118,11 +1142,50 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   font-weight: 300;
   line-height: 1;
 }
-.shot-preview { aspect-ratio: 9/16; background: #0b0d13 center/cover no-repeat; position: relative; }
-.shot-preview img, .shot-preview video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.shot-preview {
+  aspect-ratio: 9 / 16;
+  background: #0b0d13;
+  position: relative;
+  overflow: hidden;
+}
+/* 仅静帧：跟图片比例 */
+.shot-preview:not(.has-clip) .shot-still {
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+  display: block;
+  vertical-align: top;
+}
+/* 有视频：框以视频比例为准；静帧 cover 铺满，悬停换 video */
+.shot-preview.has-clip {
+  aspect-ratio: 384 / 640; /* metadata 到位前先用管线默认；JS 再改成真值 */
+}
+.shot-preview.has-clip .shot-still,
+.shot-preview.has-clip .shot-clip {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-position: center center;
+}
+.shot-preview.has-clip .shot-still {
+  object-fit: cover; /* 静帧缩放铺满视频框 */
+}
+.shot-preview.has-clip .shot-clip {
+  object-fit: contain;
+  display: none;
+}
+.shot-preview.has-clip.no-still .shot-clip {
+  display: block;
+}
+.shot-preview.has-clip.is-hover .shot-still { visibility: hidden; }
+.shot-preview.has-clip.is-hover .shot-clip { display: block; }
+.shot-preview.is-hover .play-badge { display: none; }
 .shot-preview .play-badge {
   position: absolute; right: 6px; bottom: 6px;
   background: rgba(0,0,0,.6); border-radius: 6px; padding: 2px 7px; font-size: 11px;
+  pointer-events: none;
 }
 .shot-body {
   padding: 10px 10px 12px;

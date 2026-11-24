@@ -22,7 +22,11 @@ from pipeline.config import Settings
 from pipeline.util import dump_json, has_cjk, load_json, resolve, snap_frames, stable_seed
 
 
-SCHEMA_HINT = """分镜不由本机 LLM 生成。请让 Cursor Agent 阅读小说后写入 projects/<片名>/storyboard.json（演示见 projects/demo/）。
+SCHEMA_HINT = """分镜可由本机 LLM 从小说生成，也可手写/Agent 写入 projects/<片名>/storyboard.json。
+
+生成：
+  ./scripts/run.sh storyboard --project <片名>
+  # 或一键：./scripts/run.sh produce --project <片名>（含 storyboard → screenplay → …）
 
 最小结构：
 {

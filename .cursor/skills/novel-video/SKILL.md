@@ -10,12 +10,12 @@ disable-model-invocation: true
 
 # 小说 → 竖屏短剧
 
-**你只负责：读小说、写分镜 JSON。** 写完后用一条脚本成片；不要逐步盯 images / audio / videos / assemble，也不要下载或调用本机聊天 LLM。
+**默认让管线从小说生成分镜并成片。** 你可改 `storyboard.json`；不要逐步盯 images / audio / videos / assemble，也不要另起聊天 LLM。
 
 ## 流程
 
 ```
-读小说 → budget（拿单镜上限）→ 写 storyboard.json → screenplay --strict → produce
+novel.txt → budget → storyboard（本机 Qwen3-4B）→ screenplay --strict → produce
 ```
 
 ### 1. 准备输入
@@ -42,9 +42,10 @@ disable-model-invocation: true
 
 这是按本机**总内存配置**查经验 token 预算表、再按 `config.json` 分辨率现算出来的，不读系统实时状态。超额度的对白必须拆成相邻多镜，**不许删字压短**。
 
-### 3. 写分镜 JSON
+### 3. 分镜 JSON
 
-最小结构：
+优先本机生成：`./scripts/run.sh storyboard --project <片名>`（或直接 `produce`）。
+也可手写。最小结构：
 
 ```json
 {

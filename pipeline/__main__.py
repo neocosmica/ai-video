@@ -23,6 +23,7 @@ from pipeline.screenplay import (
     dialogue_char_limit,
     extract_novel_dialogues,
 )
+from pipeline.storyboard_gen import DEFAULT_LLM_MODEL, cmd_storyboard
 from pipeline.util import ROOT, chunk_novel, extract_json, resolve
 from pipeline.video import cmd_videos
 from pipeline.web import cmd_web
@@ -55,7 +56,7 @@ def cmd_doctor(_: argparse.Namespace) -> None:
     print(f"主 venv 目标：{main_venv_path()}")
     print(f"LTX venv 目标：{ltx_venv_path()}")
     print(f"MusicGen venv 目标：{musicgen_venv_path()}")
-    print("分镜：Agent 只写 storyboard.json；成片用 produce 一键跑完（本机不加载聊天 LLM）")
+    print(f"分镜 LLM：{settings.llm_model}（小说→storyboard.json；约 3–4 GB，适合 16 GB Mac）")
     print(f"文生图：{settings.image_model}，{settings.image_quantize}-bit，{settings.image_width}x{settings.image_height}")
     print(
         f"视频：{settings.video_model}，{settings.video_width}x{settings.video_height}，"
@@ -74,7 +75,7 @@ def cmd_doctor(_: argparse.Namespace) -> None:
         print(f"单镜上限（auto）：{settings.video_frames_max} 帧（硬顶 {settings.video_frames_ceiling}）")
     else:
         print(f"单镜上限（手动）：{settings.video_frames_max} 帧（video_frames_auto=false）")
-    print("提示词编码器：LTX 内置 Gemma 3 12B 4-bit（不是聊天用的 VLM）")
+    print("提示词编码器：LTX 内置 Gemma 3 12B 4-bit（视频阶段用，不是分镜聊天）")
     print(f"对白 TTS：{settings.tts_model}（先于视频，供 A2V 条件）")
     print(f"配乐：{settings.music_model}")
     print(f"HF 镜像：{os.environ.get('HF_ENDPOINT')}")
@@ -86,6 +87,16 @@ def cmd_doctor(_: argparse.Namespace) -> None:
     print(f"LTX 代码：{settings.ltx_dir}（{'存在' if settings.ltx_dir.exists() else '缺失'}）")
     from pipeline.hf_cache import resolve_snapshot
 
+    llm_snap = resolve_snapshot(settings.llm_model or DEFAULT_LLM_MODEL)
+    print(
+        f"分镜 LLM 权重：{'有 ' + str(llm_snap) if llm_snap else '未下载（setup.sh 会拉）'}"
+    )
+    try:
+        import mlx_lm  # noqa: F401
+
+        print("mlx-lm：已安装（主 venv）")
+    except ImportError:
+        print("mlx-lm：缺失（请 uv sync / 重跑 setup.sh）")
     ltx_snap = resolve_snapshot(settings.video_model)
     if ltx_snap is None:
         print(f"LTX 权重缓存：未找到 {settings.video_model}")
@@ -453,10 +464,59 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     from pipeline.run import STAGES, install_storyboard
     from pipeline.util import frames_for_duration
 
-    assert STAGES == ("screenplay", "images", "audio", "videos", "music", "assemble"), STAGES
+    assert STAGES == (
+        "storyboard",
+        "screenplay",
+        "images",
+        "audio",
+        "videos",
+        "music",
+        "assemble",
+    ), STAGES
+    assert STAGES.index("storyboard") < STAGES.index("screenplay")
     # 串跑仍 music 在 videos 后；数据上配乐只依赖 audio 写入的 video_frames，不依赖 clips
     assert STAGES.index("music") > STAGES.index("audio")
     assert STAGES.index("music") > STAGES.index("videos")
+    from pipeline.storyboard_gen import (
+        _ensure_missing_dialogues,
+        _scrub_fake_dialogues,
+        _split_long_dialogues,
+    )
+
+    scrubbed = _scrub_fake_dialogues(
+        {
+            "shots": [
+                {"id": "s001", "dialogue": "雨下得很大。", "speaker": "林晚"},
+                {"id": "s002", "dialogue": "你不是去了南方吗？", "speaker": "林晚"},
+            ]
+        },
+        '林晚说：“你不是去了南方吗？”',
+    )
+    assert scrubbed["shots"][0]["dialogue"] == ""
+    assert scrubbed["shots"][1]["dialogue"] == "你不是去了南方吗？"
+
+    split = _split_long_dialogues(
+        {
+            "shots": [
+                {
+                    "id": "s001",
+                    "image_prompt": "近景",
+                    "motion_prompt": "Locked-off",
+                    "dialogue": "他是我父亲。他死在地球那天，我在火星。我只想再看一次他唱歌的样子。",
+                }
+            ]
+        },
+        12,
+    )
+    assert len(split["shots"]) >= 2, split
+    assert "".join(s["dialogue"] for s in split["shots"]).replace(" ", "") == (
+        "他是我父亲。他死在地球那天，我在火星。我只想再看一次他唱歌的样子。"
+    )
+    patched = _ensure_missing_dialogues(
+        {"characters": [{"id": "a", "name": "甲"}], "shots": [{"id": "s001", "image_prompt": "x", "dialogue": ""}]},
+        '甲说：“你好。”',
+    )
+    assert any("你好。" in str(s.get("dialogue")) for s in patched["shots"]), patched
     assert frames_for_duration(2.0, 24, min_frames=25, max_frames=97) == 49
     assert frames_for_duration(0.2, 24, min_frames=25, max_frames=97) == 25
     from pipeline.progress import StageMerge, _ProgressRelay
@@ -619,6 +679,13 @@ def build_parser() -> argparse.ArgumentParser:
             help="外部分镜 JSON；会拷进 --out/storyboard.json（缺省取 <项目文件夹>/storyboard.json）",
         )
 
+    storyboard = sub.add_parser(
+        "storyboard",
+        help="本机 LLM 从小说生成 storyboard.json（Qwen3-4B 4bit，适合 16 GB Mac）",
+    )
+    add_common(storyboard, novel=True)
+    storyboard.set_defaults(func=cmd_storyboard)
+
     screenplay = sub.add_parser(
         "screenplay",
         help="校验分镜并打印每个对白镜头的预估时长（写分镜时自查，不跑成片）",
@@ -669,17 +736,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     produce = sub.add_parser(
         "produce",
-        help="一键成片：分镜 → 校验 → 图 → 对白 → A2V 视频 → 配乐 → final.mp4（不再需要 Agent）",
+        help="一键成片：小说→分镜 → 校验 → 图 → 对白 → A2V → 配乐 → final.mp4",
     )
     add_common(produce, novel=True)
     add_storyboard(produce)
     produce.add_argument("--only", default=None, help="只重做列出的镜头，用于 images、audio 和 videos")
-    produce.set_defaults(func=cmd_produce, start="screenplay")
+    produce.set_defaults(func=cmd_produce, start="storyboard")
 
-    run = sub.add_parser("run", help="按阶段串跑（默认从 screenplay 起，等同 produce）")
+    run = sub.add_parser("run", help="按阶段串跑（默认从 storyboard 起，等同 produce）")
     add_common(run, novel=True)
     add_storyboard(run)
-    run.add_argument("--from", dest="start", default="screenplay", choices=STAGES)
+    run.add_argument("--from", dest="start", default="storyboard", choices=STAGES)
     run.add_argument(
         "--until",
         default=None,

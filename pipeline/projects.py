@@ -153,7 +153,7 @@ def clear_artifacts(
     work = artifacts_dir(base)
     removed: list[str] = []
     only_ids = _parse_only_ids(only)
-    selected = [s for s in (stages or ()) if s and s != "screenplay"]
+    selected = [s for s in (stages or ()) if s and s not in {"storyboard", "screenplay"}]
     if not selected:
         selected = ["images", "audio", "videos", "music", "assemble"]
 

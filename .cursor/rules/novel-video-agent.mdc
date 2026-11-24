@@ -5,9 +5,10 @@ alwaysApply: true
 
 # 小说 → 短剧
 
-**你（Cursor Agent）只负责第一步：读小说，写分镜 JSON。** 写完后用一条脚本成片；不要逐步盯 images / audio / videos / assemble，也不要下载或调用本机聊天 LLM / VLM。
+**默认路径：本机管线从小说生成分镜并成片。** Agent 可改 `storyboard.json`，但不要逐步盯 images / audio / videos / assemble，也不要另起聊天 LLM / VLM 抢内存。
 
 本机只跑（全部由 `produce` 串起来）：
+- **分镜**：Qwen3-4B Instruct 4-bit（mlx-lm，≈3.3 GB，适合 16 GB Mac）
 - 文生图：FLUX.2 Klein 4B 4-bit（mflux）
 - 对白：Qwen3-TTS 1.7B CustomVoice 8-bit（**先于视频**；按人物性别选音色，按镜头 emotion 写 instruct）
 - 配乐：MusicGen small（读 storyboard 的英文 `music_prompt`；按对白估出的时间轴定长）
@@ -20,7 +21,15 @@ alwaysApply: true
 ./scripts/run.sh budget --project scifi
 ```
 
-1. 读小说，写/改分镜：每个项目一个独立文件夹 `projects/<片名>/`（小说 `novel.txt`、分镜 `storyboard.json`、成片产物都在里面；演示见 `projects/demo/`）。超额度对白按标点拆成相邻多镜，**不许删字压短**；每镜换景别/角度。
+1. 小说放 `projects/<片名>/novel.txt`。分镜可由管线生成：
+
+```bash
+./scripts/run.sh storyboard --project scifi
+# 或一键（含 storyboard → screenplay → … → assemble）：
+./scripts/run.sh produce --project scifi
+```
+
+手写/改分镜时：超额度对白按标点拆成相邻多镜，**不许删字压短**；每镜换景别/角度。
 2. 人物填 `gender`（female/male）和可选 `voice`（女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric）
 3. 有对白的镜头填 `emotion`（calm/warm/sad/tense/bitter/nostalgic 等）
 4. 顶层写英文 `music_prompt`（无人声器乐）
@@ -33,7 +42,7 @@ alwaysApply: true
 逐镜打印「N 字 ≈ X 秒」。台词照小说写，语速语气由原文和 emotion 决定，
 镜头长度跟着配音走；`--strict` 只强迫把超长对白拆镜，不让你删字。
 
-6. 一条命令跑完全部剩余步骤（校验 → 图 → 对白 → A2V/I2V → 配乐 → 成片）：
+6. 一条命令跑完全部步骤（小说→分镜 → 校验 → 图 → 对白 → A2V/I2V → 配乐 → 成片）：
 
 ```bash
 ./scripts/run.sh produce --project scifi
@@ -50,7 +59,7 @@ cd "/Users/wangxinyu/.cursor/projects/Users-wangxinyu-ai/terminals" && ls -t *.t
 - 记录文件要跑起来几秒后才生成，稍等再找；找不到就让用户在终端列表里点标题含 produce 的那条。
 - 用户说「看进展 / 打开终端」时同样这么做，不要重起进程。
 
-汇报进展时读终端记录尾部 + `ls -lt projects/<片名>/work/frames`，按 `screenplay → images → audio → videos → music → assemble` 判断当前阶段，并把最新静帧贴给用户。
+汇报进展时读终端记录尾部 + `ls -lt projects/<片名>/work/frames`，按 `storyboard → screenplay → images → audio → videos → music → assemble` 判断当前阶段，并把最新静帧贴给用户。
 
 对白规则：
 - **台词按小说原样写。不要为了控制时长去改写、删字、压短台词，也不要在 emotion 里写「快说／放慢」之类的语速要求**——配音的语速和语气由原文内容和 `emotion` 决定，管线不会为了塞进镜头去调
@@ -63,7 +72,7 @@ cd "/Users/wangxinyu/.cursor/projects/Users-wangxinyu-ai/terminals" && ls -t *.t
 若一句超出单镜上限，会在句中停顿处自动切成相邻子镜头 `s007_p1/_p2`（同一次配音，语调连贯；复用 `frames/s007.png`，不重跑文生图），字幕跟着切点走；
 若一口气念完没有停顿可切，就**保留原样、让这一镜变长**。任何情况下都不会重念或改语速来迁就时长。
 
-不要重新拉取聊天用 Qwen。外貌只取原文可见特征；竖屏；有对白镜时长跟着 TTS；空镜约 2 秒；`motion_prompt` 必须英文。
+不要另起聊天 LLM。外貌只取原文可见特征；竖屏；有对白镜时长跟着 TTS；空镜约 2 秒；`motion_prompt` 必须英文。
 
 下载一律走国内镜像（`scripts/env.sh`）：HF→hf-mirror.com 且禁用 XET；PyPI→清华。`vendor/` 与 `tools/` 已入库，默认不从 GitHub 克隆；仅仓内缺失时才用 ghfast.top 回退。不要改回官方源傻等。
 

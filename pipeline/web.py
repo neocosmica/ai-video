@@ -5,8 +5,8 @@
     ./scripts/run.sh                          # 默认起网页；等同 ./scripts/run.sh web
     ./scripts/run.sh --port 8790              # 浏览器打开 http://127.0.0.1:8790
 
-职责边界（与 AGENTS.md 一致）：本地不加载聊天 LLM，分镜仍由人工/Agent 写好
-`projects/<片名>/storyboard.json`；本界面负责填写小说、维护分镜、起任务、
+职责边界：小说可经本机 MLX 聊天模型写成分镜（storyboard 阶段）；也可手写/
+Agent 维护 `projects/<片名>/storyboard.json`。本界面负责填小说、改分镜、起任务、
 看实时进度、对失败步骤单独重跑。
 
 每个项目一个独立文件夹 `projects/<片名>/`（小说、分镜、产物都在里面）；
@@ -131,6 +131,7 @@ class Job:
         detail: str = "",
         status: str = "running",
         queue_clear: list[dict] | None = None,
+        characters: str | None = None,
     ) -> None:
         self.id = task_id
         self.name = name
@@ -138,6 +139,7 @@ class Job:
         self.out = out
         self.stages = stages
         self.only = only
+        self.characters = characters
         self.cmd = list(cmd or [])
         self.log_path = log_path
         self.detail = detail
@@ -153,7 +155,11 @@ class Job:
         self.pid: int | None = None
         # 细进度只走 /api/progress SSE，不在每步 bump 时刷全局 change（避免列表狂刷新）
         self.engine = ProgressEngine(
-            out, stages=list(self.stages), task_id=task_id, only=only
+            out,
+            stages=list(self.stages),
+            task_id=task_id,
+            only=only,
+            characters=characters,
         )
         self.tracker = _EngineTracker(self.engine)
         self.returncode: int | None = None
@@ -182,6 +188,7 @@ class Job:
             out=str(snap.get("out") or ""),
             stages=stage_keys,
             only=snap.get("only"),
+            characters=snap.get("characters"),
             cmd=[str(x) for x in cmd],
             log_path=Path(snap.get("log_path") or ROOT / "output"),
             detail=str(snap.get("detail") or ""),
@@ -239,6 +246,7 @@ class Job:
                 "novel": self.novel,
                 "out": self.out,
                 "only": self.only,
+                "characters": getattr(self, "characters", None),
                 "detail": self.detail,
                 "status": self.status,
                 "stages": stages,
@@ -1039,6 +1047,7 @@ class _RestoredJob(Job):
                 "novel": snap.get("novel") or "",
                 "out": snap.get("out") or "",
                 "only": snap.get("only"),
+                "characters": snap.get("characters"),
                 "detail": snap.get("detail") or "",
                 "status": snap.get("status") or "interrupted",
                 "stages": stage_keys,
@@ -1100,8 +1109,21 @@ class _AttachedJob(Job):
         self._watch_started = False
         stages = [s["key"] if isinstance(s, dict) else s for s in (snap.get("stages") or self.stages)]
         self.stages = [s for s in stages if s in STAGE_LABELS] or list(STAGES)
+        characters = getattr(self, "characters", None)
+        if not characters:
+            try:
+                from pipeline.run_queue import load_queue, queue_portrait_ids
+
+                characters = queue_portrait_ids(load_queue(self.out))
+                self.characters = characters
+            except Exception:
+                characters = None
         self.engine = ProgressEngine(
-            self.out, stages=list(self.stages), task_id=self.id, only=self.only
+            self.out,
+            stages=list(self.stages),
+            task_id=self.id,
+            only=self.only,
+            characters=characters,
         )
         self.tracker = _EngineTracker(self.engine)
         self.refresh_from_disk()
@@ -1224,11 +1246,11 @@ def _single_stage_cmd(
 ) -> list[str]:
     """单阶段命令；CLI 子命令一次只能一个，多阶段靠 run / bash && 串。"""
     cmd = [sys.executable, "-m", "pipeline", stage, "--out", str(out)]
-    if stage == "screenplay":
-        # screenplay 只校验：外部分镜 + 小说路径用于对白覆盖检查
+    if stage in {"storyboard", "screenplay"}:
+        # storyboard：小说→分镜；screenplay：校验（可带外部分镜）
         if novel:
             cmd += ["--novel", str(resolve(novel))]
-        if storyboard:
+        if storyboard and stage == "screenplay":
             cmd += ["--storyboard", str(resolve(storyboard))]
     if only and stage in {"images", "audio", "videos"}:
         cmd += ["--only", str(only)]
@@ -1243,6 +1265,7 @@ def build_artifact_groups_cmd(
     *,
     out: str,
     groups: list[dict],
+    novel: str | None = None,
 ) -> tuple[list[str], Path, list[str]]:
     """按 execution_groups 拼 bash && 串跑；返回 (argv, log, stage_keys)。"""
     out_dir = resolve(out)
@@ -1257,6 +1280,7 @@ def build_artifact_groups_cmd(
                 _single_stage_cmd(
                     stage,
                     out=out_dir,
+                    novel=novel,
                     only=g.get("only"),
                     force=bool(g.get("force")),
                     characters=",".join(chars) if chars else None,
@@ -1496,7 +1520,18 @@ def write_text(rel: str, content: str) -> None:
 
 
 def read_storyboard(rel: str) -> dict:
-    return json.loads(safe_path(rel).read_text(encoding="utf-8"))
+    """读分镜；文件不存在时 ``exists=False``，不抛错（网页据此清空角色/镜头列表）。"""
+    path = safe_path(rel)
+    if not path.is_file():
+        return {"path": rel, "exists": False, "storyboard": None, "mtime": None}
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("storyboard.json 必须是 JSON 对象")
+    return {"path": rel, "exists": True, "storyboard": data, "mtime": mtime}
 
 
 def write_storyboard(rel: str, data: dict) -> None:
@@ -1527,14 +1562,25 @@ def materialize_web_draft(
     sb_rel: str | None = None
     novel_rel: str | None = None
     if isinstance(storyboard_data, dict):
+        # 剥掉网页内部标记；空壳（无镜头）不装进运行态，避免假分镜让成片依赖算空
+        payload = {
+            k: v for k, v in storyboard_data.items() if not str(k).startswith("_")
+        }
+        shots = payload.get("shots") or []
+        has_shot = any(
+            isinstance(s, dict) and str(s.get("id") or "").strip() for s in shots
+        )
         run_sb = webui / "run_storyboard.json"
         run_sb.write_text(
-            json.dumps(storyboard_data, ensure_ascii=False, indent=2) + "\n",
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        draft_rel = str(run_sb.relative_to(ROOT)).replace("\\", "/")
-        install_storyboard(out, draft_rel, force=True)
-        sb_rel = str((base / "storyboard.json").relative_to(ROOT)).replace("\\", "/")
+        if has_shot:
+            draft_rel = str(run_sb.relative_to(ROOT)).replace("\\", "/")
+            install_storyboard(out, draft_rel, force=True)
+            sb_rel = str((base / "storyboard.json").relative_to(ROOT)).replace("\\", "/")
+        else:
+            sb_rel = None
     if novel_text is not None:
         run_novel = webui / "run_novel.txt"
         run_novel.write_text(str(novel_text).rstrip() + "\n", encoding="utf-8")
@@ -1570,9 +1616,26 @@ def validate_storyboard(
         src = safe_path(path_str)
     raw = storyboard if isinstance(storyboard, dict) else None
     if raw is None:
-        if src is None or not src.exists():
-            raise FileNotFoundError("没有可校验的分镜")
+        if src is None or not src.is_file():
+            # 还没有分镜文件：网页应显示空列表，不算校验失败
+            return _validate_skip_empty(
+                settings,
+                source="disk",
+                novel_source="none",
+                reason="missing",
+            )
         raw = load_json(src)
+
+    shots_in = raw.get("shots") if isinstance(raw, dict) else None
+    if not isinstance(shots_in, list) or not shots_in:
+        # 空壳分镜（无镜头）不跑硬校验
+        return _validate_skip_empty(
+            settings,
+            source="memory" if isinstance(storyboard, dict) else "disk",
+            novel_source="memory" if novel_text is not None else "none",
+            reason="empty",
+            characters=len((raw or {}).get("characters") or []) if isinstance(raw, dict) else 0,
+        )
 
     novel_path: Path | None = None
     novel_body = novel_text
@@ -1601,16 +1664,40 @@ def validate_storyboard(
     max_seconds = max_frames / fps
     limit = dialogue_char_limit(settings.video_frames_max, fps)
     detail = settings.budget_detail or {}
-    normalized = normalize_storyboard(
-        raw,
-        novel_path=novel_path,
-        max_shots=settings.max_shots,
-        dialogue_limit=None,
-        max_seconds=max_seconds,
-    )
-    shots = normalized["shots"]
-    if novel_body:
-        assert_dialogue_coverage(novel_body, shots)
+    try:
+        normalized = normalize_storyboard(
+            raw,
+            novel_path=novel_path,
+            max_shots=settings.max_shots,
+            dialogue_limit=None,
+            max_seconds=max_seconds,
+        )
+        shots = normalized["shots"]
+        if novel_body:
+            assert_dialogue_coverage(novel_body, shots)
+    except SystemExit as exc:
+        # screenplay 用 SystemExit 报错；网页转成 JSON，别把 HTTP 线程干死
+        msg = str(exc).strip() or "校验未通过"
+        return {
+            "ok": False,
+            "strict_error": msg,
+            "violations": [],
+            "shots": len(shots_in),
+            "characters": len(raw.get("characters") or []),
+            "dialogue_lines": 0,
+            "limit_chars": limit,
+            "max_seconds": round(max_seconds, 1),
+            "max_frames": max_frames,
+            "fps": fps,
+            "chars_per_second": CHARS_PER_SECOND,
+            "resolution": f"{settings.video_width}x{settings.video_height}",
+            "total_gib": detail.get("total_gib"),
+            "tier_gib": detail.get("tier_gib"),
+            "novel": str(novel_path) if novel_path else "",
+            "report": msg,
+            "source": "memory" if isinstance(storyboard, dict) else "disk",
+            "novel_source": "memory" if novel_text is not None else ("disk" if novel_path else "none"),
+        }
 
     rows, violations = dialogue_budget_violations(
         shots, limit, max_seconds, strict=strict
@@ -1651,6 +1738,46 @@ def validate_storyboard(
         "novel_source": "memory" if novel_text is not None else ("disk" if novel_path else "none"),
     }
     return result
+
+
+def _validate_skip_empty(
+    settings,
+    *,
+    source: str,
+    novel_source: str,
+    reason: str,
+    characters: int = 0,
+) -> dict:
+    """无分镜 / 无镜头：跳过硬校验，返回 ok。"""
+    from pipeline.screenplay import CHARS_PER_SECOND, dialogue_char_limit
+    from pipeline.util import snap_frames
+
+    fps = max(1, settings.video_fps)
+    max_frames = snap_frames(settings.video_frames_max)
+    max_seconds = max_frames / fps
+    limit = dialogue_char_limit(settings.video_frames_max, fps)
+    detail = settings.budget_detail or {}
+    return {
+        "ok": True,
+        "strict_error": None,
+        "violations": [],
+        "shots": 0,
+        "characters": characters,
+        "dialogue_lines": 0,
+        "limit_chars": limit,
+        "max_seconds": round(max_seconds, 1),
+        "max_frames": max_frames,
+        "fps": fps,
+        "chars_per_second": CHARS_PER_SECOND,
+        "resolution": f"{settings.video_width}x{settings.video_height}",
+        "total_gib": detail.get("total_gib"),
+        "tier_gib": detail.get("tier_gib"),
+        "novel": "",
+        "report": "",
+        "skipped": reason,
+        "source": source,
+        "novel_source": novel_source,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1843,7 +1970,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"path": rel, "ok": True})
             elif path == "/api/storyboard/read":
                 rel = str(data.get("path") or "")
-                self._json({"path": rel, "storyboard": read_storyboard(rel)})
+                self._json(read_storyboard(rel))
             elif path == "/api/storyboard/write":
                 rel = str(data.get("path") or "")
                 write_storyboard(rel, data.get("storyboard") or {})
@@ -2120,6 +2247,7 @@ class _Handler(BaseHTTPRequestHandler):
             build_groups_from_queue,
             load_queue,
             queue_only_shots,
+            queue_portrait_ids,
             reset_statuses,
             save_queue,
         )
@@ -2159,13 +2287,20 @@ class _Handler(BaseHTTPRequestHandler):
         ]
         if to_clear:
             clear_nodes(out, to_clear)
-        cmd, log_path, stage_keys = build_artifact_groups_cmd(out=out, groups=groups)
+        novel = novel_rel or str(data.get("novel") or "").strip()
+        if not novel:
+            project_novel = resolve(out) / "novel.txt"
+            if project_novel.is_file() and project_novel.read_text(encoding="utf-8").strip():
+                novel = str(project_novel.relative_to(ROOT)).replace("\\", "/")
+        cmd, log_path, stage_keys = build_artifact_groups_cmd(
+            out=out, groups=groups, novel=novel or None
+        )
         only = queue_only_shots(queue)
+        characters = queue_portrait_ids(queue)
         n = len(queue["items"])
         labels = "、".join(it.get("label") or it["key"] for it in queue["items"][:4])
         if n > 4:
             labels += f" 等 {n} 项"
-        novel = novel_rel or str(data.get("novel") or "").strip()
         job = Job(
             uuid.uuid4().hex[:12],
             name=f"启动 · {n} 项",
@@ -2173,6 +2308,7 @@ class _Handler(BaseHTTPRequestHandler):
             out=out,
             stages=stage_keys,
             only=only,
+            characters=characters,
             cmd=cmd,
             log_path=log_path,
             detail=labels,

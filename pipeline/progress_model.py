@@ -17,8 +17,9 @@ from typing import Callable
 from pipeline.projects import artifacts_sub
 from pipeline.util import resolve
 
-STAGES = ("screenplay", "images", "audio", "videos", "music", "assemble")
+STAGES = ("storyboard", "screenplay", "images", "audio", "videos", "music", "assemble")
 STAGE_LABELS = {
+    "storyboard": "生成分镜",
     "screenplay": "校验分镜",
     "images": "静帧生成",
     "audio": "对白配音",
@@ -27,10 +28,11 @@ STAGE_LABELS = {
     "assemble": "合成混音",
 }
 STAGE_WEIGHTS = {
+    "storyboard": 0.06,
     "screenplay": 0.02,
-    "images": 0.18,
+    "images": 0.17,
     "audio": 0.10,
-    "videos": 0.60,
+    "videos": 0.55,
     "music": 0.05,
     "assemble": 0.05,
 }
@@ -58,6 +60,8 @@ _ITEM_START = (
     (re.compile(r"^对白\s+(\S+)\s*·"), "audio"),
     (re.compile(r"^整理\s+(\S+)"), "assemble"),
 )
+_STORYBOARD_START = re.compile(r"^(?:加载分镜 LLM|小说\s*→\s*分镜|生成分镜：)")
+_STORYBOARD_DONE = re.compile(r"^(?:已写分镜|已有分镜，跳过生成)")
 _MUX_START = re.compile(r"^混音成片\b")
 _MUX_DONE = re.compile(r"^成片：")
 _ITEM_DONE = (re.compile(r"^已有镜头\s+(\S+)，跳过"),)
@@ -129,15 +133,19 @@ def build_plan(
     stages: list[str] | tuple[str, ...] | None = None,
     *,
     only: str | None = None,
+    characters: str | None = None,
 ) -> list[dict]:
     """按分镜生成完整步骤表；阶段权重均分到该阶段各原子步。
 
-    ``only``：镜头级重跑时只列这些镜头；且不列肖像步骤（已有头像不因重跑静帧重做）。
+    ``only``：镜头级重跑时只列这些镜头。
+    ``characters``：显式要跑的肖像 id；队列里有肖像时传入，避免被 only 滤掉。
+    未传 ``characters`` 且带了 ``only`` 时不列肖像（单跑静帧复用已有头像）。
     """
     selected = [s for s in (stages or STAGES) if s in STAGE_WEIGHTS]
     if not selected:
         selected = list(STAGES)
     only_ids = _parse_only_ids(only)
+    char_filter = _parse_only_ids(characters)
     story = _load_story(out)
     shots = [s for s in (story.get("shots") or []) if str(s.get("id") or "").strip()]
     chars = [c for c in (story.get("characters") or []) if str(c.get("id") or "").strip()]
@@ -152,18 +160,25 @@ def build_plan(
     ]
     char_ids = [str(c["id"]).strip() for c in chars]
     char_names = {str(c["id"]).strip(): str(c.get("name") or c["id"]).strip() for c in chars}
+    if char_filter is not None:
+        portrait_ids = [cid for cid in char_ids if cid in char_filter]
+    elif not only_ids:
+        portrait_ids = list(char_ids)
+    else:
+        portrait_ids = []
 
     by_stage: dict[str, list[tuple[str, str]]] = {s: [] for s in selected}
+
+    if "storyboard" in by_stage:
+        by_stage["storyboard"].append(("storyboard:generate", "生成分镜"))
 
     if "screenplay" in by_stage:
         by_stage["screenplay"].append(("screenplay:validate", "校验分镜"))
 
     if "images" in by_stage:
-        # 镜头级重跑不排肖像：静帧复用已有参考图
-        if not only_ids:
-            for cid in char_ids:
-                name = char_names.get(cid, cid)
-                by_stage["images"].append((f"images:portrait:{cid}", f"肖像 {name}"))
+        for cid in portrait_ids:
+            name = char_names.get(cid, cid)
+            by_stage["images"].append((f"images:portrait:{cid}", f"肖像 {name}"))
         for sid in shot_ids:
             by_stage["images"].append((f"images:{sid}", f"静帧 {sid}"))
         if not by_stage["images"]:
@@ -230,11 +245,13 @@ class ProgressEngine:
         stages: list[str] | None = None,
         task_id: str = "",
         only: str | None = None,
+        characters: str | None = None,
         on_update: Callable[[dict], None] | None = None,
     ) -> None:
         self.out = out
         self.task_id = task_id
         self.only = only
+        self.characters = characters
         self.stages = [s for s in (stages or list(STAGES)) if s in STAGE_WEIGHTS] or list(STAGES)
         self.on_update = on_update
         self.lock = threading.Lock()
@@ -258,7 +275,9 @@ class ProgressEngine:
 
     # -- plan --------------------------------------------------------------
     def _rebuild_plan(self) -> None:
-        planned = build_plan(self.out, self.stages, only=self.only)
+        planned = build_plan(
+            self.out, self.stages, only=self.only, characters=self.characters
+        )
         old = dict(self.steps)
         self.steps = {}
         self.step_order = []
@@ -597,6 +616,21 @@ class ProgressEngine:
             self._bump_locked(step_id, step=n, total=total, pct=100.0 * n / max(1, total), eta_s=eta_s)
             return
 
+        if _STORYBOARD_START.match(text) and "storyboard:generate" in self.steps:
+            self._activate("storyboard:generate")
+            if self.steps["storyboard:generate"]["status"] != "done":
+                self.steps["storyboard:generate"]["status"] = "running"
+                self.steps["storyboard:generate"]["pct"] = max(
+                    float(self.steps["storyboard:generate"].get("pct") or 0), 5.0
+                )
+            return
+
+        if _STORYBOARD_DONE.match(text) and "storyboard:generate" in self.steps:
+            self._bump_locked("storyboard:generate", pct=100.0, status="done")
+            if (resolve(self.out) / "storyboard.json").exists():
+                self._rebuild_plan()
+            return
+
         if _MUX_START.match(text) and "assemble:mux" in self.steps:
             self._activate("assemble:mux")
             if self.steps["assemble:mux"]["status"] != "done":
@@ -720,7 +754,9 @@ class ProgressEngine:
                 continue
             stage = row["stage"]
             done = False
-            if sid == "screenplay:validate":
+            if sid == "storyboard:generate":
+                done = (base / "storyboard.json").exists()
+            elif sid == "screenplay:validate":
                 done = (base / "storyboard.json").exists()
             elif sid.startswith("images:portrait:"):
                 cid = sid.split(":", 2)[-1]

@@ -1,15 +1,16 @@
 # 本地小说到竖屏短剧
 
-在 **Apple Silicon Mac**（推荐 16GB+ 统一内存）上，把小说做成竖屏短剧。图像、视频、对白、配乐都在本机算；**只有分镜 JSON 由 Cursor Agent 写**，写好后用一条脚本跑到成片，中途不再依赖 Agent。
+在 **Apple Silicon Mac**（推荐 16GB+ 统一内存）上，把小说做成竖屏短剧。分镜、图像、视频、对白、配乐都在本机算；`produce` 一条命令从小说跑到成片。
 
 ## 本机模型
 
 | 步骤 | 模型 | 说明 |
 |---|---|---|
+| 小说→分镜 | Qwen3-4B Instruct 4-bit（MLX） | ≈3.3 GB，适合 16 GB Mac；写 `storyboard.json` |
 | 文生图 | FLUX.2 Klein 4B 4-bit | 竖屏静帧 + 参考图锁脸 |
 | 对白 | Qwen3-TTS 1.7B CustomVoice 8-bit | 先于视频；按性别选音色，按情绪写 instruct |
 | 图+音频生视频 | LTX-2.3 int4 distilled **a2v** | 有对白：静帧 + TTS wav 条件；空镜仍 I2V；帧数跟对白时长 |
-| 配乐 | MusicGen small | 读英文 `music_prompt`，无人声器乐；**在所有镜头渲染完后按成片实际长度生成** |
+| 配乐 | MusicGen small | 读英文 `music_prompt`，无人声器乐；按 `video_frames` 定长 |
 
 首次 `setup.sh` 主要拉 **模型权重**（数十 GB）并安装 Python 依赖；`vendor/`（LTX、MusicGen 源码）和 `tools/`（ffmpeg）已在本仓库内，默认不再从 GitHub 克隆。请插电，保持网络畅通（默认走国内镜像）。
 
@@ -43,24 +44,27 @@ CLI 全部子命令支持 `--project <片名>`，等价于 `--out projects/<片�
 输出「N 帧 ≈ S 秒」和「台词约 C 字」。超额度对白必须拆成相邻多镜，**不许删字压短**。
 经验值：16 GB→3120 tokens（384×640 下 97 帧）、32 GB→6720 tokens（217 帧）；更高内存顶到 241 帧。
 
-1. **Agent 只做这一步**：读小说，写 `projects/<片名>/storyboard.json`（小说放同文件夹 `novel.txt`）。人物填 `gender`/`voice`，镜头填 `emotion`，顶层英文 `music_prompt`。**台词按小说原样写**；超过额度 C 的对白按标点拆镜（每镜换景别/角度）。
-2. **硬校验**（秒级，不加载模型；`--strict` 超额度会失败并给出可照抄的拆法）：
+1. **小说→分镜**（本机 Qwen3-4B；已有分镜且未 `--force` 会跳过）：
+
+```bash
+./scripts/run.sh storyboard --project scifi
+```
+
+也可手写 / 改 `storyboard.json`。人物填 `gender`/`voice`，镜头填 `emotion`，顶层英文 `music_prompt`。**台词按小说原样**；超额度按标点拆镜。
+
+2. **硬校验**（秒级；`--strict` 超额度会失败并给出可照抄的拆法）：
 
 ```bash
 ./scripts/run.sh screenplay --strict --project scifi
 ```
 
-逐镜打印「N 字 ≈ X 秒」。台词该多长就写多长——语速和语气由原文与 `emotion` 决定，
-镜头长度跟着配音走。`--strict` 只强迫拆镜，不让你为时长删字。
-
-3. **一条脚本成片**（校验 → 图 → 对白 → **A2V/I2V 视频** → **配乐** → 混音字幕）：
+3. **一条脚本成片**（生成分镜 → 校验 → 图 → 对白 → **A2V/I2V** → **配乐** → 混音字幕）：
 
 ```bash
 ./scripts/run.sh produce --project scifi
 ```
 
-成片在 `projects/<片名>/final.mp4`。`produce` 会把外部分镜拷进项目文件夹，再串跑全部阶段；**不需要再逐步喊 Agent**。
-项目文件夹里已有分镜时默认不覆盖（audio 可能已自动拆过镜），要覆盖请加 `--force`。
+成片在 `projects/<片名>/final.mp4`。已有分镜时默认不覆盖（audio 可能已自动拆过镜），要重写分镜请加 `--force`。
 
 有对白的镜头：TTS → 写入 `video_frames` → `ltx-2-mlx a2v --distilled --audio … --image …`。无对白空镜：定长 I2V（`--no-audio`）。成片混音仍用 TTS 原轨 + BGM（A2V 片内音轨在 normalize 时剥掉，避免双轨）。
 

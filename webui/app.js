@@ -5,8 +5,9 @@
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const ALL_STAGES = ["screenplay", "images", "audio", "videos", "music", "assemble"];
+const ALL_STAGES = ["storyboard", "screenplay", "images", "audio", "videos", "music", "assemble"];
 const STAGE_LABELS = {
+  storyboard: "生成分镜",
   screenplay: "校验分镜",
   images: "静帧生成",
   audio: "对白配音",
@@ -31,6 +32,8 @@ const state = {
   shotSb: null, // 镜头网格里编辑的分镜（与磁盘同步；脏时不被自动刷新覆盖）
   shotSbPath: "",
   shotSbDirty: false,
+  shotSbExists: false, // 磁盘上是否有 storyboard.json
+  shotSbMtime: null,
   portraits: {}, // id → {url, mtime}，镜头卡迷你头像用
   polling: null,
   fps: 24,
@@ -98,13 +101,43 @@ function playTaskDoneChime() {
   } catch (_) {}
 }
 
+function jobHasStage(job, stage) {
+  for (const s of job?.stages || []) {
+    const key = typeof s === "string" ? s : s?.key;
+    if (key === stage) return true;
+  }
+  return false;
+}
+
+async function reloadStoryboardAfterGen() {
+  const out = state.currentOut;
+  if (!out || state.shotSbDirty) return;
+  try {
+    state.shotSb = null;
+    await loadShotSb(out, { force: true });
+    const sb = state.shotSb || {};
+    setTitleDisplay(String(sb.title || "").trim());
+    setStyleDisplay(String(sb.style || "").trim());
+    setMusicDisplay(String(sb.music_prompt || "").trim());
+    setMusicSeedDisplay(sb.music_seed);
+    clearShotSbDirty();
+    await renderShots();
+    toast("分镜已更新");
+  } catch (err) {
+    toast(`刷新分镜失败：${err.message || err}`, true);
+  }
+}
+
 function noteJobStatuses(tasks) {
   for (const job of tasks || []) {
     if (!job?.id) continue;
     const next = job.status || "";
     const prev = jobStatusSeen.get(job.id);
     jobStatusSeen.set(job.id, next);
-    if (prev === "running" && next === "success") playTaskDoneChime();
+    if (prev === "running" && next === "success") {
+      playTaskDoneChime();
+      if (jobHasStage(job, "storyboard")) reloadStoryboardAfterGen();
+    }
   }
 }
 
@@ -293,9 +326,14 @@ async function openProject(name, path, { autoSelectRunning = true } = {}) {
   shotsLastOut = "";
   state.shotSb = null;
   state.shotSbPath = "";
+  state.shotSbExists = false;
+  state.shotSbMtime = null;
   clearShotSbDirty();
   const castEl = $("#final-cast");
-  if (castEl) delete castEl.dataset.sig;
+  if (castEl) {
+    delete castEl.dataset.sig;
+    castEl.innerHTML = "";
+  }
   clearShotsMsg();
   try {
     await api("/api/project/select", {
@@ -321,6 +359,8 @@ function backToProjects() {
   state.selectedTaskId = null;
   state.shotSb = null;
   state.shotSbPath = "";
+  state.shotSbExists = false;
+  state.shotSbMtime = null;
   clearShotSbDirty();
   try { localStorage.removeItem("nv_last_project"); } catch {}
   if (state.polling) { clearInterval(state.polling); state.polling = null; }
@@ -731,10 +771,18 @@ async function webDraftForPipeline() {
     return null;
   }
   if (!state.shotSb) await loadShotSb(state.currentOut);
-  return {
-    storyboard_data: snapshotShotSbFromUi(),
-    novel_text: novelValue(),
-  };
+  const draft = { novel_text: novelValue() };
+  // 无分镜 / 空壳不传 storyboard_data，避免 materialize 写出假 storyboard.json
+  // 把「成片」依赖算成无前置
+  const missing = !!(state.shotSb?._missing || state.shotSbExists === false);
+  if (!missing && state.shotSb) {
+    const snap = snapshotShotSbFromUi();
+    const shots = Array.isArray(snap.shots) ? snap.shots : [];
+    if (shots.some((s) => s && s.id) || state.shotSbDirty) {
+      draft.storyboard_data = snap;
+    }
+  }
+  return draft;
 }
 
 function queueItems() {
@@ -849,6 +897,34 @@ async function clearRunQueue() {
   } catch (err) {
     toast(`清空失败：${err.message}`, true);
   }
+}
+
+async function generateStoryboardFromNovel() {
+  if (!state.currentOut) {
+    toast("请先打开项目", true);
+    return;
+  }
+  await flushOpenEditsInShotsCard();
+  const novel = novelValue();
+  if (!novel.trim()) {
+    toast("请先填写小说正文", true);
+    return;
+  }
+  // 正文先落盘，规划接口才能认定「小说已就绪」
+  const novelPath = projectNovelPath();
+  try {
+    if (novelPath) {
+      await api("/api/file/write", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: novelPath, content: novel }),
+      });
+    }
+  } catch (err) {
+    toast(`保存正文失败：${err.message || err}`, true);
+    return;
+  }
+  await openRerunDialog({ kind: "storyboard", id: "" });
 }
 
 async function startTask() {
@@ -1314,12 +1390,19 @@ function renderLiveItems(job) {
     return;
   }
 
-  let lastStage = null;
+  let lastGroup = null;
   const parts = [];
   for (const i of list) {
-    if (i.stage && i.stage !== lastStage) {
-      lastStage = i.stage;
-      parts.push(`<div class="step-group">${esc(STAGE_LABELS[i.stage] || i.stage)}</div>`);
+    // 肖像与静帧同属 images 阶段，列表里单独成组，避免「肖像进度条」被静帧标题盖住
+    const groupKey = String(i.id || "").startsWith("images:portrait:")
+      ? "portraits"
+      : (i.stage || "");
+    const groupLabel = groupKey === "portraits"
+      ? "肖像生成"
+      : (STAGE_LABELS[i.stage] || i.stage);
+    if (groupKey && groupKey !== lastGroup) {
+      lastGroup = groupKey;
+      parts.push(`<div class="step-group">${esc(groupLabel)}</div>`);
     }
     const pct = liveItemPct(i);
     const stepText = liveItemStepText(i, pct);
@@ -1592,6 +1675,7 @@ function scheduleAutoValidate() {
 
 function markShotSbDirty() {
   state.shotSbDirty = true;
+  if (state.shotSb) delete state.shotSb._missing;
   const el = $("#shots-dirty");
   if (el) el.hidden = false;
   scheduleAutoValidate();
@@ -2022,36 +2106,78 @@ function ensureShotCard(id) {
   return card;
 }
 
+function emptyStoryboardShell() {
+  return {
+    title: "",
+    style: "",
+    music_prompt: "",
+    characters: [],
+    shots: [],
+    _missing: true,
+  };
+}
+
 async function loadShotSb(out, { force = false } = {}) {
   const path = `${out}/storyboard.json`;
-  // 同路径且已有内存副本：直接复用（脏编辑不被磁盘覆盖）
-  if (!force && state.shotSb && state.shotSbPath === path) return state.shotSb;
-  if (!force && state.shotSbDirty && state.shotSb && state.shotSbPath === path) return state.shotSb;
+  // 有未保存编辑：不拿磁盘盖掉
+  if (!force && state.shotSbDirty && state.shotSb && state.shotSbPath === path) {
+    return state.shotSb;
+  }
+  // 未脏时默认跟文件走；force / 路径变了才跳过「同路径缓存」
+  if (!force && state.shotSb && state.shotSbPath === path && state.shotSbMtime != null) {
+    // 仍去读盘比 mtime，避免删文件后界面残留
+  }
+  let data;
   try {
-    const data = await api("/api/storyboard/read", {
+    data = await api("/api/storyboard/read", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     });
-    state.shotSb = data.storyboard || { title: state.project || "", characters: [], shots: [] };
   } catch {
-    state.shotSb = {
-      title: titleValue() || state.project || "新片",
-      style: "写实华语短剧，自然肤色，电影感光线，浅景深",
-      music_prompt: "English instrumental BGM, no vocals",
-      characters: [],
-      shots: [],
-    };
+    data = { exists: false, storyboard: null, mtime: null };
   }
-  if (!Array.isArray(state.shotSb.shots)) state.shotSb.shots = [];
-  if (!Array.isArray(state.shotSb.characters)) state.shotSb.characters = [];
+  const exists = !!data.exists && !!data.storyboard;
+  const mtime = data.mtime == null ? null : Number(data.mtime);
+  // 未脏且文件没变：复用内存（保留本地补过的 seed 显示）
+  if (
+    !force
+    && state.shotSb
+    && state.shotSbPath === path
+    && state.shotSbExists === exists
+    && state.shotSbMtime === mtime
+    && exists
+  ) {
+    return state.shotSb;
+  }
+
   state.shotSbPath = path;
   state.currentStoryboard = path;
+  state.shotSbExists = exists;
+  state.shotSbMtime = mtime;
+
+  if (!exists) {
+    state.shotSb = emptyStoryboardShell();
+    clearShotSbDirty();
+    clearShotsMsg();
+    if (!isTitleEditing()) setTitleDisplay(state.project || "");
+    if (!isStyleEditing()) setStyleDisplay("");
+    if (!isMusicEditing()) setMusicDisplay("");
+    setMusicSeedDisplay(null);
+    return state.shotSb;
+  }
+
+  state.shotSb = data.storyboard;
+  if (!Array.isArray(state.shotSb.shots)) state.shotSb.shots = [];
+  if (!Array.isArray(state.shotSb.characters)) state.shotSb.characters = [];
+  delete state.shotSb._missing;
   // 缺 seed 时按管线同款算法补齐；若与磁盘不一致则标脏，提示保存写回
   const filled = await ensureStorySeeds(state.shotSb);
   clearShotSbDirty();
   if (filled) markShotSbDirty();
   setMusicSeedDisplay(state.shotSb.music_seed);
+  if (!isStyleEditing()) setStyleDisplay(String(state.shotSb.style || "").trim());
+  if (!isMusicEditing()) setMusicDisplay(String(state.shotSb.music_prompt || "").trim());
   // 片名取分镜 title，不要用项目文件夹名顶上
   const sbTitle = String(state.shotSb.title || "").trim();
   if (sbTitle && !isTitleEditing()) {
@@ -2250,8 +2376,18 @@ async function validateShotSbFromGrid({ auto = false } = {}) {
     try { await loadShotSb(out); } catch { return; }
   }
   if (!state.shotSb) return;
+  // 无分镜文件 / 无镜头：不算失败，清掉「硬校验未通过」
+  if (state.shotSb._missing || state.shotSbExists === false) {
+    clearShotsMsg();
+    return;
+  }
   const sb = snapshotShotSbFromUi();
   state.shotSb = sb;
+  const shots = Array.isArray(sb.shots) ? sb.shots : [];
+  if (!shots.length) {
+    clearShotsMsg();
+    return;
+  }
   const novel = novelValue();
   try {
     const data = await api("/api/storyboard/validate", {
@@ -2265,6 +2401,10 @@ async function validateShotSbFromGrid({ auto = false } = {}) {
       }),
     });
     if (seq !== validateSeq) return;
+    if (data.skipped) {
+      clearShotsMsg();
+      return;
+    }
     if (data.ok === false || data.strict_error || (data.violations || []).length) {
       setShotsMsg(formatValidateFailure(data), { bad: true });
       return;
@@ -2880,11 +3020,17 @@ function refreshShotCharacterSelects() {
 
 function renderFinalMeta(info = {}) {
   const castEl = $("#final-cast");
-  // 片名 / 正文默认展示态；编辑中不覆盖
-  const sbTitle = String(info.title || state.shotSb?.title || "").trim();
-  if (sbTitle && !isTitleEditing()) {
-    const cur = titleValue();
-    if (!cur || cur === state.project) setTitleDisplay(sbTitle);
+  // 片名 / 正文默认展示态；编辑中不覆盖。无分镜时片名退回项目名，风格/配乐清空。
+  if (!isTitleEditing()) {
+    if (info.missing) {
+      setTitleDisplay(state.project || "");
+    } else {
+      const sbTitle = String(info.title || state.shotSb?.title || "").trim();
+      if (sbTitle) {
+        const cur = titleValue();
+        if (!cur || cur === state.project) setTitleDisplay(sbTitle);
+      }
+    }
   }
   const novel = String(info.novelText || "").trim();
   if (novel && !isNovelEditing() && !novelValue()) setNovelDisplay(novel);
@@ -2908,14 +3054,12 @@ function renderFinalMeta(info = {}) {
   }
 
   if (!isStyleEditing()) {
-    const style = String(info.style || state.shotSb?.style || "").trim();
-    if (style || !styleValue()) setStyleDisplay(style);
+    setStyleDisplay(String(info.style || state.shotSb?.style || "").trim());
   }
   if (!isMusicEditing()) {
-    const music = String(info.music_prompt || state.shotSb?.music_prompt || "").trim();
-    if (music || !musicValue()) setMusicDisplay(music);
+    setMusicDisplay(String(info.music_prompt || state.shotSb?.music_prompt || "").trim());
   }
-  const musicSeed = info.music_seed ?? state.shotSb?.music_seed;
+  const musicSeed = info.missing ? null : (info.music_seed ?? state.shotSb?.music_seed);
   setMusicSeedDisplay(musicSeed);
 }
 
@@ -2972,6 +3116,20 @@ function bindMusicPlayer() {
   audio.addEventListener("play", () => { btn.textContent = "❚❚"; });
 }
 
+function syncFinalPlayerAspect(player) {
+  const poster = player?.closest?.(".movie-poster");
+  if (!poster) return;
+  const w = player.videoWidth || 0;
+  const h = player.videoHeight || 0;
+  if (w > 0 && h > 0) {
+    poster.style.aspectRatio = `${w} / ${h}`;
+    poster.dataset.ar = `${w}:${h}`;
+  } else {
+    poster.style.removeProperty("aspect-ratio");
+    delete poster.dataset.ar;
+  }
+}
+
 function renderFinalVideo(final, info = {}) {
   const wrap = $("#final-wrap");
   const badge = $("#final-badge");
@@ -2991,6 +3149,7 @@ function renderFinalVideo(final, info = {}) {
       player.removeAttribute("src");
       player.load();
     }
+    syncFinalPlayerAspect(player);
     if (link) link.hidden = true;
     if (meta) meta.textContent = "";
     return;
@@ -3008,6 +3167,7 @@ function renderFinalVideo(final, info = {}) {
       // 下一轮自动刷新再试（assemble 刚写完时偶发读到半截）
       delete player.dataset.sig;
     };
+    player.onloadedmetadata = () => syncFinalPlayerAspect(player);
     player.load();
     // 文件更新时尽量停在原位置；首次载入不自动播
     if (!paused && t > 0) {
@@ -3015,6 +3175,8 @@ function renderFinalVideo(final, info = {}) {
         try { player.currentTime = Math.min(t, player.duration || t); } catch {}
       }, { once: true });
     }
+  } else {
+    syncFinalPlayerAspect(player);
   }
   if (link) {
     const title = (titleValue() || info.title || state.project || "final").trim() || "final";
@@ -3061,32 +3223,29 @@ async function renderShots() {
   }
   if (seq !== renderShotsSeq) return;
   if (!media && shotCards.size) return; // 产物清单暂时拿不到：保持现状，别清空预览
-  // 2) 分镜：网格内编辑用内存副本；脏时不从磁盘覆盖
-  const sb = await loadShotSb(out, { force: false });
+  // 2) 分镜：未脏时跟磁盘走（含「文件被删 → 列表清空」）
+  const sb = await loadShotSb(out, { force: !state.shotSbDirty });
   if (seq !== renderShotsSeq) return;
-  let shots = Array.isArray(sb.shots) ? sb.shots : [];
-  const reuseMap = {};
-  for (const s of shots) if (s.reuse_frame) reuseMap[s.id] = s.reuse_frame;
-  let sbMeta = {
-    title: (sb.title || titleValue() || state.project || "").trim(),
-    characters: Array.isArray(sb.characters) ? sb.characters : [],
-    style: sb.style || styleValue() || "",
-    music_prompt: sb.music_prompt || musicValue() || "",
-    music_seed: sb.music_seed,
-    novelText: novelValue(),
-  };
-  // 正文优先用成片卡片里的编辑器；空则尝试读项目 novel.txt
-  if (!sbMeta.novelText) {
-    try {
-      const novel = await api("/api/file/read", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: projectNovelPath(out) }),
-      });
-      if (novel?.content) sbMeta.novelText = String(novel.content);
-    } catch {}
+  // 正文跟 novel.txt（编辑中不覆盖）
+  if (!isNovelEditing() && !state.shotSbDirty) {
+    await loadNovel({ quiet: true });
   }
   if (seq !== renderShotsSeq) return;
+  const shots = Array.isArray(sb.shots) ? sb.shots.filter((s) => s && s.id) : [];
+  const reuseMap = {};
+  for (const s of shots) if (s.reuse_frame) reuseMap[s.id] = s.reuse_frame;
+  const missingSb = !!sb._missing || state.shotSbExists === false;
+  const sbMeta = {
+    title: missingSb
+      ? (state.project || "").trim()
+      : (sb.title || titleValue() || state.project || "").trim(),
+    characters: Array.isArray(sb.characters) ? sb.characters : [],
+    style: sb.style || "",
+    music_prompt: sb.music_prompt || "",
+    music_seed: sb.music_seed,
+    novelText: novelValue(),
+    missing: missingSb,
+  };
   const portraits = {};
   for (const c of media?.characters || []) {
     if (c?.id && c?.url) portraits[c.id] = { url: c.url, mtime: c.mtime };
@@ -3116,13 +3275,8 @@ async function renderShots() {
       if (sid) progItems[sid] = it;
     }
   }
-  // 4) 如果连分镜都没有，先展示已有媒体
-  if (!shots.length) {
-    for (const f of media?.frames || []) shots.push({ id: f.id });
-    for (const c of media?.clips || []) if (!shots.some((s) => s.id === c.id)) shots.push({ id: c.id });
-  }
+  // 4) 镜头列表只认分镜文件；没有分镜就不靠 frames/clips 凑卡
   const grid = $("#shots-grid");
-  // 5) 增量渲染：卡片按 shot id 复用，只有媒体文件变化才重建预览
   const emptyEl = grid.querySelector(":scope > .empty");
   if (emptyEl) emptyEl.remove();
   const desired = [];
@@ -3145,7 +3299,46 @@ async function renderShots() {
     if (card !== expected) grid.insertBefore(card, prev ? prev.nextSibling : grid.firstChild);
     prev = card;
   }
+  if (!desired.length) {
+    const tip = document.createElement("div");
+    tip.className = "empty";
+    tip.textContent = sbMeta.missing
+      ? "还没有分镜文件。可用上方「从小说生成分镜」，或点 ＋ 手写。"
+      : "分镜里还没有镜头。点 ＋ 添加。";
+    grid.insertBefore(tip, grid.firstChild);
+  }
   placeShotAddCard(grid);
+}
+
+function syncShotPreviewAspect(preview, video) {
+  if (!preview || !video) return;
+  const apply = () => {
+    const w = video.videoWidth || 0;
+    const h = video.videoHeight || 0;
+    if (w > 0 && h > 0) preview.style.aspectRatio = `${w} / ${h}`;
+  };
+  if (video.videoWidth) apply();
+  else video.addEventListener("loadedmetadata", apply, { once: true });
+}
+
+function bindShotPreviewHover(preview) {
+  if (!preview || preview._hoverBound) return;
+  preview._hoverBound = true;
+  preview.addEventListener("mouseenter", () => {
+    const video = $(".shot-clip", preview);
+    if (!video) return;
+    preview.classList.add("is-hover");
+    video.muted = true; // 悬停自动播需静音，否则浏览器会拦
+    const play = video.play();
+    if (play && typeof play.catch === "function") play.catch(() => {});
+  });
+  preview.addEventListener("mouseleave", () => {
+    preview.classList.remove("is-hover");
+    const video = $(".shot-clip", preview);
+    if (!video) return;
+    video.pause();
+    try { video.currentTime = 0; } catch {}
+  });
 }
 
 function renderShotCard(shot, media, reuseMap, progItems) {
@@ -3172,12 +3365,29 @@ function renderShotCard(shot, media, reuseMap, progItems) {
     const preview = $(".shot-preview", card);
     const audioEl = $(".shot-audio", card);
     if (clipEntry) {
-      const poster = frameEntry ? ` poster="${esc(mediaUrl(frameEntry))}"` : "";
-      const preload = frameEntry ? "none" : "metadata"; // 有静帧当海报就不预取，点了播放才加载
-      preview.innerHTML = `<video src="${esc(mediaUrl(clipEntry))}"${poster} muted ${preload} controls></video>`;
+      const frameUrl = frameEntry ? mediaUrl(frameEntry) : "";
+      const poster = frameUrl ? ` poster="${esc(frameUrl)}"` : "";
+      const still = frameUrl
+        ? `<img class="shot-still" src="${esc(frameUrl)}" loading="lazy" alt="">`
+        : "";
+      // 框以视频比例为准；默认静帧 cover 铺满，悬停播视频
+      preview.classList.add("has-clip");
+      preview.classList.toggle("no-still", !frameUrl);
+      preview.classList.remove("is-hover");
+      preview.style.removeProperty("aspect-ratio");
+      preview.innerHTML = `${still}<video class="shot-clip" src="${esc(mediaUrl(clipEntry))}"${poster} muted preload="metadata" controls playsinline></video>${
+        frameUrl ? `<span class="play-badge" aria-hidden="true">▶</span>` : ""
+      }`;
+      const clipEl = $(".shot-clip", preview);
+      syncShotPreviewAspect(preview, clipEl);
+      bindShotPreviewHover(preview);
     } else if (frameEntry) {
-      preview.innerHTML = `<img src="${esc(mediaUrl(frameEntry))}" loading="lazy" alt="">`;
+      preview.classList.remove("has-clip", "no-still", "is-hover");
+      preview.style.removeProperty("aspect-ratio");
+      preview.innerHTML = `<img class="shot-still" src="${esc(mediaUrl(frameEntry))}" loading="lazy" alt="">`;
     } else {
+      preview.classList.remove("has-clip", "no-still", "is-hover");
+      preview.style.removeProperty("aspect-ratio");
       preview.innerHTML = "";
     }
     if (voiceEntry) {
@@ -3495,6 +3705,7 @@ function bind() {
     }
   });
   $("#shots-save")?.addEventListener("click", saveShotSbFromGrid);
+  $("#novel-gen-sb")?.addEventListener("click", generateStoryboardFromNovel);
   $("#shots-revert")?.addEventListener("click", revertShotSbFromGrid);
   $("#shots-reroll-seeds")?.addEventListener("click", rerollAllSeeds);
   $("#task-stop")?.addEventListener("click", stopTask);

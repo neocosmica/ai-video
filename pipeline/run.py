@@ -11,8 +11,8 @@ from pipeline.util import resolve
 
 from pipeline.projects import artifacts_sub
 
-# 对白先于视频（A2V 口型要音频条件）；配乐放在视频之后，此时成片长度已经确定
-STAGES = ("screenplay", "images", "audio", "videos", "music", "assemble")
+# 小说→分镜 → 校验 → 图；对白先于视频（A2V 口型要音频条件）；配乐按 video_frames 定长
+STAGES = ("storyboard", "screenplay", "images", "audio", "videos", "music", "assemble")
 
 
 def _install_live_hooks(out: Path, stages: list[str]) -> None:
@@ -43,11 +43,12 @@ def _install_live_hooks(out: Path, stages: list[str]) -> None:
 
 
 def install_storyboard(out: str | Path, storyboard: str | None, *, force: bool = False) -> None:
-    """把外部分镜拷进 out/storyboard.json。Agent 只写这一份，后续全靠脚本。
+    """把外部分镜拷进 out/storyboard.json。
 
     分镜是「源文件」，留在项目顶层；过程产物进 out/work/。
     输出目录里已有分镜时默认不覆盖：audio 阶段可能按台词长度自动拆过镜，
     那份才是最新的；要覆盖请显式传 --force。
+    没有外部分镜、也没有项目内分镜时，交给 storyboard 阶段用本机 LLM 从小说生成。
     """
     dest_dir = resolve(out)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -56,7 +57,8 @@ def install_storyboard(out: str | Path, storyboard: str | None, *, force: bool =
         if not dest.exists():
             raise SystemExit(
                 f"还没有分镜：{dest}\n"
-                "先由 Agent 写好 storyboard.json，或传 --storyboard <路径>。"
+                "跑 produce（含 storyboard 阶段）从小说生成，"
+                "或手动写入 storyboard.json / 传 --storyboard <路径>。"
             )
         return
     src = resolve(storyboard)
@@ -76,19 +78,23 @@ def install_storyboard(out: str | Path, storyboard: str | None, *, force: bool =
 
 
 def cmd_run(args: argparse.Namespace) -> None:
-    start = getattr(args, "start", "screenplay")
+    start = getattr(args, "start", "storyboard")
     if start not in STAGES:
         raise SystemExit(f"--from 只能是 {', '.join(STAGES)}")
     until = getattr(args, "until", None)
     if until is not None and until not in STAGES:
         raise SystemExit(f"--until 只能是 {', '.join(STAGES)}")
     out = resolve(args.out)
-    if start == "screenplay" or getattr(args, "storyboard", None):
+    external_sb = getattr(args, "storyboard", None)
+    if external_sb:
         install_storyboard(
             out,
-            getattr(args, "storyboard", None),
+            external_sb,
             force=bool(getattr(args, "force", False)),
         )
+    elif start != "storyboard":
+        # 从校验或更后阶段起跑，必须已有分镜
+        install_storyboard(out, None)
     failed_videos = False
     end_idx = STAGES.index(until) + 1 if until else len(STAGES)
     selected = list(STAGES[STAGES.index(start) : end_idx])
@@ -96,6 +102,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     from pipeline.projects import clear_artifacts
 
     # --force：先清对应产物，再跑；否则旧帧/旧镜头会混进新片
+    # storyboard 阶段的覆盖由该阶段自己写盘，不在这里删 storyboard.json
     if bool(getattr(args, "force", False)):
         removed = clear_artifacts(out, stages=selected, only=getattr(args, "only", None))
         if removed:
@@ -113,8 +120,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 cmd += ["--config", str(resolve(args.config))]
             if args.force:
                 cmd.append("--force")
-            if stage == "screenplay":
-                # 分镜 JSON 已写好；这里只校验。小说路径用于对白覆盖检查。
+            if stage in {"storyboard", "screenplay"}:
                 if getattr(args, "novel", None):
                     cmd += ["--novel", str(resolve(args.novel))]
                 if getattr(args, "max_shots", None):
@@ -150,6 +156,6 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 def cmd_produce(args: argparse.Namespace) -> None:
-    """一键：分镜 → 校验 → 图 → 对白配乐 → A2V 视频 → 成片。不再需要 Agent。"""
-    args.start = "screenplay"
+    """一键：小说→分镜 → 校验 → 图 → 对白 → A2V 视频 → 配乐 → 成片。"""
+    args.start = "storyboard"
     cmd_run(args)

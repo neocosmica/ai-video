@@ -79,7 +79,13 @@ def save_queue(out: str | Path, queue: dict) -> dict:
 
 
 def _story(out: str | Path) -> dict:
-    return load_json(resolve(out) / "storyboard.json")
+    path = resolve(out) / "storyboard.json"
+    if not path.is_file():
+        return {}
+    try:
+        return load_json(path)
+    except Exception:
+        return {}
 
 
 def dependents_of(out: str | Path, items: list[dict], key: str) -> list[str]:
@@ -87,14 +93,27 @@ def dependents_of(out: str | Path, items: list[dict], key: str) -> list[str]:
     story = _story(out)
     kind, nid = _parse_key(key)
     dependants: list[str] = []
+    post_set: set[tuple[str, str]] = set()
+    if kind == "storyboard":
+        try:
+            post_set = set(_reachable(story, out, ("storyboard", ""), forward=True))
+        except Exception:
+            post_set = set()
     for it in items:
         if it["key"] == key:
             continue
-        pre = _reachable(story, out, (it["kind"], it.get("id") or ""), forward=False)
+        ik, iid = it["kind"], it.get("id") or ""
+        if kind == "storyboard" and (ik, iid) in post_set:
+            dependants.append(it["key"])
+            continue
+        try:
+            pre = _reachable(story, out, (ik, iid), forward=False)
+        except Exception:
+            continue
         if (kind, nid) in pre:
             dependants.append(it["key"])
             continue
-        if (kind, nid) in direct_pre(story, out, it["kind"], it.get("id") or ""):
+        if (kind, nid) in direct_pre(story, out, ik, iid):
             dependants.append(it["key"])
     return dependants
 
@@ -118,6 +137,8 @@ def queue_key_for_step(step_id: str) -> str | None:
     sid = str(step_id or "").strip()
     if not sid:
         return None
+    if sid in {"storyboard:generate", "screenplay:validate"}:
+        return "storyboard:"
     if sid.startswith("images:portrait:"):
         return f"portrait:{sid.split(':', 2)[-1]}"
     if sid.startswith("images:") and not sid.startswith("images:_"):
@@ -294,6 +315,7 @@ def _groups_from_nodes(nodes: Iterable[dict]) -> list[dict]:
     frames: list[str] = []
     voices: list[str] = []
     clips: list[str] = []
+    want_storyboard = False
     want_music = False
     want_final = False
     force_portraits = force_frames = force_voices = force_clips = False
@@ -302,7 +324,9 @@ def _groups_from_nodes(nodes: Iterable[dict]) -> list[dict]:
         kind = n["kind"]
         nid = n.get("id") or ""
         force = bool(n.get("force"))
-        if kind == "portrait":
+        if kind == "storyboard":
+            want_storyboard = True
+        elif kind == "portrait":
             portraits.append(nid)
             force_portraits = force_portraits or force
         elif kind == "frame":
@@ -330,6 +354,9 @@ def _groups_from_nodes(nodes: Iterable[dict]) -> list[dict]:
 
     groups: list[dict] = []
     portraits, frames, voices, clips = map(uniq, (portraits, frames, voices, clips))
+    if want_storyboard:
+        groups.append({"stage": "storyboard", "force": True})
+        groups.append({"stage": "screenplay", "force": True})
     if portraits or frames:
         groups.append(
             {
@@ -378,6 +405,16 @@ def queue_only_shots(queue: dict) -> str | None:
     seen: list[str] = []
     for it in queue.get("items") or []:
         if it.get("kind") in {"frame", "voice", "clip"} and it.get("id"):
+            if it["id"] not in seen:
+                seen.append(it["id"])
+    return ",".join(seen) if seen else None
+
+
+def queue_portrait_ids(queue: dict) -> str | None:
+    """队列里要跑的肖像 id，交给进度引擎，避免 only 把肖像步骤滤掉。"""
+    seen: list[str] = []
+    for it in queue.get("items") or []:
+        if it.get("kind") == "portrait" and it.get("id"):
             if it["id"] not in seen:
                 seen.append(it["id"])
     return ",".join(seen) if seen else None
