@@ -1178,16 +1178,23 @@ function renderStages(job) {
     }
     return s.status;
   };
-  const sig = JSON.stringify([job.status, stages.map((s) => [s.key, paintStatus(s), s.pct])]);
-  if (sig !== stageTrackSig) {
-    stageTrackSig = sig;
+  // 结构签名不含 pct：百分比只改文字，避免整段重绘把 pulse 动画掐断重开（闪得不正常）
+  const structSig = JSON.stringify([job.status, stages.map((s) => [s.key, paintStatus(s)])]);
+  if (structSig !== stageTrackSig) {
+    stageTrackSig = structSig;
     wrap.innerHTML = stages.map((s) => {
       const st = paintStatus(s);
       const cls = st === "done" ? "done" : st === "running" ? "running" : st === "failed" ? "failed" : "";
       const icon = st === "done" ? "✓" : st === "running" ? "⏳" : st === "failed" ? "✕" : "·";
       const pct = typeof s.pct === "number" ? ` ${Math.min(100, s.pct).toFixed(0)}%` : "";
-      return `<div class="stage-step ${cls}">${icon} ${STAGE_LABELS[s.key] || s.label || s.key}<span class="stage-pct mono">${pct}</span></div>`;
+      return `<div class="stage-step ${cls}" data-stage="${esc(s.key)}">${icon} ${STAGE_LABELS[s.key] || s.label || s.key}<span class="stage-pct mono">${pct}</span></div>`;
     }).join("");
+  } else {
+    for (const s of stages) {
+      const el = wrap.querySelector(`.stage-step[data-stage="${CSS.escape(s.key)}"] .stage-pct`);
+      if (!el) continue;
+      el.textContent = typeof s.pct === "number" ? ` ${Math.min(100, s.pct).toFixed(0)}%` : "";
+    }
   }
   renderOverall(job);
   renderLiveItems(job);

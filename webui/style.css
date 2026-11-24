@@ -441,9 +441,16 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   color: var(--muted);
 }
 .stage-step.done { color: var(--ok); border-color: var(--ok); }
-.stage-step.running { color: var(--run); border-color: var(--run); animation: pulse 1.2s infinite; }
+.stage-step.running {
+  color: var(--run);
+  border-color: var(--run);
+  animation: stage-pulse 1.8s ease-in-out infinite;
+}
 .stage-step.failed { color: var(--bad); border-color: var(--bad); }
-@keyframes pulse { 50% { opacity: .55; } }
+@keyframes stage-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.72; }
+}
 
 .log-section { margin: 12px 0 0; }
 .log-toggle {
@@ -533,8 +540,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 .live-item {
   display: grid;
-  /* 标签/步数按内容，进度条吃满剩余；避免左边 1fr 空一大块 */
-  grid-template-columns: max-content 3.5em minmax(0, 1fr) 3.5em;
+  /* 标签/步数/ETA 按内容宽，进度条吃满剩余；步数不能写死 3.5em（1461/1600 会溢到条上） */
+  grid-template-columns: max-content max-content minmax(48px, 1fr) max-content;
   gap: 10px;
   align-items: center;
   border: 1px solid var(--border);
@@ -548,7 +555,13 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   background: color-mix(in srgb, var(--run) 12%, transparent);
 }
 .live-item .li-label { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 14em; }
-.live-item .li-step { color: var(--muted); font-size: 11px; text-align: right; }
+.live-item .li-step {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 .live-item .li-bar {
   height: 8px;
   width: 100%;
@@ -569,7 +582,13 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 .live-item.done .li-fill { background: var(--ok); }
 .live-item.failed .li-fill { background: var(--bad); }
-.live-item .li-eta { color: var(--muted); text-align: right; font-size: 11px; }
+.live-item .li-eta {
+  color: var(--muted);
+  text-align: right;
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 .live-item.done { opacity: .7; }
 .stage-step .stage-pct { margin-left: 4px; opacity: 0.85; font-size: 11px; }
 
@@ -881,9 +900,11 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   position: absolute;
   top: 8px;
   right: 8px;
+  z-index: 1;
   font-size: 11px;
   padding: 1px 6px;
   color: var(--bad);
+  line-height: 1.2;
 }
 .cast-iedit { min-width: 0; }
 .cast-iedit-display {
@@ -966,7 +987,12 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   color: var(--text);
   background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 35%, #1a2030), #12151d);
 }
-.cast-body { min-width: 0; padding-right: 28px; }
+.cast-body { min-width: 0; }
+/* 只给顶上的 id/姓名让出 ×，下面外貌等不再空一列 */
+.cast-body > .cast-iedit[data-f="id"],
+.cast-body > .cast-iedit[data-f="name"] {
+  padding-right: 26px;
+}
 .cast-name {
   font-size: 15px;
   font-weight: 650;
