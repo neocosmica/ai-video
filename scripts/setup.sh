@@ -311,4 +311,5 @@ PY
 echo "环境就绪。Python=$UV_PYTHON  镜像：HF=$HF_ENDPOINT  PyPI=$UV_INDEX_URL  PythonInstall=$UV_PYTHON_INSTALL_MIRROR"
 echo "venv 缓存：$NOVEL_VIDEO_CACHE/venvs"
 echo "下一步：./scripts/run.sh doctor"
-echo "演示成片：./scripts/run.sh produce --project demo"
+echo "打开控制台：./scripts/run.sh          # 默认起网页 http://127.0.0.1:8790"
+echo "命令行成片：./scripts/run.sh produce --project demo"

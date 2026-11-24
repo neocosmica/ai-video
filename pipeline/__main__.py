@@ -581,8 +581,23 @@ def cmd_selftest(_: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="把小说本地做成竖屏短剧")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    parser = argparse.ArgumentParser(
+        description="把小说本地做成竖屏短剧（无子命令时默认启动网页控制台）",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="网页监听地址（默认 127.0.0.1）",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8790,
+        help="网页监听端口（默认 8790）",
+    )
+    # 无参数 / 只有 --host/--port → 起网页；管线仍用 produce / run / 各阶段子命令
+    parser.set_defaults(func=cmd_web)
+    sub = parser.add_subparsers(dest="cmd", required=False)
 
     def add_common(p: argparse.ArgumentParser, novel: bool = False) -> None:
         p.add_argument("--config", default=None, help="配置文件，默认项目里的 config.json")
@@ -695,10 +710,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(func=cmd_doctor)
     web = sub.add_parser(
         "web",
-        help="启动本地网页控制台：填小说、起任务、看进度、重跑单个阶段（不加载模型）",
+        help="启动本地网页控制台（默认入口，等同于不传子命令）",
     )
-    web.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
-    web.add_argument("--port", type=int, default=8790, help="监听端口（默认 8790）")
+    # SUPPRESS：勿盖掉父级已解析的 --host/--port（如「--port 9000 web」）
+    web.add_argument("--host", default=argparse.SUPPRESS, help="网页监听地址（默认 127.0.0.1）")
+    web.add_argument("--port", type=int, default=argparse.SUPPRESS, help="网页监听端口（默认 8790）")
     web.set_defaults(func=cmd_web)
     test = sub.add_parser("selftest", help="检查不依赖模型的逻辑")
     test.set_defaults(func=cmd_selftest)

@@ -7,8 +7,10 @@
 ## 工作流
 
 ```
-读小说 → budget → 写 storyboard.json → screenplay --strict → produce → final.mp4
+读小说 → budget → 写 storyboard.json → screenplay --strict → 网页按需成片 → final.mp4
 ```
+
+日常入口：`./scripts/run.sh`（无参数）默认起网页控制台；管线在页面里点「启动任务」再拉起。命令行仍可用 `produce`。
 
 `produce` 串跑顺序仍是：`screenplay → images → audio → videos → music → assemble`（执行顺序≠数据依赖）。
 镜长在 **audio** 就写进分镜 `video_frames`；配乐按该计划定长，**不依赖 clips 已渲完**。

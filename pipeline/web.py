@@ -2,7 +2,8 @@
 
 零新增依赖，只用 Python 标准库：
 
-    ./scripts/run.sh web --port 8790          # 浏览器打开 http://127.0.0.1:8790
+    ./scripts/run.sh                          # 默认起网页；等同 ./scripts/run.sh web
+    ./scripts/run.sh --port 8790              # 浏览器打开 http://127.0.0.1:8790
 
 职责边界（与 AGENTS.md 一致）：本地不加载聊天 LLM，分镜仍由人工/Agent 写好
 `projects/<片名>/storyboard.json`；本界面负责填写小说、维护分镜、起任务、
