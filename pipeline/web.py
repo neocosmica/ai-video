@@ -1929,6 +1929,16 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(self.api_state(query))
             elif path == "/api/budget":
                 self._json(budget_info())
+            elif path == "/api/setup/status":
+                from pipeline.bootstrap import ensure_async, setup_status
+
+                # 打开网页即检查；缺依赖时后台补装（含分镜 LLM）
+                st = setup_status()
+                if st.get("status") in {"unknown", "need_install"} or (
+                    not st.get("ready") and st.get("status") not in {"installing", "checking", "failed"}
+                ):
+                    st = ensure_async()
+                self._json(st)
             elif path == "/api/events":
                 self._stream_events()
             elif path.startswith("/api/log/"):
@@ -2010,6 +2020,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(self.queue_start(data))
             elif path == "/api/task/cancel":
                 self._json(self.queue_remove(data))
+            elif path == "/api/setup/ensure":
+                from pipeline.bootstrap import ensure_async
+
+                self._json(ensure_async(force=bool(data.get("force"))))
             else:
                 self._json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -2569,8 +2583,67 @@ def serve(host: str, port: int) -> None:
             print(f"已挂载外部任务 {len(attached)} 个：{', '.join(j.out for j in attached)}", flush=True)
     except Exception as exc:
         print(f"挂载外部任务失败（可忽略）：{exc}", flush=True)
+    # 打开即检查依赖/模型；缺则后台补装，项目选择页会显示进度
+    try:
+        from pipeline.bootstrap import ensure_async, probe
+
+        report = probe(refresh_state=True)
+        if report.get("ready"):
+            print("依赖与模型：已就绪", flush=True)
+        else:
+            missing = report.get("missing") or []
+            print(f"依赖与模型：缺 {len(missing)} 项，后台补装中…", flush=True)
+            ensure_async()
+    except Exception as exc:
+        print(f"依赖检查失败（网页仍可开）：{exc}", flush=True)
     server = ThreadingHTTPServer((host, port), _Handler)
-    print(f"小说成片控制台：http://{host}:{port}  （Ctrl+C 停止）", flush=True)
+    url = f"http://{host}:{port}"
+    print(f"小说成片控制台：{url}  （菜单栏退出 / Ctrl+C 停止）", flush=True)
+
+    from pipeline.menubar import start_menubar
+
+    menubar = start_menubar(url)
+    if menubar is not None:
+        # HTTP 在后台线程；主线程等菜单栏「退出」或 Ctrl+C / SIGTERM
+        http_thread = threading.Thread(target=server.serve_forever, name="webui-http", daemon=True)
+        http_thread.start()
+        print("菜单栏已就绪：打开网页 / 退出", flush=True)
+
+        def _sigterm(_signum, _frame) -> None:
+            raise KeyboardInterrupt
+
+        prev_term = None
+        try:
+            import signal
+
+            prev_term = signal.signal(signal.SIGTERM, _sigterm)
+            while True:
+                try:
+                    code = menubar.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    continue
+                if code is not None:
+                    break
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if prev_term is not None:
+                try:
+                    import signal
+
+                    signal.signal(signal.SIGTERM, prev_term)
+                except Exception:
+                    pass
+            if menubar.poll() is None:
+                menubar.terminate()
+                try:
+                    menubar.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    menubar.kill()
+            server.shutdown()
+            server.server_close()
+        return
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:

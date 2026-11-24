@@ -4,6 +4,7 @@ import argparse
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from pipeline.mirrors import apply_mirrors
@@ -84,6 +85,13 @@ def cmd_doctor(_: argparse.Namespace) -> None:
     uv = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
     print(f"uv：{uv}（{'存在' if Path(uv).exists() or shutil.which('uv') else '缺失'}）")
     print(f"ffmpeg：{settings.ffmpeg}（{'存在' if settings.ffmpeg.exists() else '缺失'}）")
+    if sys.platform == "darwin":
+        from pipeline.menubar import HELPER, menubar_enabled
+
+        print(
+            f"菜单栏助手：{HELPER}"
+            f"（{'可用' if menubar_enabled() else '缺二进制，跑 scripts/macos/build-menubar-helper.sh'}）"
+        )
     print(f"LTX 代码：{settings.ltx_dir}（{'存在' if settings.ltx_dir.exists() else '缺失'}）")
     from pipeline.hf_cache import resolve_snapshot
 

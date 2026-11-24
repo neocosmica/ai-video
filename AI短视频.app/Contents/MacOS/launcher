@@ -1,0 +1,82 @@
+#!/bin/zsh
+# Finder 双击入口：必要时后台拉起网页后端（菜单栏图标），再打开浏览器。
+set -euo pipefail
+
+HOST="127.0.0.1"
+PORT="8790"
+URL="http://${HOST}:${PORT}/"
+
+# Contents/MacOS → Contents → .app → 仓库根
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$ROOT"
+
+LOG_DIR="$ROOT/webui"
+LOG="$LOG_DIR/server.log"
+PID_FILE="$LOG_DIR/server.pid"
+
+ready() {
+  curl -fsS --max-time 1 "$URL" >/dev/null 2>&1
+}
+
+alert() {
+  /usr/bin/osascript - "$1" "$2" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+  display alert (item 1 of argv) message (item 2 of argv)
+end run
+APPLESCRIPT
+}
+
+notify() {
+  /usr/bin/osascript - "$1" "$2" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+  display notification (item 2 of argv) with title (item 1 of argv)
+end run
+APPLESCRIPT
+}
+
+pid_alive() {
+  local pid="$1"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+if [[ ! -x "$ROOT/scripts/run.sh" ]]; then
+  alert "打不开 AI短视频" "找不到可执行的 scripts/run.sh。请确认「AI短视频.app」仍在仓库根目录。"
+  exit 1
+fi
+
+# 缺菜单栏二进制时现编（有 Xcode CLT 即可）
+HELPER="$ROOT/scripts/macos/menubar-helper"
+if [[ ! -x "$HELPER" && -x "$ROOT/scripts/macos/build-menubar-helper.sh" ]]; then
+  "$ROOT/scripts/macos/build-menubar-helper.sh" >/dev/null 2>&1 || true
+fi
+
+if ready; then
+  open "$URL"
+  notify "AI短视频" "控制台已在运行，已打开网页"
+  exit 0
+fi
+
+mkdir -p "$LOG_DIR"
+# 清掉失效 pid 记录
+if [[ -f "$PID_FILE" ]]; then
+  old="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if ! pid_alive "$old"; then
+    rm -f "$PID_FILE"
+  fi
+fi
+
+# 后台起服务（菜单栏「退出」会停掉该进程）；日志进 webui/server.log
+nohup "$ROOT/scripts/run.sh" --host "$HOST" --port "$PORT" >>"$LOG" 2>&1 &
+echo $! >"$PID_FILE"
+
+for _ in {1..90}; do
+  if ready; then
+    open "$URL"
+    notify "AI短视频" "控制台已启动（菜单栏可打开网页 / 退出）"
+    exit 0
+  fi
+  sleep 0.5
+done
+
+alert "AI短视频启动超时" "后端 45 秒内没有响应 ${URL}。请查看 ${LOG}；也可先跑 ./scripts/run.sh doctor。"
+exit 1

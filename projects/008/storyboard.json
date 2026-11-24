@@ -1,0 +1,247 @@
+{
+  "title": "飞羽军临",
+  "style": "写实华语短剧，自然肤色，电影感光线，浅景深",
+  "music_prompt": "Sparse melancholic piano, soft rain, instrumental only, no vocals",
+  "music_seed": 908289027,
+  "novel": "/Users/wangxinyu/ai视频/projects/008/work/webui/run_novel.txt",
+  "max_shots": 16,
+  "dialogue_char_limit": 21,
+  "shot_max_seconds": 9.04,
+  "truncated": false,
+  "dialogue_lines": 4,
+  "characters": [
+    {
+      "id": "yinghuaizhou",
+      "name": "英怀舟",
+      "gender": "female",
+      "appearance": "二十多岁女性，长发，青衫",
+      "seed": 2728448171,
+      "voice": "Vivian"
+    },
+    {
+      "id": "fangbaisu",
+      "name": "方白恕",
+      "gender": "male",
+      "appearance": "银甲武将，短发，面带威严",
+      "seed": 1454748650,
+      "voice": "Dylan"
+    }
+  ],
+  "shots": [
+    {
+      "id": "s001",
+      "characters": [
+        "yinghuaizhou"
+      ],
+      "location": "山间庭院",
+      "image_prompt": "中景，英怀舟低头整理青衫少年发丝，阳光斜照，地面有落叶",
+      "motion_prompt": "Slow dolly in, slight head tilt",
+      "speaker": "",
+      "dialogue": "",
+      "seed": 2074422045,
+      "emotion": "calm",
+      "video_frames": 49,
+      "video": "/Users/wangxinyu/ai视频/projects/008/work/clips/s001.mp4",
+      "video_mode": "i2v"
+    },
+    {
+      "id": "s002",
+      "characters": [
+        "yinghuaizhou"
+      ],
+      "location": "山间庭院",
+      "image_prompt": "中近景，嘴微张，面部清晰，背景有三只象鼻虫远影",
+      "motion_prompt": "Locked-off camera, natural lip motion",
+      "speaker": "英怀舟",
+      "dialogue": "难道前线出事了？",
+      "seed": 37381245,
+      "emotion": "surprised",
+      "audio_duration": 1.6,
+      "video_frames": 41,
+      "video": "/Users/wangxinyu/ai视频/projects/008/work/clips/s002.mp4",
+      "video_mode": "a2v"
+    },
+    {
+      "id": "s002b",
+      "characters": [
+        "yinghuaizhou"
+      ],
+      "location": "山间庭院",
+      "image_prompt": "中近景，嘴微张，面部清晰，背景有三只象鼻虫远影，换角度近景",
+      "motion_prompt": "Locked-off camera, natural lip motion",
+      "speaker": "英怀舟",
+      "dialogue": "春山这里怎么会有这么多魔兽出现？",
+      "seed": 3682676402,
+      "emotion": "surprised",
+      "audio_duration": 2.78,
+      "video_frames": 73,
+      "video": "/Users/wangxinyu/ai视频/projects/008/work/clips/s002b.mp4",
+      "video_mode": "a2v"
+    },
+    {
+      "id": "s003",
+      "characters": [
+        "fangbaisu"
+      ],
+      "location": "山间庭院",
+      "image_prompt": "中景，银甲武将立于高台，目光锐利，风吹铠甲",
+      "motion_prompt": "Camera slowly rises, slight shoulder movement",
+      "speaker": "",
+      "dialogue": "",
+      "seed": 661589325,
+      "emotion": "tense",
+      "video_frames": 49,
+      "video": "/Users/wangxinyu/ai视频/projects/008/work/clips/s003.mp4",
+      "video_mode": "i2v"
+    },
+    {
+      "id": "s004",
+      "characters": [
+        "fangbaisu"
+      ],
+      "location": "山间庭院",
+      "image_prompt": "近景，银甲武将低头，眼神专注，背景有三只象鼻虫低飞",
+      "motion_prompt": "Slow push-in, steady breathing",
+      "speaker": "方白恕",
+      "dialogue": "女公子不必忧心，我乃龙渊沟守备军都尉方白恕，",
+      "seed": 2092725801,
+      "emotion": "warm",
+      "audio_duration": 5.36,
+      "video_frames": 129,
+      "video": "/Users/wangxinyu/ai视频/projects/008/work/clips/s004.mp4",
+      "video_mode": "a2v"
+    },
+    {
+      "id": "s004b",
+      "characters": [
+        "fangbaisu"
+      ],
+      "location": "山间庭院",
+      "image_prompt": "近景，银甲武将低头，眼神专注，背景有三只象鼻虫低飞，换角度近景",
+      "motion_prompt": "Slow push-in, steady breathing",
+      "speaker": "方白恕",
+      "dialogue": "率一队飞羽军来援。",
+      "seed": 1854347548,
+      "emotion": "warm",
+      "audio_duration": 1.66,
+      "video_frames": 41,
+      "video": "/Users/wangxinyu/ai视频/projects/008/work/clips/s004b.mp4",
+      "video_mode": "a2v"
+    },
+    {
+      "id": "s005",
+      "characters": [
+        "fangbaisu",
+        "yinghuaizhou"
+      ],
+      "location": "山间庭院上空",
+      "image_prompt": "高空俯视，飞禽群从天边飞来，翅膀展开，阳光穿透云层",
+      "motion_prompt": "Dolly up, birds in flight, slow zoom",
+      "speaker": "",
+      "dialogue": "",
+      "seed": 1641624986,
+      "emotion": "nostalgic",
+      "video_frames": 49,
+      "video": "/Users/wangxinyu/ai视频/projects/008/work/clips/s005.mp4",
+      "video_mode": "i2v"
+    },
+    {
+      "id": "s006",
+      "characters": [
+        "fangbaisu"
+      ],
+      "location": "山间庭院",
+      "image_prompt": "中景，猛禽从云中飞出，展翅长鸣，天空有微光",
+      "motion_prompt": "Camera follows bird, natural wing motion",
+      "speaker": "",
+      "dialogue": "",
+      "seed": 1270523314,
+      "emotion": "calm",
+      "video_frames": 49,
+      "video": "/Users/wangxinyu/ai视频/projects/008/work/clips/s006.mp4",
+      "video_mode": "i2v"
+    },
+    {
+      "id": "s007",
+      "characters": [
+        "yinghuaizhou",
+        "fangbaisu"
+      ],
+      "location": "山间庭院",
+      "image_prompt": "中景，飞禽俯冲，翅膀划破空气，地面有影子",
+      "motion_prompt": "Quick cut, birds diving, sharp focus",
+      "speaker": "",
+      "dialogue": "",
+      "seed": 3842754651,
+      "emotion": "tense",
+      "video_frames": 49,
+      "video": "/Users/wangxinyu/ai视频/projects/008/work/clips/s007.mp4",
+      "video_mode": "i2v"
+    },
+    {
+      "id": "s008",
+      "characters": [
+        "yinghuaizhou"
+      ],
+      "location": "山间庭院",
+      "image_prompt": "近景，英怀舟抬头，眼神平静，飞禽背上士卒清晰可见",
+      "motion_prompt": "Slow pan left, eyes tracking birds",
+      "speaker": "",
+      "dialogue": "",
+      "seed": 3497804219,
+      "emotion": "whisper",
+      "video_frames": 49,
+      "video": "/Users/wangxinyu/ai视频/projects/008/work/clips/s008.mp4",
+      "video_mode": "i2v"
+    },
+    {
+      "id": "s009",
+      "characters": [
+        "fangbaisu"
+      ],
+      "location": "山间庭院",
+      "image_prompt": "中景，飞行骑兵从飞禽背上跳下，整齐列阵，地面有影子",
+      "motion_prompt": "Camera tracks soldiers, steady marching step",
+      "speaker": "",
+      "dialogue": "",
+      "seed": 3158487069,
+      "emotion": "warm",
+      "video_frames": 49,
+      "video": "/Users/wangxinyu/ai视频/projects/008/work/clips/s009.mp4",
+      "video_mode": "i2v"
+    },
+    {
+      "id": "s010",
+      "characters": [
+        "yinghuaizhou",
+        "fangbaisu"
+      ],
+      "location": "山间庭院",
+      "image_prompt": "中景，士卒列阵，面向象鼻虫方向，军阵整齐，阳光洒落",
+      "motion_prompt": "Static frame, soldiers in formation",
+      "speaker": "",
+      "dialogue": "",
+      "seed": 488254307,
+      "emotion": "calm",
+      "video_frames": 49,
+      "video": "/Users/wangxinyu/ai视频/projects/008/work/clips/s010.mp4",
+      "video_mode": "i2v"
+    },
+    {
+      "id": "s011",
+      "characters": [
+        "fangbaisu"
+      ],
+      "location": "山间庭院",
+      "image_prompt": "远景，飞禽群盘旋，背负士卒，天空有微风",
+      "motion_prompt": "Dolly out, birds circling slowly",
+      "speaker": "",
+      "dialogue": "",
+      "seed": 3118393632,
+      "emotion": "sad",
+      "video_frames": 49,
+      "video": "/Users/wangxinyu/ai视频/projects/008/work/clips/s011.mp4",
+      "video_mode": "i2v"
+    }
+  ]
+}

@@ -1,9 +1,9 @@
 #!/bin/zsh
-# 从 scripts/macos/console-app-icon.png 重建「打开控制台.app」图标。
+# 从 scripts/macos/console-app-icon.png 重建「AI短视频.app」图标。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MASTER="$ROOT/scripts/macos/console-app-icon.png"
-APP="$ROOT/打开控制台.app"
+APP="$ROOT/AI短视频.app"
 ICONSET="$(mktemp -d)/AppIcon.iconset"
 mkdir -p "$ICONSET"
 

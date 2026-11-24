@@ -18,6 +18,18 @@
   <!-- 项目选择页：打开网页第一件事 -->
   <section class="card" id="project-picker" style="grid-column:1/-1">
     <h2>① 选择项目 <span class="hint">（每个项目一个文件夹 projects/<片名>/，小说、分镜、成片、任务历史都在里面）</span></h2>
+    <div id="setup-banner" class="setup-banner" hidden>
+      <div class="setup-banner-head">
+        <strong id="setup-title">正在检查本机依赖与模型…</strong>
+        <span id="setup-pct" class="mono hint">0%</span>
+      </div>
+      <div class="setup-bar" aria-hidden="true"><div id="setup-fill" class="setup-fill"></div></div>
+      <div id="setup-msg" class="setup-msg hint">首次打开会自动安装 Python 依赖并下载模型（含分镜语言模型），请保持网络畅通。</div>
+      <ul id="setup-items" class="setup-items" hidden></ul>
+      <div class="setup-actions" id="setup-actions" hidden>
+        <button type="button" id="setup-retry" class="primary">重试安装</button>
+      </div>
+    </div>
     <div id="project-grid" class="project-grid"></div>
     <div class="row" style="margin-top:14px">
       <label>或新建项目</label>

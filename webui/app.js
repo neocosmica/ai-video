@@ -37,6 +37,8 @@ const state = {
   portraits: {}, // id → {url, mtime}，镜头卡迷你头像用
   polling: null,
   fps: 24,
+  setup: { ready: false, status: "unknown", pct: 0, message: "", items: [] },
+  setupTimer: null,
 };
 
 // ---------------------------------------------------------------- utilities
@@ -111,16 +113,21 @@ function jobHasStage(job, stage) {
 
 async function reloadStoryboardAfterGen() {
   const out = state.currentOut;
-  if (!out || state.shotSbDirty) return;
+  if (!out) return;
+  // 管线刚写出 storyboard.json：必须以磁盘为准刷新。
+  // 空项目粘贴小说会 markShotSbDirty，若因此跳过，界面会一直停在「还没有分镜」。
   try {
+    const novelKeep = novelValue();
     state.shotSb = null;
     await loadShotSb(out, { force: true });
     const sb = state.shotSb || {};
-    setTitleDisplay(String(sb.title || "").trim());
-    setStyleDisplay(String(sb.style || "").trim());
-    setMusicDisplay(String(sb.music_prompt || "").trim());
+    if (!isTitleEditing()) setTitleDisplay(String(sb.title || "").trim());
+    if (!isStyleEditing()) setStyleDisplay(String(sb.style || "").trim());
+    if (!isMusicEditing()) setMusicDisplay(String(sb.music_prompt || "").trim());
     setMusicSeedDisplay(sb.music_seed);
     clearShotSbDirty();
+    // 正文可能已在「从小说生成」时落盘；保留当前窗格文案，避免闪成空
+    if (novelKeep && !isNovelEditing()) setNovelDisplay(novelKeep);
     await renderShots();
     toast("分镜已更新");
   } catch (err) {
@@ -277,7 +284,195 @@ function renderDatalists() {
   // 路径已固定为项目默认，不再展示文件选择器
 }
 
+function setupBusy() {
+  const st = state.setup?.status;
+  return st === "installing" || st === "checking" || (st === "need_install" && !state.setup?.ready);
+}
+
+function inProjectWorkspace() {
+  const picker = $("#project-picker");
+  return !!state.project || (picker && picker.hidden);
+}
+
+/** 依赖未齐时强制回到项目选择页；保留上次项目名，装完可自动再进 */
+function leaveProjectForSetup(reason) {
+  const picker = $("#project-picker");
+  if (!inProjectWorkspace()) {
+    if (picker) picker.hidden = false;
+    return false;
+  }
+  state.project = "";
+  state.selectedTaskId = null;
+  state.shotSb = null;
+  state.shotSbPath = "";
+  state.shotSbExists = false;
+  state.shotSbMtime = null;
+  clearShotSbDirty();
+  if (state.polling) { clearInterval(state.polling); state.polling = null; }
+  if (typeof shotsTimer !== "undefined" && shotsTimer) { clearInterval(shotsTimer); shotsTimer = null; }
+  $("#shots-card").hidden = true;
+  $("#produce-card").hidden = true;
+  if (picker) picker.hidden = false;
+  projectsSig = "";
+  if (reason) pickerMsg(reason, true);
+  refreshState();
+  return true;
+}
+
+function renderSetupBanner(st) {
+  state.setup = st || state.setup || {};
+  const banner = $("#setup-banner");
+  const picker = $("#project-picker");
+  if (!banner || !picker) return;
+  const ready = !!state.setup.ready;
+  const failed = state.setup.status === "failed";
+  const busy = setupBusy();
+  if (!ready && inProjectWorkspace()) {
+    leaveProjectForSetup(
+      failed ? "依赖安装失败，已回到项目列表" : "依赖还在安装，已退出项目页"
+    );
+  }
+  banner.hidden = ready && !failed;
+  if (ready && !failed) {
+    // 刚就绪时短暂显示，再藏
+    if (banner.dataset.justReady === "1") {
+      banner.hidden = false;
+      banner.classList.add("ready");
+      banner.classList.remove("failed");
+      setTimeout(() => {
+        if (state.setup.ready) banner.hidden = true;
+        banner.dataset.justReady = "";
+      }, 1800);
+    }
+  } else {
+    banner.dataset.justReady = "";
+    banner.classList.toggle("failed", failed);
+    banner.classList.toggle("ready", false);
+  }
+  picker.classList.toggle("setup-busy", busy || failed);
+  const pct = Math.max(0, Math.min(100, Number(state.setup.pct) || 0));
+  const title = $("#setup-title");
+  const pctEl = $("#setup-pct");
+  const fill = $("#setup-fill");
+  const msg = $("#setup-msg");
+  const actions = $("#setup-actions");
+  if (title) {
+    title.textContent = failed
+      ? "依赖安装失败"
+      : ready
+        ? "依赖与模型已就绪"
+        : "正在安装依赖与模型…";
+  }
+  if (pctEl) pctEl.textContent = `${pct.toFixed(0)}%`;
+  if (fill) fill.style.width = `${pct}%`;
+  if (msg) {
+    const err = state.setup.error ? `：${state.setup.error}` : "";
+    msg.textContent = failed
+      ? `安装失败${err}。可点重试，或在终端跑 ./scripts/setup.sh`
+      : (state.setup.message || "首次打开会自动安装 Python 依赖并下载模型（含分镜语言模型），请保持网络畅通。");
+  }
+  const list = $("#setup-items");
+  const items = Array.isArray(state.setup.items) ? state.setup.items : [];
+  if (list) {
+    if (!items.length) {
+      list.hidden = true;
+      list.innerHTML = "";
+    } else {
+      list.hidden = false;
+      list.innerHTML = items.map((it) => {
+        const mark = it.ok ? "✓" : "·";
+        return `<li class="${it.ok ? "ok" : "bad"}">${mark} ${esc(it.label)}</li>`;
+      }).join("");
+    }
+  }
+  if (actions) actions.hidden = !failed;
+}
+
+async function maybeOpenLastProjectAfterSetup() {
+  if (!state.setup?.ready || state.project) return;
+  if (!$("#project-picker") || $("#project-picker").hidden) return;
+  await refreshState();
+  const runningProj = (state.projects || []).find((p) => (p.tasks || {}).running > 0);
+  let last = "";
+  try { last = localStorage.getItem("nv_last_project") || ""; } catch {}
+  const target = runningProj || (state.projects || []).find((p) => p.name === last);
+  if (target) await openProject(target.name, target.path);
+}
+
+async function refreshSetup() {
+  try {
+    const res = await fetch("/api/setup/status");
+    const st = await res.json().catch(() => ({}));
+    // 旧服务进程还没有新路由时会 404；本机依赖其实已装，不能当成「安装失败」
+    if (res.status === 404 || (st && st.error === "not found")) {
+      const bypass = {
+        ready: true,
+        status: "ready",
+        pct: 100,
+        message: "依赖检查接口未就绪（请重启控制台后再验）",
+        error: "",
+        items: [],
+      };
+      renderSetupBanner(bypass);
+      stopSetupPolling();
+      return bypass;
+    }
+    if (!res.ok) {
+      throw Object.assign(new Error(st.error || `HTTP ${res.status}`), { data: st, status: res.status });
+    }
+    const wasReady = !!state.setup?.ready;
+    renderSetupBanner(st);
+    if (st.ready && !wasReady) {
+      const banner = $("#setup-banner");
+      if (banner) banner.dataset.justReady = "1";
+      renderSetupBanner(st);
+      maybeOpenLastProjectAfterSetup();
+    }
+    if (st.ready || st.status === "failed") {
+      stopSetupPolling();
+    } else {
+      startSetupPolling();
+    }
+    return st;
+  } catch (err) {
+    // 网络闪断等：不锁死项目页；下次轮询再试
+    console.warn("setup status", err);
+    startSetupPolling();
+    return state.setup;
+  }
+}
+
+function startSetupPolling() {
+  if (state.setupTimer) return;
+  state.setupTimer = setInterval(() => { refreshSetup(); }, 1500);
+}
+
+function stopSetupPolling() {
+  if (state.setupTimer) {
+    clearInterval(state.setupTimer);
+    state.setupTimer = null;
+  }
+}
+
+async function retrySetup() {
+  try {
+    const st = await api("/api/setup/ensure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+    renderSetupBanner(st);
+    startSetupPolling();
+  } catch (err) {
+    pickerMsg(`重试失败：${err.message}`, true);
+  }
+}
+
 async function createProject() {
+  if (setupBusy() || state.setup?.status === "failed") {
+    pickerMsg(state.setup?.status === "failed" ? "请先重试安装依赖" : "依赖还在安装，请稍候", true);
+    return;
+  }
   const name = $("#new-project-name").value.trim();
   if (!name) { pickerMsg("先填片名", true); return; }
   try {
@@ -303,6 +498,12 @@ function pickerMsg(msg, bad = false) {
 
 // 选项目 → 工作区所有字段归位到这个项目
 async function openProject(name, path, { autoSelectRunning = true } = {}) {
+  if (setupBusy() || state.setup?.status === "failed") {
+    leaveProjectForSetup(
+      state.setup?.status === "failed" ? "请先重试安装依赖" : "依赖还在安装，请稍候再进项目"
+    );
+    return;
+  }
   state.project = name;
   state.currentOut = path || `projects/${name}`;
   state.currentStoryboard = projectStoryboardPath(state.currentOut);
@@ -924,6 +1125,8 @@ async function generateStoryboardFromNovel() {
     toast(`保存正文失败：${err.message || err}`, true);
     return;
   }
+  // 正文已落盘。空项目只有小说脏时清掉，否则生成成功后会被脏标记挡住分镜刷新。
+  if (!state.shotSbExists) clearShotSbDirty();
   await openRerunDialog({ kind: "storyboard", id: "" });
 }
 
@@ -2126,10 +2329,6 @@ function emptyStoryboardShell() {
 
 async function loadShotSb(out, { force = false } = {}) {
   const path = `${out}/storyboard.json`;
-  // 有未保存编辑：不拿磁盘盖掉
-  if (!force && state.shotSbDirty && state.shotSb && state.shotSbPath === path) {
-    return state.shotSb;
-  }
   // 未脏时默认跟文件走；force / 路径变了才跳过「同路径缓存」
   if (!force && state.shotSb && state.shotSbPath === path && state.shotSbMtime != null) {
     // 仍去读盘比 mtime，避免删文件后界面残留
@@ -2146,6 +2345,12 @@ async function loadShotSb(out, { force = false } = {}) {
   }
   const exists = !!data.exists && !!data.storyboard;
   const mtime = data.mtime == null ? null : Number(data.mtime);
+  // 磁盘上从无到有：即使本地因粘贴小说标了脏，也要吃进新分镜（否则控件不刷新）
+  const appeared = exists && state.shotSbExists === false;
+  // 有未保存编辑：不拿磁盘盖掉（「从无到有」除外）
+  if (!force && !appeared && state.shotSbDirty && state.shotSb && state.shotSbPath === path) {
+    return state.shotSb;
+  }
   // 未脏且文件没变：复用内存（保留本地补过的 seed 显示）
   if (
     !force
@@ -3751,6 +3956,7 @@ function bind() {
   $("#new-project-name").addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") createProject();
   });
+  $("#setup-retry")?.addEventListener("click", retrySetup);
   $("#back-to-projects").addEventListener("click", backToProjects);
 }
 
@@ -3761,7 +3967,10 @@ connectEvents();
 setInterval(refreshState, 4000);
 
 (async function boot() {
+  const setup = await refreshSetup();
   await refreshState();
+  // 依赖未齐时停在项目选择页，展示安装进度
+  if (!setup?.ready) return;
   // 有运行中的项目优先打开；否则恢复上次打开的项目
   const runningProj = (state.projects || []).find((p) => (p.tasks || {}).running > 0);
   let last = "";

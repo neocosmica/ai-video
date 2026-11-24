@@ -141,6 +141,14 @@ export UV_PROJECT_ENVIRONMENT="$NOVEL_VIDEO_CACHE/venvs/main"
 link_venv "$ROOT/.venv" "$UV_PROJECT_ENVIRONMENT"
 uv sync --python "$UV_PYTHON" --index-url "$UV_INDEX_URL"
 
+echo "确认分镜依赖 mlx-lm（小说→storyboard）"
+env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT="$NOVEL_VIDEO_CACHE/venvs/main" \
+  UV_PYTHON="$UV_PYTHON" \
+  uv run --python "$UV_PYTHON" python - <<'PY'
+import mlx_lm
+print(f"mlx-lm OK：{getattr(mlx_lm, '__version__', '?')}")
+PY
+
 ensure_vendor vendor/ltx-2-mlx dgrauet/ltx-2-mlx \
   packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/cli.py
 (
@@ -220,73 +228,10 @@ if [[ ! -f vendor/musicgen-mlx/generate.py ]]; then
   exit 1
 fi
 
-echo "预下载权重（一律走 HF_ENDPOINT=$HF_ENDPOINT，已禁用 XET；权重不入库）"
+echo "预下载权重（与 pipeline/bootstrap.py 同一清单，含分镜 LLM；一律走 HF_ENDPOINT=$HF_ENDPOINT）"
 env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT="$NOVEL_VIDEO_CACHE/venvs/main" \
   UV_PYTHON="$UV_PYTHON" \
-  uv run --python "$UV_PYTHON" python - <<'PY'
-from pipeline.mirrors import apply_mirrors
-apply_mirrors()
-from huggingface_hub import snapshot_download
-import os
-print("HF_ENDPOINT=", os.environ.get("HF_ENDPOINT"))
-print("HF_HUB_DISABLE_XET=", os.environ.get("HF_HUB_DISABLE_XET"))
-
-snapshot_download(
-    "dgrauet/ltx-2.3-mlx-q4",
-    allow_patterns=[
-        "transformer-distilled-1.1.safetensors",
-        "spatial_upscaler_x2_v1_1.safetensors",
-        "spatial_upscaler_x2_v1_1_config.json",
-        "vae_decoder.safetensors",
-        "vae_encoder.safetensors",
-        # A2V 对白条件：编码要 audio_vae；_load_decoders 仍会打开 vocoder
-        "audio_vae.safetensors",
-        "vocoder.safetensors",
-        "connector.safetensors",
-        "config.json",
-        "embedded_config.json",
-        "quantize_config.json",
-        "split_model.json",
-        "LICENSE",
-        "README.md",
-        ".gitattributes",
-    ],
-)
-snapshot_download("mlx-community/gemma-3-12b-it-4bit")
-snapshot_download("mflux-community/flux2-klein-4b-mflux-q4")
-snapshot_download("mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit")
-# 小说→分镜：约 3.3 GB，16 GB Mac 可跑；与视频阶段 Gemma 分开，用完即释放
-snapshot_download("mlx-community/Qwen3-4B-Instruct-2507-4bit")
-# musicgen-mlx 只读 Audiocraft 的 state_dict.bin / compression_state_dict.bin。
-# pytorch_model.bin 与 model.safetensors 是同一套权重的 transformers 格式，约 4.5GB，不加载。
-snapshot_download(
-    "facebook/musicgen-small",
-    allow_patterns=[
-        "state_dict.bin",
-        "compression_state_dict.bin",
-        "config.json",
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "special_tokens_map.json",
-        "spiece.model",
-        "generation_config.json",
-        "preprocessor_config.json",
-        "README.md",
-        ".gitattributes",
-    ],
-)
-# MusicGen 的 T5Conditioner 运行时只读这四份；整仓还有 pytorch/tf/flax，用不到
-snapshot_download(
-    "t5-base",
-    allow_patterns=[
-        "config.json",
-        "model.safetensors",
-        "tokenizer.json",
-        "spiece.model",
-    ],
-)
-print("weights ready")
-PY
+  uv run --python "$UV_PYTHON" python -m pipeline.bootstrap install-weights
 
 echo "冒烟：transformers 导入计时（应在数秒内，不应数分钟）"
 env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT="$NOVEL_VIDEO_CACHE/venvs/main" \
@@ -310,12 +255,16 @@ import transformers
 print(f"musicgen transformers {time.time()-t:.2f}s {transformers.__version__}")
 PY
 
-# 访达双击入口
+# 访达双击入口 + macOS 菜单栏助手
 chmod +x "$ROOT/scripts/run.sh" "$ROOT/scripts/env.sh" \
-  "$ROOT/打开控制台.app/Contents/MacOS/launcher" 2>/dev/null || true
+  "$ROOT/scripts/macos/build-menubar-helper.sh" \
+  "$ROOT/AI短视频.app/Contents/MacOS/launcher" 2>/dev/null || true
+if [[ "$(uname -s)" == "Darwin" && -x "$ROOT/scripts/macos/build-menubar-helper.sh" ]]; then
+  "$ROOT/scripts/macos/build-menubar-helper.sh" || echo "（菜单栏助手编译失败，网页仍可用；可稍后重跑 scripts/macos/build-menubar-helper.sh）"
+fi
 
 echo "环境就绪。Python=$UV_PYTHON  镜像：HF=$HF_ENDPOINT  PyPI=$UV_INDEX_URL  PythonInstall=$UV_PYTHON_INSTALL_MIRROR"
 echo "venv 缓存：$NOVEL_VIDEO_CACHE/venvs"
 echo "下一步：./scripts/run.sh doctor"
-echo "打开控制台：双击「打开控制台.app」，或 ./scripts/run.sh   # http://127.0.0.1:8790"
+echo "打开控制台：双击「AI短视频.app」，或 ./scripts/run.sh   # http://127.0.0.1:8790（菜单栏可打开网页 / 退出）"
 echo "命令行成片：./scripts/run.sh produce --project demo"
