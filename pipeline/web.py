@@ -1015,42 +1015,65 @@ def write_storyboard(rel: str, data: dict) -> None:
     tmp.replace(path)
 
 
-def validate_storyboard(path_str: str, *, strict: bool) -> dict:
-    """借用 pipeline.screenplay 的逻辑做秒级校验（不加载模型）。"""
-    src = safe_path(path_str)
+def validate_storyboard(
+    path_str: str,
+    *,
+    strict: bool,
+    storyboard: dict | None = None,
+    novel_text: str | None = None,
+) -> dict:
+    """借用 pipeline.screenplay 的逻辑做秒级校验（不加载模型、不写盘）。
+
+    ``storyboard`` / ``novel_text`` 若传入，则用内存内容校验，不读/写磁盘上的对应文件。
+    """
     from pipeline.config import Settings
     from pipeline.projects import strip_storyboard_suffix
     from pipeline.screenplay import (
+        CHARS_PER_SECOND,
         assert_dialogue_coverage,
+        dialogue_budget_violations,
         dialogue_char_limit,
         normalize_storyboard,
-        report_dialogue_budget,
     )
     from pipeline.util import load_json, snap_frames
 
     settings = Settings.load()
-    raw = load_json(src)
+    src: Path | None = None
+    if path_str:
+        src = safe_path(path_str)
+    raw = storyboard if isinstance(storyboard, dict) else None
+    if raw is None:
+        if src is None or not src.exists():
+            raise FileNotFoundError("没有可校验的分镜")
+        raw = load_json(src)
+
     novel_path: Path | None = None
-    linked = str(raw.get("novel") or "").strip()
-    if linked:
-        cand = safe_path(linked)
-        if cand.exists():
-            novel_path = cand
-    if novel_path is None:
-        # 优先同一项目文件夹里的小说；兼容旧布局 input/<片名>_novel.txt
-        for cand in novel_candidates(src):
-            novel_path = cand
-            break
-    if novel_path is None:
-        stem = strip_storyboard_suffix(src.stem)
-        for cand_name in (f"{PROJECTS_DIRNAME}/{stem}/novel.txt", f"input/{stem}_novel.txt", f"input/{stem}.txt"):
-            cand = ROOT / cand_name
+    novel_body = novel_text
+    if novel_body is None:
+        linked = str(raw.get("novel") or "").strip()
+        if linked:
+            cand = safe_path(linked)
             if cand.exists():
                 novel_path = cand
+        if novel_path is None and src is not None:
+            for cand in novel_candidates(src):
+                novel_path = cand
                 break
+        if novel_path is None and src is not None:
+            stem = strip_storyboard_suffix(src.stem)
+            for cand_name in (f"{PROJECTS_DIRNAME}/{stem}/novel.txt", f"input/{stem}_novel.txt", f"input/{stem}.txt"):
+                cand = ROOT / cand_name
+                if cand.exists():
+                    novel_path = cand
+                    break
+        if novel_path is not None:
+            novel_body = novel_path.read_text(encoding="utf-8")
+
     fps = max(1, settings.video_fps)
-    max_seconds = snap_frames(settings.video_frames_max) / fps
+    max_frames = snap_frames(settings.video_frames_max)
+    max_seconds = max_frames / fps
     limit = dialogue_char_limit(settings.video_frames_max, fps)
+    detail = settings.budget_detail or {}
     normalized = normalize_storyboard(
         raw,
         novel_path=novel_path,
@@ -1059,31 +1082,48 @@ def validate_storyboard(path_str: str, *, strict: bool) -> dict:
         max_seconds=max_seconds,
     )
     shots = normalized["shots"]
-    if novel_path is not None:
-        assert_dialogue_coverage(novel_path.read_text(encoding="utf-8"), shots)
-    import contextlib
-    import io
+    if novel_body:
+        assert_dialogue_coverage(novel_body, shots)
 
-    buf = io.StringIO()
+    rows, violations = dialogue_budget_violations(
+        shots, limit, max_seconds, strict=strict
+    )
+    report_lines = []
+    if rows:
+        report_lines.append(
+            f"对白时长预估（语速 {CHARS_PER_SECOND} 字/秒，仅供参考；镜头会跟着配音长度走）："
+        )
+        report_lines.extend(rows)
+
     strict_error: str | None = None
-    try:
-        with contextlib.redirect_stdout(buf):
-            report_dialogue_budget(shots, limit, max_seconds, strict=strict)
-    except SystemExit as exc:
-        if not strict:
-            raise
-        strict_error = str(exc)
-    return {
+    if strict and violations:
+        strict_error = (
+            f"{len(violations)} 个镜头对白超过单镜额度 {limit} 字"
+            f"（约 {round(max_seconds, 1)}s）。不要删字，按建议拆成相邻镜头。"
+        )
+
+    result = {
         "ok": strict_error is None,
         "strict_error": strict_error,
+        "violations": violations if strict else [],
         "shots": len(shots),
         "characters": len(normalized.get("characters") or []),
         "dialogue_lines": normalized.get("dialogue_lines", 0),
         "limit_chars": limit,
         "max_seconds": round(max_seconds, 1),
+        "max_frames": max_frames,
+        "fps": fps,
+        "chars_per_second": CHARS_PER_SECOND,
+        "resolution": f"{settings.video_width}x{settings.video_height}",
+        "total_gib": detail.get("total_gib"),
+        "tier_gib": detail.get("tier_gib"),
         "novel": str(novel_path) if novel_path else "",
-        "report": buf.getvalue(),
+        "report": "\n".join(report_lines),
+        # 标明校验用的是请求体还是磁盘，避免前端误以为落盘了
+        "source": "memory" if isinstance(storyboard, dict) else "disk",
+        "novel_source": "memory" if novel_text is not None else ("disk" if novel_path else "none"),
     }
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1282,7 +1322,26 @@ class _Handler(BaseHTTPRequestHandler):
                 write_storyboard(rel, data.get("storyboard") or {})
                 self._json({"path": rel, "ok": True})
             elif path == "/api/storyboard/validate":
-                self._json(validate_storyboard(str(data.get("path") or ""), strict=bool(data.get("strict"))))
+                sb_payload = data.get("storyboard")
+                # novel_text 键存在则用网页正文（含空串）；不要回落读磁盘
+                novel_text = data["novel_text"] if "novel_text" in data else None
+                if novel_text is not None:
+                    novel_text = str(novel_text)
+                result = validate_storyboard(
+                    str(data.get("path") or ""),
+                    strict=bool(data.get("strict")),
+                    storyboard=sb_payload if isinstance(sb_payload, dict) else None,
+                    novel_text=novel_text,
+                )
+                if not result.get("ok"):
+                    # 400：让前端走失败分支；error 给人看，其余字段仍带上
+                    payload = {
+                        **result,
+                        "error": result.get("strict_error") or result.get("report") or "校验未通过",
+                    }
+                    self._json(payload, 400)
+                else:
+                    self._json(result)
             elif path == "/api/shots/rerun":
                 self._json(self.rerun_shots(data))
             else:

@@ -595,6 +595,9 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
         str(story.get("style") or ""), str(story.get("title") or "")
     )
     seed = int(story.get("music_seed") or stable_seed("bgm", prompt, story.get("title", "")))
+    # 缺省时把算出的 seed 写回内存，便于 UI / 下次复现
+    if story.get("music_seed") is None:
+        story["music_seed"] = seed
     timeline, source = _timeline_seconds(settings, out, story)
     # 配乐要比成片长一点：留出尾部淡出的余量，也让 -stream_loop 不需要真的绕回
     wanted = min(float(settings.music_max_seconds), max(8.0, timeline + 2.0))
@@ -651,8 +654,10 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
         "-o",
         str(dest),
         "--no-open",
+        "--seed",
+        str(seed),
     ]
-    _ = seed  # MusicGen-MLX CLI 暂不暴露 seed；保留变量便于以后接上
+    print(f"配乐 seed={seed}")
     log = artifacts_sub(out, "logs", "bgm.log")
     code = run_tee(
         cmd,
@@ -730,12 +735,16 @@ def cmd_music(args: argparse.Namespace) -> None:
     timeline, source = _timeline_seconds(settings, out, story)
     music = _generate_music(settings, story, out, args.force)
     have = wav_duration(music)
+    # music_seed 可能是本轮补上的：写回分镜，方便 UI 读取与复现
+    if story.get("music_seed") is not None:
+        dump_json(story_path, story)
     manifest = _load_manifest(out)
     manifest.update(
         {
             "music": str(music),
             "music_seconds": round(have, 3),
             "music_model": settings.music_model,
+            "music_seed": story.get("music_seed"),
             "timeline_s": round(timeline, 3),
             "timeline_source": source,
         }

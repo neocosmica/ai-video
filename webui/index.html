@@ -28,106 +28,130 @@
     <div id="picker-msg" class="error" hidden></div>
   </section>
 
-  <!-- 项目工作区：选定项目后显示 -->
-  <section class="col" id="workspace" hidden>
-    <div class="card">
-      <h2><button id="back-to-projects" class="ghost" title="返回项目列表">← 项目</button>
-        <span id="current-project-name" class="mono"></span></h2>
-      <div class="row">
-        <label>片名</label>
-        <input id="title" placeholder="例：雨夜重逢" />
-      </div>
-      <div class="row">
-        <label>小说正文 <span class="hint">（写回项目 novel.txt）</span></label>
-        <textarea id="novel-text" rows="9" placeholder="打开项目后自动载入。也可在此粘贴/修改；引号台词会原样进入对白。"></textarea>
-      </div>
-      <div class="row">
-        <label>执行阶段</label>
-        <div class="stages" id="stage-picks"></div>
-      </div>
-      <div class="row inline">
-        <label class="check"><input type="checkbox" id="force"> 强制重做（先清空产物再生成）</label>
-        <label class="check">只重做镜头 <input id="only-shots" placeholder="s003,s004 留空=全部" style="width:150px"/></label>
-      </div>
-      <div class="actions">
-        <button id="start-btn" class="primary">🚀 启动任务</button>
-        <span id="budget-info" class="hint"></span>
-      </div>
-      <div id="start-error" class="error" hidden></div>
-    </div>
-  </section>
-
-  <!-- 右列：任务与进度（属于当前项目） -->
-  <section class="col" id="col-tasks" hidden>
-    <div class="card">
-      <h2>② 任务与进度 <button id="tasks-clear" class="ghost" style="float:right;font-size:12px;padding:2px 10px;">🧹 清空本项目记录</button></h2>
-      <div id="task-list" class="task-list"><div class="empty">这个项目还没有任务。左侧启动一个。</div></div>
-    </div>
-    <div class="card" id="task-detail-card" hidden>
-      <h2 id="task-detail-title">任务</h2>
-      <div class="overall">
-        <div class="overall-bar"><div id="overall-fill" class="overall-fill"></div></div>
-        <span id="overall-pct" class="mono">0%</span>
-        <span id="overall-stage" class="hint"></span>
-      </div>
-      <div class="stage-track" id="stage-track"></div>
-      <div id="live-items" class="live-items" aria-label="完整步骤进度"></div>
-      <div class="actions">
-        <button id="task-stop" class="danger">⏹ 停止</button>
-        <button id="task-rerun-failed" class="ghost">↻ 重跑失败阶段</button>
-        <span id="task-meta" class="hint"></span>
-      </div>
-      <div class="log-section collapsed" id="log-section">
-        <button type="button" id="log-toggle" class="log-toggle" aria-expanded="false">
-          <span class="log-toggle-chevron" aria-hidden="true">▸</span>
-          <span>终端日志</span>
-          <span class="hint">默认折叠 · 点击展开</span>
-        </button>
-        <pre id="log" class="log" hidden></pre>
-      </div>
-    </div>
-  </section>
-
-  <!-- 底部：成片 + 镜头产物，横跨左右两栏（属于当前项目） -->
+  <!-- 工程：成片展示 + 分镜编辑 -->
   <div class="card" id="shots-card" hidden>
-    <h2>③ 镜头分镜 <span id="shots-out-label" class="mono hint"></span></h2>
-    <div class="actions shots-toolbar" style="margin:0 0 10px">
-      <button id="shots-save" class="primary">保存分镜</button>
-      <button id="shots-validate" class="ghost">硬校验</button>
-      <button id="shots-add" class="ghost">＋ 镜头</button>
-      <button id="shots-chars" class="ghost">编辑角色</button>
-      <label class="check"><input type="checkbox" id="auto-refresh" checked> 自动刷新产物（5s）</label>
-      <span id="shots-dirty" class="hint" hidden>未保存</span>
-      <span id="final-badge" class="badge success" hidden>🎬 final.mp4</span>
-      <span id="shots-msg" class="hint"></span>
-    </div>
-    <div id="final-wrap" class="final-wrap" hidden>
+    <h2 class="shots-head">
+      <button id="back-to-projects" class="ghost" title="返回项目列表">← 项目</button>
+      <span id="current-project-name" class="mono"></span>
+      <span class="hint" id="shots-out-label"></span>
+    </h2>
+
+    <div id="final-wrap" class="final-wrap">
       <article class="movie-card">
         <div class="movie-poster">
           <video id="final-player" class="final-player" controls playsinline preload="metadata"></video>
+          <div id="final-empty" class="final-empty" hidden>尚无成片 · 启动任务生成</div>
         </div>
         <div class="movie-info">
           <header class="movie-header">
             <div class="movie-kicker">成片</div>
-            <h3 id="final-film-title" class="movie-title">—</h3>
+            <div class="movie-title-wrap" id="title-wrap" title="点击编辑片名">
+              <h3 class="movie-title-display" id="title-display">—</h3>
+              <input id="title" class="movie-title-input" hidden placeholder="例：雨夜重逢" />
+            </div>
             <div class="movie-actions">
-              <a id="final-download" class="final-link" href="#" download>下载 final.mp4</a>
+              <a id="final-download" class="final-link" href="#" download hidden>下载 final.mp4</a>
               <span id="final-meta" class="hint mono"></span>
+              <span id="final-badge" class="badge success" hidden>🎬 final.mp4</span>
             </div>
           </header>
-          <div id="final-novel" class="movie-novel">暂无正文</div>
+          <div class="movie-novel-wrap" id="novel-wrap" title="点击编辑正文">
+            <div class="movie-novel-display" id="novel-display">暂无正文</div>
+            <textarea id="novel-text" class="movie-novel-input" hidden rows="8" placeholder="粘贴小说正文；引号台词会原样进入对白。"></textarea>
+          </div>
           <section class="movie-section">
-            <h4 class="movie-label">演职人员</h4>
+            <div class="movie-label-row">
+              <h4 class="movie-label">演职人员</h4>
+              <button type="button" id="cast-add" class="ghost cast-add-btn">＋ 角色</button>
+            </div>
             <div id="final-cast" class="movie-cast"><div class="hint">暂无角色信息</div></div>
           </section>
-          <section class="movie-section" id="final-style-section" hidden>
+          <section class="movie-section" id="final-style-section">
             <h4 class="movie-label">视觉风格</h4>
-            <div id="final-style" class="movie-style"></div>
+            <div class="movie-meta-iedit" data-f="style" title="点击编辑">
+              <div id="style-display" class="movie-style movie-meta-display empty">点击填写画面风格</div>
+              <textarea id="style-text" class="movie-meta-input" hidden rows="2" placeholder="例：写实华语短剧，自然肤色，电影感光线，浅景深"></textarea>
+            </div>
+          </section>
+          <section class="movie-section" id="final-music-section">
+            <h4 class="movie-label">配乐提示 <span class="hint">英文 · 无人声</span></h4>
+            <div class="movie-meta-iedit" data-f="music_prompt" title="点击编辑">
+              <div id="music-display" class="movie-style movie-meta-display empty">点击填写 music_prompt</div>
+              <textarea id="music-text" class="movie-meta-input" hidden rows="2" placeholder="English instrumental BGM, no vocals"></textarea>
+            </div>
+            <div class="seed-row music-seed-row">
+              <span class="shot-field-label">music_seed</span>
+              <button type="button" id="music-seed-reroll" class="ghost seed-reroll" title="生成新随机数">🎲</button>
+              <span id="music-seed-display" class="seed-value mono" title="点击编辑">—</span>
+              <input id="music-seed-input" class="seed-value-input mono" type="number" hidden>
+            </div>
           </section>
         </div>
       </article>
     </div>
+
+    <div class="actions shots-toolbar">
+      <button id="shots-save" class="primary">保存分镜</button>
+      <button id="shots-revert" class="ghost">还原</button>
+      <button id="shots-reroll-seeds" class="ghost" title="重新随机 music_seed、角色 seed、镜头 seed">🎲 全随机 seed</button>
+      <button id="shots-add" class="ghost">＋ 镜头</button>
+      <button id="shots-chars" class="ghost">编辑角色</button>
+      <label class="check"><input type="checkbox" id="auto-refresh" checked> 自动刷新产物（5s）</label>
+      <span id="shots-dirty" class="hint" hidden>有未保存修改 · 点「保存分镜」写回</span>
+    </div>
+    <div id="shots-msg" class="shots-msg hint" hidden></div>
     <div id="shots-grid" class="shots-grid"></div>
+  </div>
+
+  <!-- 生成过程：启动 + 进度 -->
+  <div class="card" id="produce-card" hidden>
+    <h2>生成过程</h2>
+    <div class="run-progress-row">
+      <div class="project-run">
+        <div class="row">
+          <label>执行阶段</label>
+          <div class="stages" id="stage-picks"></div>
+        </div>
+        <div class="row inline">
+          <label class="check"><input type="checkbox" id="force"> 强制重做（先清空产物再生成）</label>
+          <label class="check">只重做镜头 <input id="only-shots" placeholder="s003,s004 留空=全部" style="width:150px"/></label>
+        </div>
+        <div class="actions">
+          <button id="start-btn" class="primary">🚀 启动任务</button>
+          <span id="budget-info" class="hint"></span>
+        </div>
+        <div id="start-error" class="error" hidden></div>
+      </div>
+
+      <div class="card task-detail-inline" id="task-detail-card" hidden>
+        <h2 id="task-detail-title">任务</h2>
+        <div class="overall">
+          <div class="overall-bar"><div id="overall-fill" class="overall-fill"></div></div>
+          <span id="overall-pct" class="mono">0%</span>
+          <span id="overall-stage" class="hint"></span>
+        </div>
+        <div class="stage-track" id="stage-track"></div>
+        <div id="live-items" class="live-items" aria-label="完整步骤进度"></div>
+        <div class="actions">
+          <button id="task-stop" class="danger">⏹ 停止</button>
+          <button id="task-rerun-failed" class="ghost">↻ 重跑失败阶段</button>
+          <span id="task-meta" class="hint"></span>
+        </div>
+        <div class="log-section collapsed" id="log-section">
+          <button type="button" id="log-toggle" class="log-toggle" aria-expanded="false">
+            <span class="log-toggle-chevron" aria-hidden="true">▸</span>
+            <span>终端日志</span>
+            <span class="hint">默认折叠 · 点击展开</span>
+          </button>
+          <pre id="log" class="log" hidden></pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="produce-history">
+      <h3 class="produce-history-title">任务历史 <button id="tasks-clear" class="ghost" style="float:right;font-size:12px;padding:2px 10px;">🧹 清空本项目记录</button></h3>
+      <div id="task-list" class="task-list"><div class="empty">这个项目还没有任务。左侧启动一个。</div></div>
+    </div>
   </div>
 
 </main>
@@ -137,7 +161,6 @@
     <h2>分镜编辑器 <span id="sb-path-label" class="mono hint"></span></h2>
     <div class="sb-toolbar">
       <button id="sb-save" class="primary">保存</button>
-      <button id="sb-validate" class="ghost">硬校验（--strict）</button>
       <button id="sb-close" class="ghost">关闭</button>
       <span id="sb-msg" class="hint"></span>
     </div>
@@ -153,38 +176,53 @@
         <div class="shot-id mono"></div>
         <button type="button" class="ghost shot-del" title="删除此镜">删除</button>
       </div>
-      <label class="shot-field">
-        <span>对白</span>
-        <textarea class="shot-f-dialogue" rows="2" placeholder="原样台词；空镜留空"></textarea>
-      </label>
+      <div class="shot-iedit" data-f="dialogue" data-multiline data-placeholder="空镜留空">
+        <div class="shot-field-label">对白</div>
+        <div class="shot-iedit-display"></div>
+        <textarea class="shot-iedit-input" hidden rows="2" placeholder="原样台词；空镜留空"></textarea>
+      </div>
       <div class="shot-row2">
-        <label class="shot-field">
-          <span>说话人</span>
-          <input class="shot-f-speaker" placeholder="中文名">
-        </label>
-        <label class="shot-field">
-          <span>情绪</span>
-          <input class="shot-f-emotion" list="emotion-list" placeholder="calm">
-        </label>
+        <div class="shot-iedit" data-f="speaker" data-kind="select" data-placeholder="未选">
+          <div class="shot-field-label">说话人</div>
+          <div class="shot-iedit-display"></div>
+          <select class="shot-iedit-input" hidden></select>
+        </div>
+        <div class="shot-iedit" data-f="emotion" data-kind="select" data-placeholder="未选">
+          <div class="shot-field-label">情绪</div>
+          <div class="shot-iedit-display"></div>
+          <select class="shot-iedit-input" hidden></select>
+        </div>
       </div>
       <button type="button" class="ghost shot-more-toggle">提示词 ▸</button>
       <div class="shot-more" hidden>
-        <label class="shot-field">
-          <span>地点</span>
-          <input class="shot-f-location">
-        </label>
-        <label class="shot-field">
-          <span>角色</span>
-          <input class="shot-f-characters" placeholder="id，逗号分隔">
-        </label>
-        <label class="shot-field">
-          <span>画面</span>
-          <textarea class="shot-f-image" rows="2" placeholder="image_prompt"></textarea>
-        </label>
-        <label class="shot-field">
-          <span>运镜</span>
-          <textarea class="shot-f-motion" rows="2" placeholder="motion_prompt（英文）"></textarea>
-        </label>
+        <div class="shot-iedit" data-f="location" data-placeholder="点击填写">
+          <div class="shot-field-label">地点</div>
+          <div class="shot-iedit-display"></div>
+          <input class="shot-iedit-input" hidden>
+        </div>
+        <div class="shot-iedit" data-f="characters" data-kind="checks" data-placeholder="未选">
+          <div class="shot-field-label">出场角色</div>
+          <div class="shot-iedit-display"></div>
+          <div class="shot-iedit-input shot-char-checks" hidden></div>
+        </div>
+        <div class="shot-iedit" data-f="image_prompt" data-multiline data-placeholder="点击填写">
+          <div class="shot-field-label">画面提示</div>
+          <div class="shot-iedit-display"></div>
+          <textarea class="shot-iedit-input" hidden rows="2" placeholder="景别、动作、光线…"></textarea>
+        </div>
+        <div class="shot-iedit" data-f="motion_prompt" data-multiline data-placeholder="点击填写（英文）">
+          <div class="shot-field-label">运镜 · 英文</div>
+          <div class="shot-iedit-display"></div>
+          <textarea class="shot-iedit-input" hidden rows="2" placeholder="English camera / motion only"></textarea>
+        </div>
+        <div class="shot-iedit" data-f="seed" data-placeholder="可选">
+          <div class="seed-row">
+            <div class="shot-field-label">seed</div>
+            <button type="button" class="ghost seed-reroll" title="生成新随机数" data-seed-for="shot">🎲</button>
+          </div>
+          <div class="shot-iedit-display"></div>
+          <input class="shot-iedit-input" type="number" hidden>
+        </div>
       </div>
       <div class="shot-status"></div>
       <div class="shot-progress"><div class="shot-progress-fill"></div></div>

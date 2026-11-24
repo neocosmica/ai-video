@@ -54,6 +54,9 @@ def main():
     sampling_group.add_argument("--cfg-coef", type=float, default=3.0,
                                 metavar="C",
                                 help="classifier-free guidance coefficient (default: 3.0)")
+    sampling_group.add_argument("--seed", type=int, default=None,
+                                metavar="N",
+                                help="MLX RNG seed for reproducible sampling")
 
     args = parser.parse_args()
 
@@ -61,6 +64,10 @@ def main():
     import numpy as np
     import soundfile as sf
     from audiocraft_mlx.models.musicgen import MusicGen
+
+    if args.seed is not None:
+        mx.random.seed(int(args.seed) & 0xFFFFFFFF)
+        print(f"RNG seed: {int(args.seed) & 0xFFFFFFFF}")
 
     # Load model
     print(f"Loading {args.model}...")

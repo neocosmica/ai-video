@@ -54,7 +54,7 @@
       "speaker": "",
       "dialogue": "",
       "seed": 1988680901,
-      "emotion": "surprised",
+      "emotion": "nostalgic",
       "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s002.mp4",
       "video_frames": 49
     },
@@ -136,5 +136,6 @@
       "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s007.mp4",
       "video_frames": 49
     }
-  ]
+  ],
+  "music_seed": 3711143279
 }

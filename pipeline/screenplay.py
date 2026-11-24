@@ -29,6 +29,7 @@ SCHEMA_HINT = """分镜不由本机 LLM 生成。请让 Cursor Agent 阅读小�
   "title": "短剧标题",
   "style": "一句中文画面风格",
   "music_prompt": "English instrumental BGM description, no vocals",
+  "music_seed": 123456789,
   "characters": [
     {
       "id": "拼音id",
@@ -123,6 +124,61 @@ def dialogue_char_limit(
     return max(4, int(seconds * chars_per_second))
 
 
+def _split_shot_label(sid: str, index: int) -> str:
+    if index == 0:
+        return sid
+    if index < 26:
+        return f"{sid}{'abcdefghijklmnopqrstuvwxyz'[index]}"
+    return f"{sid}_p{index + 1}"
+
+
+def dialogue_budget_violations(
+    shots: list[dict],
+    limit: int,
+    max_seconds: float,
+    *,
+    tolerance: float = 1.15,
+    strict: bool = False,
+) -> tuple[list[str], list[dict]]:
+    """返回 (预估行, 超额度镜头结构化列表)。"""
+    from pipeline.dialogue import plan_segments
+
+    soft_cap = max_seconds * tolerance
+    rows: list[str] = []
+    violations: list[dict] = []
+    for shot in shots:
+        line = str(shot.get("dialogue") or "").strip()
+        if not line:
+            continue
+        seconds = estimate_speech_seconds(line)
+        chars = count_spoken_chars(line)
+        sid = str(shot.get("id") or "?")
+        if seconds > soft_cap or (strict and chars > limit):
+            pieces = plan_segments(line, limit)
+            piece_list = pieces if len(pieces) > 1 else [line]
+            plan = " / ".join(piece.strip() for piece in piece_list)
+            violations.append(
+                {
+                    "id": sid,
+                    "chars": chars,
+                    "seconds": round(seconds, 1),
+                    "limit": limit,
+                    "max_seconds": round(max_seconds, 1),
+                    "splits": [
+                        {"id": _split_shot_label(sid, i), "dialogue": piece.strip()}
+                        for i, piece in enumerate(piece_list)
+                    ],
+                }
+            )
+            rows.append(
+                f"  ~ {sid}：{chars} 字 ≈ {seconds:.1f}s（镜头参考 {max_seconds:.1f}s / {limit} 字）"
+                f"→ 若想分镜可断在：{plan}"
+            )
+        else:
+            rows.append(f"    {sid}：{chars} 字 ≈ {seconds:.1f}s")
+    return rows, violations
+
+
 def report_dialogue_budget(
     shots: list[dict],
     limit: int,
@@ -138,58 +194,34 @@ def report_dialogue_budget(
 
     ``tolerance``：略微超出（默认 15% 以内）不提示，避免为 0.2 秒把句子拆碎。
     """
-    from pipeline.dialogue import plan_segments
-
-    soft_cap = max_seconds * tolerance
-    rows: list[str] = []
-    long_shots: list[tuple[str, str, int, float, list[str]]] = []
-    for shot in shots:
-        line = str(shot.get("dialogue") or "").strip()
-        if not line:
-            continue
-        seconds = estimate_speech_seconds(line)
-        chars = count_spoken_chars(line)
-        sid = str(shot.get("id") or "?")
-        if seconds > soft_cap or (strict and chars > limit):
-            pieces = plan_segments(line, limit)
-            plan = " / ".join(piece.strip() for piece in pieces) if len(pieces) > 1 else line
-            long_shots.append((sid, line, chars, seconds, pieces if len(pieces) > 1 else [line]))
-            rows.append(
-                f"  ~ {sid}：{chars} 字 ≈ {seconds:.1f}s（镜头参考 {max_seconds:.1f}s / {limit} 字）"
-                f"→ 若想分镜可断在：{plan}"
-            )
-        else:
-            rows.append(f"    {sid}：{chars} 字 ≈ {seconds:.1f}s")
+    rows, violations = dialogue_budget_violations(
+        shots, limit, max_seconds, tolerance=tolerance, strict=strict
+    )
     if not rows:
         return
     print(
         f"对白时长预估（语速 {CHARS_PER_SECOND} 字/秒，仅供参考；镜头会跟着配音长度走）："
     )
     print("\n".join(rows))
-    if not long_shots:
+    if not violations:
         return
     if strict:
         blocks: list[str] = []
-        for sid, _line, chars, seconds, pieces in long_shots:
+        for item in violations:
+            sid = item["id"]
             blocks.append(
-                f"{sid}：{chars} 字 ≈ {seconds:.1f}s，超过单镜额度 {limit} 字"
+                f"{sid}：{item['chars']} 字 ≈ {item['seconds']}s，超过单镜额度 {item['limit']} 字"
             )
             blocks.append("  请拆成相邻镜头，台词原样不要删字：")
-            for index, piece in enumerate(pieces):
-                if index == 0:
-                    label = sid
-                elif index < 26:
-                    label = f"{sid}{'abcdefghijklmnopqrstuvwxyz'[index]}"
-                else:
-                    label = f"{sid}_p{index + 1}"
-                blocks.append(f"    {label}  → {piece.strip()}")
+            for part in item["splits"]:
+                blocks.append(f"    {part['id']}  → {part['dialogue']}")
         raise SystemExit(
             "分镜有镜头对白超过单镜额度（--strict）。"
             "**不要删字压短**，按下面断点拆成相邻镜头，每镜换景别/角度：\n"
             + "\n".join(blocks)
         )
     print(
-        f"提示：上面 {len(long_shots)} 个镜头对白较长。**不需要为时长改写台词**——配音按原文一次念完，"
+        f"提示：上面 {len(violations)} 个镜头对白较长。**不需要为时长改写台词**——配音按原文一次念完，"
         "镜头时长跟着配音走；audio 阶段还会在句中停顿处自动切段拆镜（同一次配音，语调连贯）。"
         "只有想控制运镜节奏时，才按上面的断点自己分镜。"
     )
@@ -349,10 +381,16 @@ def normalize_storyboard(
             strict=strict,
         )
     spoken = sum(1 for shot in shots if shot.get("dialogue"))
+    music_seed = (
+        int(data["music_seed"])
+        if data.get("music_seed") is not None
+        else stable_seed("bgm", music_prompt, title)
+    )
     return {
         "title": title,
         "style": style,
         "music_prompt": music_prompt,
+        "music_seed": music_seed,
         "novel": str(novel_path) if novel_path else str(data.get("novel") or ""),
         "max_shots": max_shots,
         "dialogue_char_limit": dialogue_limit,
