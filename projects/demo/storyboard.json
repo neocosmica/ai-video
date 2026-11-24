@@ -2,7 +2,7 @@
   "title": "雨夜重逢",
   "style": "写实华语短剧，自然肤色，暴雨夜街角，便利店冷白灯与关东煮暖黄热气，浅景深，电影感，人脸清晰可见",
   "music_prompt": "Sparse melancholic piano over soft rain and distant city hum, warm low strings swell gently, Chinese short-drama rainy reunion, instrumental only, no vocals, intimate cinematic underscore",
-  "music_seed": 654868798,
+  "music_seed": 534287682,
   "novel": "/Users/wangxinyu/ai视频/projects/demo/novel.txt",
   "max_shots": 16,
   "dialogue_char_limit": 21,
@@ -81,15 +81,16 @@
         "zhouyu"
       ],
       "location": "便利店收银台",
-      "image_prompt": "中近景，略侧角度，周屿穿着围裙站在收银台后，脸部清晰，手指沾着墨水，嘴角轻笑且嘴微微张开正说话，关东煮热气在背景升起",
-      "motion_prompt": "Locked-off camera, he speaks softly with clear lip motion and a faint smile, no zoom no push-in",
+      "image_prompt": "中近景，略侧角度，周屿穿着围裙站在收银台后，脸部和嘴唇清晰，手指沾着墨水，嘴角轻笑着微微张开正说话，关东煮热气在背景升起",
+      "motion_prompt": "Locked-off camera, he speaks softly with clear lip motion.",
       "speaker": "周屿",
       "dialogue": "去了。又回来了。",
-      "seed": 1302624735,
+      "seed": 4248996497,
       "emotion": "bitter",
       "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s004.mp4",
       "audio_duration": 1.5,
-      "video_frames": 41
+      "video_frames": 41,
+      "video_mode": "a2v"
     },
     {
       "id": "s005",
@@ -110,17 +111,19 @@
     {
       "id": "s006",
       "characters": [
-        "linwan"
+        "linwan",
+        "zhouyu"
       ],
       "location": "便利店门口雨棚下",
-      "image_prompt": "中景，林晚站在雨棚下握着热美式，脸部清晰，侧身看向玻璃门内店员背影，雨水顺着棚沿落下",
-      "motion_prompt": "Locked-off camera, she watches through the glass with subtle eye movement, rain falls in background, no zoom no dolly",
+      "image_prompt": "中景，林晚站在雨棚下握着热美式，脸部清晰，侧身看向玻璃门内店员（周屿）背影，雨水顺着棚沿落下",
+      "motion_prompt": "Locked-off camera, linwan watches through the glass with subtle eye movement, rain falls in background, no zoom no dolly",
       "speaker": "",
       "dialogue": "",
-      "seed": 4170899063,
+      "seed": 33003446,
       "emotion": "nostalgic",
       "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s006.mp4",
-      "video_frames": 49
+      "video_frames": 49,
+      "video_mode": "i2v"
     },
     {
       "id": "s007",
