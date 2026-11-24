@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --bg: #0f1117;
   --panel: #171a23;
   --panel-2: #1d2130;
@@ -10,14 +11,79 @@
   --bad: #e5534b;
   --warn: #d9a03f;
   --run: #5b8cff;
+  --scroll-thumb: #3a4158;
+  --scroll-thumb-hover: #525a75;
 }
 
 * { box-sizing: border-box; }
+html, body {
+  color-scheme: dark;
+}
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
   font: 14px/1.55 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+/* 滚动条跟深色面板走（Chrome / Safari / Edge） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 原生控件：复选框 / 单选 / 下拉 / 数字框 / 滑条 */
+input[type="checkbox"],
+input[type="radio"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+  color-scheme: dark;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+input[type="number"],
+input[type="range"],
+select {
+  color-scheme: dark;
+  accent-color: var(--accent);
+}
+select {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font: inherit;
+}
+select option,
+select optgroup {
+  background: var(--panel);
+  color: var(--text);
+}
+input[type="range"] {
+  color-scheme: dark;
 }
 
 .topbar {
@@ -110,7 +176,12 @@ body {
 .row.inline { flex-direction: row; gap: 18px; align-items: center; flex-wrap: wrap; }
 .row label { font-size: 12px; color: var(--muted); }
 .row.split label { margin-bottom: 0; }
-input[type="text"], input:not([type]), textarea {
+input[type="text"],
+input[type="number"],
+input[type="search"],
+input[type="password"],
+input:not([type]),
+textarea {
   width: 100%;
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -119,9 +190,13 @@ input[type="text"], input:not([type]), textarea {
   padding: 8px 10px;
   font: inherit;
   resize: vertical;
+  color-scheme: dark;
 }
 textarea { font-family: inherit; line-height: 1.6; }
-input:focus, textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+input:focus, textarea:focus, select:focus {
+  outline: 1px solid var(--accent);
+  border-color: var(--accent);
+}
 .fileline { display: flex; gap: 8px; }
 .fileline input { flex: 1; }
 
@@ -647,7 +722,14 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   padding: 4px 8px;
 }
 .cast-iedit-input:focus { outline: none; }
-.cast-iedit select.cast-iedit-input { appearance: auto; cursor: pointer; }
+.cast-iedit select.cast-iedit-input {
+  appearance: auto;
+  cursor: pointer;
+  color-scheme: dark;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--accent);
+}
 .cast-iedit textarea.cast-iedit-input {
   min-height: 52px;
   resize: vertical;
@@ -939,6 +1021,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   appearance: auto;
   cursor: pointer;
   min-height: 32px;
+  color-scheme: dark;
+  background: var(--panel);
+  color: var(--text);
 }
 .shot-char-checks {
   display: flex;
@@ -1038,7 +1123,12 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   border-radius: 8px;
   font: inherit;
 }
-.sb-shot select { appearance: auto; }
+.sb-shot select {
+  appearance: auto;
+  color-scheme: dark;
+  background: var(--panel);
+  color: var(--text);
+}
 .sb-shot .shot-meta { display: flex; flex-direction: column; gap: 6px; }
 .sb-shot .shot-meta .mono { font-size: 12px; color: var(--accent); }
 .sb-char .fields { grid-template-columns: 88px 1fr; }
