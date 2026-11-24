@@ -92,7 +92,14 @@
         <button id="task-rerun-failed" class="ghost">↻ 重跑失败阶段</button>
         <span id="task-meta" class="hint"></span>
       </div>
-      <pre id="log" class="log"></pre>
+      <div class="log-section collapsed" id="log-section">
+        <button type="button" id="log-toggle" class="log-toggle" aria-expanded="false">
+          <span class="log-toggle-chevron" aria-hidden="true">▸</span>
+          <span>终端日志</span>
+          <span class="hint">默认折叠 · 点击展开</span>
+        </button>
+        <pre id="log" class="log" hidden></pre>
+      </div>
     </div>
   </section>
 
@@ -104,12 +111,30 @@
       <span id="final-badge" class="badge success" hidden>🎬 final.mp4</span>
     </div>
     <div id="final-wrap" class="final-wrap" hidden>
-      <div class="final-head">
-        <span class="final-title">成片预览</span>
-        <a id="final-download" class="ghost final-link" href="#" download>下载 final.mp4</a>
-        <span id="final-meta" class="hint mono"></span>
-      </div>
-      <video id="final-player" class="final-player" controls playsinline preload="metadata"></video>
+      <article class="movie-card">
+        <div class="movie-poster">
+          <video id="final-player" class="final-player" controls playsinline preload="metadata"></video>
+        </div>
+        <div class="movie-info">
+          <header class="movie-header">
+            <div class="movie-kicker">成片</div>
+            <h3 id="final-film-title" class="movie-title">—</h3>
+            <div class="movie-actions">
+              <a id="final-download" class="final-link" href="#" download>下载 final.mp4</a>
+              <span id="final-meta" class="hint mono"></span>
+            </div>
+          </header>
+          <div id="final-novel" class="movie-novel">暂无正文</div>
+          <section class="movie-section">
+            <h4 class="movie-label">演职人员</h4>
+            <div id="final-cast" class="movie-cast"><div class="hint">暂无角色信息</div></div>
+          </section>
+          <section class="movie-section" id="final-style-section" hidden>
+            <h4 class="movie-label">视觉风格</h4>
+            <div id="final-style" class="movie-style"></div>
+          </section>
+        </div>
+      </article>
     </div>
     <div id="shots-grid" class="shots-grid"></div>
   </div>

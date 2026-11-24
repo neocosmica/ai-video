@@ -1477,6 +1477,7 @@ class _Handler(BaseHTTPRequestHandler):
             "frames": _scan("frames", (".png", ".jpg", ".jpeg", ".webp")),
             "clips": _scan("clips", (".mp4",)),
             "voices": _scan("audio/voice", (".wav",)),
+            "characters": _scan("characters", (".png", ".jpg", ".jpeg", ".webp")),
             "final": final,
         }
 

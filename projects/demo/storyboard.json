@@ -39,7 +39,8 @@
       "dialogue": "",
       "seed": 779974866,
       "emotion": "calm",
-      "video": "/Users/wangxinyu/ai视频/output/demo/clips/s001.mp4"
+      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s001.mp4",
+      "video_frames": 49
     },
     {
       "id": "s002",
@@ -54,7 +55,8 @@
       "dialogue": "",
       "seed": 1988680901,
       "emotion": "surprised",
-      "video": "/Users/wangxinyu/ai视频/output/demo/clips/s002.mp4"
+      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s002.mp4",
+      "video_frames": 49
     },
     {
       "id": "s003",
@@ -68,7 +70,9 @@
       "dialogue": "你不是去了南方吗？",
       "seed": 31139660,
       "emotion": "surprised",
-      "video": "/Users/wangxinyu/ai视频/output/demo/clips/s003.mp4"
+      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s003.mp4",
+      "audio_duration": 1.42,
+      "video_frames": 41
     },
     {
       "id": "s004",
@@ -82,7 +86,9 @@
       "dialogue": "去了。又回来了。",
       "seed": 416834261,
       "emotion": "bitter",
-      "video": "/Users/wangxinyu/ai视频/output/demo/clips/s004.mp4"
+      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s004.mp4",
+      "audio_duration": 1.5,
+      "video_frames": 41
     },
     {
       "id": "s005",
@@ -96,7 +102,9 @@
       "dialogue": "下班等我。有些话，当时没讲完。",
       "seed": 1794266532,
       "emotion": "whisper",
-      "video": "/Users/wangxinyu/ai视频/output/demo/clips/s005.mp4"
+      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s005.mp4",
+      "audio_duration": 3.28,
+      "video_frames": 81
     },
     {
       "id": "s006",
@@ -110,7 +118,8 @@
       "dialogue": "",
       "seed": 1484287240,
       "emotion": "nostalgic",
-      "video": "/Users/wangxinyu/ai视频/output/demo/clips/s006.mp4"
+      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s006.mp4",
+      "video_frames": 49
     },
     {
       "id": "s007",
@@ -124,7 +133,8 @@
       "dialogue": "",
       "seed": 1153045326,
       "emotion": "warm",
-      "video": "/Users/wangxinyu/ai视频/output/demo/clips/s007.mp4"
+      "video": "/Users/wangxinyu/ai视频/projects/demo/work/clips/s007.mp4",
+      "video_frames": 49
     }
   ]
 }

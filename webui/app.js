@@ -415,6 +415,7 @@ async function selectTask(id) {
   liveItemsSig = "";
   appliedProgressSeq = -1;
   $("#log").textContent = "";
+  setLogCollapsed(true);
   const job = state.tasks.find((t) => t.id === id);
   if (!job) return;
   $("#task-detail-card").hidden = false;
@@ -640,7 +641,25 @@ function appendLogLines(lines) {
   }).join("");
   log.appendChild(frag);
   while (log.childNodes.length > 4000) log.removeChild(log.firstChild);
-  if (nearBottom || state.followLog) log.scrollTop = log.scrollHeight;
+  if (!log.hidden && (nearBottom || state.followLog)) log.scrollTop = log.scrollHeight;
+}
+
+function setLogCollapsed(collapsed) {
+  const section = $("#log-section");
+  const log = $("#log");
+  const toggle = $("#log-toggle");
+  if (!section || !log || !toggle) return;
+  section.classList.toggle("collapsed", collapsed);
+  log.hidden = collapsed;
+  toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  const hint = toggle.querySelector(".hint");
+  if (hint) hint.textContent = collapsed ? "默认折叠 · 点击展开" : "点击折叠";
+  if (!collapsed && state.followLog) log.scrollTop = log.scrollHeight;
+}
+
+function toggleLogSection() {
+  const collapsed = !$("#log-section")?.classList.contains("collapsed");
+  setLogCollapsed(collapsed);
 }
 
 async function stopTask() {
@@ -740,7 +759,87 @@ function fmtBytes(n) {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function renderFinalVideo(final) {
+function genderLabel(g) {
+  return { female: "女", male: "男" }[String(g || "").toLowerCase()] || (g || "");
+}
+
+function castInitial(ch) {
+  const raw = String(ch.name || ch.id || "?").trim();
+  return raw ? raw.slice(0, 1) : "?";
+}
+
+function castAvatarUrl(ch, info = {}) {
+  const id = String(ch.id || "").trim();
+  if (!id) return "";
+  const portraits = info.portraits || {};
+  if (portraits[id]) return portraits[id];
+  // 产物目录约定：work/characters/<id>.png（服务端 media 也会扫这一层）
+  const out = String(info.out || state.currentOut || "").replace(/\/+$/, "");
+  if (out) return `/media/${out}/work/characters/${encodeURIComponent(id)}.png`;
+  // 再回退：该角色出场的第一镜静帧
+  const shots = Array.isArray(info.shots) ? info.shots : [];
+  const frames = info.framesById || {};
+  for (const shot of shots) {
+    const list = shot.characters || [];
+    if (list.includes(id) && frames[shot.id]) return frames[shot.id];
+  }
+  return "";
+}
+
+function renderFinalMeta(info = {}) {
+  const titleEl = $("#final-film-title");
+  const novelEl = $("#final-novel");
+  const castEl = $("#final-cast");
+  const styleEl = $("#final-style");
+  const styleSec = $("#final-style-section");
+  const title = (info.title || state.project || "未命名短剧").trim();
+  if (titleEl) titleEl.textContent = title;
+
+  const novel = String(info.novelText || "").trim();
+  if (novelEl) {
+    novelEl.textContent = novel || "暂无正文";
+    novelEl.classList.toggle("empty", !novel);
+  }
+
+  const chars = Array.isArray(info.characters) ? info.characters : [];
+  if (castEl) {
+    if (!chars.length) {
+      castEl.innerHTML = `<div class="hint">暂无角色信息</div>`;
+    } else {
+      castEl.innerHTML = chars.map((ch) => {
+        const name = esc(ch.name || ch.id || "角色");
+        const bits = [
+          genderLabel(ch.gender),
+          ch.voice ? `配音 ${ch.voice}` : "",
+        ].filter(Boolean);
+        const role = bits.length ? bits.join(" · ") : (ch.id ? `id: ${ch.id}` : "出演");
+        const appearance = esc(ch.appearance || "外貌未写");
+        const avatar = castAvatarUrl(ch, info);
+        const initial = esc(castInitial(ch));
+        const avatarHtml = avatar
+          ? `<img class="cast-avatar-img" src="${esc(avatar)}" alt="${name}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.hidden=false">
+             <span class="cast-avatar-fallback" hidden>${initial}</span>`
+          : `<span class="cast-avatar-fallback">${initial}</span>`;
+        return `<div class="cast-card">
+          <div class="cast-avatar">${avatarHtml}</div>
+          <div class="cast-body">
+            <div class="cast-name">${name}</div>
+            <div class="cast-role">${esc(role)}</div>
+            <div class="cast-appearance" title="${appearance}">${appearance}</div>
+          </div>
+        </div>`;
+      }).join("");
+    }
+  }
+
+  const style = String(info.style || "").trim();
+  if (styleSec && styleEl) {
+    styleSec.hidden = !style;
+    styleEl.textContent = style;
+  }
+}
+
+function renderFinalVideo(final, info = {}) {
   const wrap = $("#final-wrap");
   const badge = $("#final-badge");
   const player = $("#final-player");
@@ -757,6 +856,7 @@ function renderFinalVideo(final) {
     }
     return;
   }
+  renderFinalMeta(info);
   const sig = mediaSig(final);
   if (player.dataset.sig !== sig) {
     const paused = player.paused;
@@ -772,8 +872,9 @@ function renderFinalVideo(final) {
     }
   }
   if (link) {
+    const title = (info.title || state.project || "final").trim() || "final";
     link.href = final.url;
-    link.setAttribute("download", "final.mp4");
+    link.setAttribute("download", `${title}.mp4`);
   }
   if (meta) {
     meta.textContent = `${fmtBytes(final.size)} · ${final.path || "final.mp4"}`;
@@ -815,23 +916,62 @@ async function renderShots() {
   }
   if (seq !== renderShotsSeq) return;
   if (!media && shotCards.size) return; // 产物清单暂时拿不到：保持现状，别清空预览
-  renderFinalVideo(media?.final || null);
-  // 2) 拉分镜（决定镜头顺序和台词）
+  // 2) 拉分镜（决定镜头顺序、台词，以及成片卡片元信息）
   let shots = [];
   let reuseMap = {};
+  let sbMeta = {
+    title: $("#title")?.value?.trim() || state.project || "",
+    characters: [],
+    style: "",
+    novelText: $("#novel-text")?.value?.trim() || "",
+  };
   try {
     const data = await api("/api/storyboard/read", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: `${out}/storyboard.json` }),
     });
-    shots = data.storyboard.shots || [];
+    const sb = data.storyboard || {};
+    shots = sb.shots || [];
     for (const s of shots) if (s.reuse_frame) reuseMap[s.id] = s.reuse_frame;
+    sbMeta = {
+      title: (sb.title || sbMeta.title || "").trim(),
+      characters: Array.isArray(sb.characters) ? sb.characters : [],
+      style: sb.style || "",
+      novelText: sbMeta.novelText,
+    };
   } catch (err) {
     // 没分镜就只按产物文件展示
     shots = [];
   }
+  // 正文优先用左侧编辑器；空则尝试读项目 novel.txt
+  if (!sbMeta.novelText) {
+    const novelPath = $("#novel-path")?.value?.trim() || `${out}/novel.txt`;
+    try {
+      const novel = await api("/api/file/read", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: novelPath }),
+      });
+      if (novel?.content) sbMeta.novelText = String(novel.content);
+    } catch {}
+  }
   if (seq !== renderShotsSeq) return;
+  const portraits = {};
+  for (const c of media?.characters || []) {
+    if (c?.id && c?.url) portraits[c.id] = c.url;
+  }
+  const framesById = {};
+  for (const f of media?.frames || []) {
+    if (f?.id && f?.url) framesById[f.id] = f.url;
+  }
+  renderFinalVideo(media?.final || null, {
+    ...sbMeta,
+    out,
+    shots,
+    portraits,
+    framesById,
+  });
   // 3) 进度（视频 n/total 等来自日志解析）
   const job = state.tasks.find((t) => t.id === state.selectedTaskId);
   const progItems = {};
@@ -1242,6 +1382,7 @@ function bind() {
   $("#task-stop").addEventListener("click", stopTask);
   $("#task-rerun-failed").addEventListener("click", rerunFailed);
   $("#tasks-clear").addEventListener("click", clearTasks);
+  $("#log-toggle")?.addEventListener("click", toggleLogSection);
   $("#auto-refresh")?.addEventListener("change", scheduleShotsAutoRefresh);
   $("#new-project-btn").addEventListener("click", createProject);
   $("#new-project-name").addEventListener("keydown", (ev) => {

@@ -185,18 +185,49 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .stage-step.failed { color: var(--bad); border-color: var(--bad); }
 @keyframes pulse { 50% { opacity: .55; } }
 
+.log-section { margin: 12px 0 0; }
+.log-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+.log-toggle:hover { border-color: var(--accent); }
+.log-toggle .hint { margin-left: auto; font-size: 12px; }
+.log-toggle-chevron {
+  display: inline-block;
+  width: 1em;
+  transition: transform .15s ease;
+  color: var(--muted);
+}
+.log-section:not(.collapsed) .log-toggle {
+  border-radius: 10px 10px 0 0;
+  border-bottom-color: transparent;
+}
+.log-section:not(.collapsed) .log-toggle-chevron { transform: rotate(90deg); }
 .log {
   background: #0b0d13;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-top: none;
+  border-radius: 0 0 10px 10px;
   padding: 12px;
-  margin: 12px 0 0;
-  max-height: 420px;
+  margin: 0;
+  max-height: 280px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-all;
   font: 12px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
+.log-section.collapsed .log { display: none; }
 .log .err-line { color: var(--bad); }
 
 /* 总进度条 */
@@ -279,40 +310,195 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .shot-audio audio { width: 100%; height: 30px; }
 .shot-audio:empty { display: none; }
 
-/* 镜头网格 */
+/* 成片 · 电影卡片 */
 .final-wrap {
-  margin: 0 0 16px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--panel-2);
+  margin: 0 0 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
 }
-.final-head {
+.movie-card {
+  display: grid;
+  grid-template-columns: 360px minmax(0, 1fr);
+  gap: 0;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 80% at 0% 0%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 55%),
+    linear-gradient(160deg, #151821 0%, var(--panel) 45%, #12151d 100%);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+}
+@media (max-width: 960px) {
+  .movie-card { grid-template-columns: 300px minmax(0, 1fr); }
+}
+@media (max-width: 860px) {
+  .movie-card { grid-template-columns: 1fr; }
+}
+.movie-poster {
+  position: relative;
+  width: 100%;
+  min-height: 100%;
+  aspect-ratio: 9 / 16;
+  background: #05060a;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+@media (max-width: 860px) {
+  .movie-poster {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    min-height: 0;
+    max-height: min(72vh, 640px);
+  }
+}
+.final-player {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+  object-fit: cover;
+  object-position: center center;
+}
+.movie-info {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 22px 24px 24px;
+  min-width: 0;
+}
+.movie-header { display: flex; flex-direction: column; gap: 8px; }
+.movie-kicker {
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 600;
+}
+.movie-title {
+  margin: 0;
+  font-size: clamp(22px, 2.4vw, 30px);
+  line-height: 1.25;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.movie-actions {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-  margin-bottom: 10px;
 }
-.final-title { font-weight: 600; font-size: 14px; }
 .final-link {
   font-size: 12px;
-  padding: 2px 10px;
+  padding: 4px 12px;
   text-decoration: none;
   color: var(--accent);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
-.final-link:hover { border-color: var(--accent); }
-.final-player {
+.final-link:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.movie-section { min-width: 0; }
+.movie-label {
+  margin: 0 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+.movie-novel {
+  max-height: 200px;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: #d7dbe8;
+  font-size: 14px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.movie-novel.empty { color: var(--muted); }
+.movie-cast {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+.cast-card {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--panel-2) 85%, #0b0d13);
+  min-width: 0;
+}
+.cast-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex-shrink: 0;
+  border: 2px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: #0b0d13;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+.cast-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
   display: block;
-  width: min(420px, 100%);
-  max-height: 74vh;
-  margin: 0 auto;
-  background: #000;
-  border-radius: 10px;
-  aspect-ratio: 9 / 16;
-  object-fit: contain;
+}
+.cast-avatar-fallback {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  font-weight: 650;
+  color: var(--text);
+  background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 35%, #1a2030), #12151d);
+}
+.cast-body { min-width: 0; }
+.cast-name {
+  font-size: 15px;
+  font-weight: 650;
+  margin: 0 0 4px;
+}
+.cast-role {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.cast-appearance {
+  font-size: 12px;
+  color: #c6cad8;
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.movie-style {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.6;
 }
 .shots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
 .shot-card {
