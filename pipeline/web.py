@@ -1058,6 +1058,41 @@ def write_storyboard(rel: str, data: dict) -> None:
     tmp.replace(path)
 
 
+def materialize_web_draft(
+    out: str,
+    *,
+    storyboard_data: dict | None = None,
+    novel_text: str | None = None,
+) -> tuple[str | None, str | None]:
+    """把网页暂存落到 ``work/webui/run_*``，供本次任务读；不写项目源 novel.txt。
+
+    分镜会 ``install_storyboard(..., force=True)`` 进 ``out/storyboard.json``（管线运行态），
+    与用户点「保存分镜」写源文件是两回事——保存仍只走显式写盘接口。
+    返回 ``(storyboard_rel, novel_rel)``，未提供的一侧为 None。
+    """
+    from pipeline.run import install_storyboard
+
+    base = resolve(out)
+    webui = artifacts_sub(base, "webui")
+    webui.mkdir(parents=True, exist_ok=True)
+    sb_rel: str | None = None
+    novel_rel: str | None = None
+    if isinstance(storyboard_data, dict):
+        run_sb = webui / "run_storyboard.json"
+        run_sb.write_text(
+            json.dumps(storyboard_data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        draft_rel = str(run_sb.relative_to(ROOT)).replace("\\", "/")
+        install_storyboard(out, draft_rel, force=True)
+        sb_rel = str((base / "storyboard.json").relative_to(ROOT)).replace("\\", "/")
+    if novel_text is not None:
+        run_novel = webui / "run_novel.txt"
+        run_novel.write_text(str(novel_text).rstrip() + "\n", encoding="utf-8")
+        novel_rel = str(run_novel.relative_to(ROOT)).replace("\\", "/")
+    return sb_rel, novel_rel
+
+
 def validate_storyboard(
     path_str: str,
     *,
@@ -1454,16 +1489,20 @@ class _Handler(BaseHTTPRequestHandler):
         # 前端勾选顺序不可靠；统一按流水线顺序传给 CLI（run --from 依赖它）
         stages = [s for s in STAGES if s in set(stages)]
 
-        # 粘贴的小说片段先落盘到项目文件夹
-        novel_text = str(data.get("novel_text") or "").strip()
-        if novel_text:
-            novel = novel or f"{project_dir(name).relative_to(ROOT)}/novel.txt"
-            write_text(novel, novel_text.rstrip() + "\n")
-        # 粘贴的分镜 JSON 先落盘到项目文件夹
+        # 网页暂存：落到 work/webui/run_*，不写项目源 novel.txt；分镜装进运行态 storyboard.json
         sb_data = data.get("storyboard_data")
-        if isinstance(sb_data, dict) and sb_data.get("shots"):
-            storyboard = storyboard or f"{project_dir(name).relative_to(ROOT)}/storyboard.json"
-            write_storyboard(storyboard, sb_data)
+        has_novel_text = "novel_text" in data
+        novel_text = data.get("novel_text") if has_novel_text else None
+        if isinstance(sb_data, dict) or has_novel_text:
+            sb_rel, novel_rel = materialize_web_draft(
+                out,
+                storyboard_data=sb_data if isinstance(sb_data, dict) else None,
+                novel_text=None if novel_text is None else str(novel_text),
+            )
+            if sb_rel:
+                storyboard = sb_rel
+            if novel_rel:
+                novel = novel_rel
 
         # --force：启动前先清产物（bash 串跑路径不会进 cmd_run 的清理逻辑）
         if force:
@@ -1542,6 +1581,15 @@ class _Handler(BaseHTTPRequestHandler):
         out = str(data.get("out") or "").strip()
         if not out:
             raise ValueError("没给输出目录")
+        # 规划前先装网页暂存，使依赖图与当前编辑一致；不写项目源 novel.txt
+        sb_data = data.get("storyboard_data")
+        has_novel_text = "novel_text" in data
+        if isinstance(sb_data, dict) or has_novel_text:
+            materialize_web_draft(
+                out,
+                storyboard_data=sb_data if isinstance(sb_data, dict) else None,
+                novel_text=None if not has_novel_text else str(data.get("novel_text") or ""),
+            )
         kind = str(data.get("kind") or "").strip()
         nid = str(data.get("id") or "").strip()
         return plan_rerun(out, kind=kind, id=nid)
@@ -1557,6 +1605,15 @@ class _Handler(BaseHTTPRequestHandler):
         out = str(data.get("out") or "").strip()
         if not out:
             raise ValueError("没给输出目录")
+        sb_data = data.get("storyboard_data")
+        has_novel_text = "novel_text" in data
+        novel_rel = None
+        if isinstance(sb_data, dict) or has_novel_text:
+            _, novel_rel = materialize_web_draft(
+                out,
+                storyboard_data=sb_data if isinstance(sb_data, dict) else None,
+                novel_text=None if not has_novel_text else str(data.get("novel_text") or ""),
+            )
         kind = str(data.get("kind") or "").strip()
         nid = str(data.get("id") or "").strip()
         plan = plan_rerun(out, kind=kind, id=nid)
@@ -1607,10 +1664,11 @@ class _Handler(BaseHTTPRequestHandler):
             only = None
 
         label = target.get("label") or f"{kind}:{nid}"
+        novel = novel_rel or str(data.get("novel") or "").strip()
         job = Job(
             uuid.uuid4().hex[:12],
             name=f"单跑 {label}",
-            novel=str(data.get("novel") or "").strip(),
+            novel=novel,
             out=out,
             stages=stage_keys,
             only=only,

@@ -356,6 +356,8 @@ def cmd_assemble(args: argparse.Namespace) -> None:
     joined = artifacts_sub(out, "joined.mp4")
     _run([str(settings.ffmpeg), "-y", "-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy", str(joined)])
 
+    # 进度引擎认这一行：把「整理」收掉、切入 assemble:mux
+    print("混音成片")
     music = artifacts_sub(out, "audio", "bgm.wav")
     if music.exists():
         have = _wav_seconds(settings, music)

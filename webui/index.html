@@ -104,51 +104,58 @@
   <!-- 生成过程：启动 + 进度 -->
   <div class="card" id="produce-card" hidden>
     <h2>生成过程</h2>
-    <div class="run-progress-row">
-      <div class="project-run">
-        <div class="row">
-          <label>执行阶段</label>
-          <div class="stages" id="stage-picks"></div>
+    <div class="produce-body">
+      <div class="produce-main">
+        <div class="project-run">
+          <div class="row">
+            <label>执行阶段</label>
+            <div class="stages" id="stage-picks"></div>
+          </div>
+          <div class="row inline">
+            <label class="check"><input type="checkbox" id="force"> 强制重做（先清空产物再生成）</label>
+            <label class="check">只重做镜头 <input id="only-shots" placeholder="s003,s004 留空=全部" style="width:150px"/></label>
+          </div>
+          <div class="actions">
+            <button id="start-btn" class="primary">🚀 启动任务</button>
+            <span id="budget-info" class="hint"></span>
+          </div>
+          <div id="start-error" class="error" hidden></div>
         </div>
-        <div class="row inline">
-          <label class="check"><input type="checkbox" id="force"> 强制重做（先清空产物再生成）</label>
-          <label class="check">只重做镜头 <input id="only-shots" placeholder="s003,s004 留空=全部" style="width:150px"/></label>
-        </div>
-        <div class="actions">
-          <button id="start-btn" class="primary">🚀 启动任务</button>
-          <span id="budget-info" class="hint"></span>
-        </div>
-        <div id="start-error" class="error" hidden></div>
-      </div>
 
-      <div class="card task-detail-inline" id="task-detail-card" hidden>
-        <h2 id="task-detail-title">任务</h2>
-        <div class="overall">
-          <div class="overall-bar"><div id="overall-fill" class="overall-fill"></div></div>
-          <span id="overall-pct" class="mono">0%</span>
-          <span id="overall-stage" class="hint"></span>
-        </div>
-        <div class="stage-track" id="stage-track"></div>
-        <div id="live-items" class="live-items" aria-label="完整步骤进度"></div>
-        <div class="actions">
-          <button id="task-stop" class="danger">⏹ 停止</button>
-          <button id="task-rerun-failed" class="ghost">↻ 重跑失败阶段</button>
+        <div class="task-detail-inline" id="task-detail-card">
+          <div class="task-detail-head">
+            <h3 id="task-detail-title">任务</h3>
+            <div class="actions task-detail-actions">
+              <button id="task-stop" class="danger">⏹ 停止</button>
+              <button id="task-rerun-failed" class="ghost">↻ 重跑失败阶段</button>
+            </div>
+          </div>
+          <div class="overall">
+            <div class="overall-bar"><div id="overall-fill" class="overall-fill"></div></div>
+            <span id="overall-pct" class="mono">0%</span>
+            <span id="overall-stage" class="hint"></span>
+          </div>
+          <div class="stage-track" id="stage-track"></div>
+          <div id="live-items" class="live-items" aria-label="完整步骤进度"></div>
           <span id="task-meta" class="hint"></span>
-        </div>
-        <div class="log-section collapsed" id="log-section">
-          <button type="button" id="log-toggle" class="log-toggle" aria-expanded="false">
-            <span class="log-toggle-chevron" aria-hidden="true">▸</span>
-            <span>终端日志</span>
-            <span class="hint">默认折叠 · 点击展开</span>
-          </button>
-          <pre id="log" class="log" hidden></pre>
+          <div class="log-section collapsed" id="log-section">
+            <button type="button" id="log-toggle" class="log-toggle" aria-expanded="false">
+              <span class="log-toggle-chevron" aria-hidden="true">▸</span>
+              <span>终端日志</span>
+              <span class="hint">默认折叠 · 点击展开</span>
+            </button>
+            <pre id="log" class="log" hidden></pre>
+          </div>
         </div>
       </div>
-    </div>
 
-    <div class="produce-history">
-      <h3 class="produce-history-title">任务历史 <button id="tasks-clear" class="ghost" style="float:right;font-size:12px;padding:2px 10px;">🧹 清空本项目记录</button></h3>
-      <div id="task-list" class="task-list"><div class="empty">这个项目还没有任务。左侧启动一个。</div></div>
+      <aside class="produce-history">
+        <div class="produce-history-title">
+          <h3>任务历史</h3>
+          <button id="tasks-clear" class="ghost" type="button">🧹 清空</button>
+        </div>
+        <div id="task-list" class="task-list"><div class="empty">还没有任务。启动一个即可。</div></div>
+      </aside>
     </div>
   </div>
 

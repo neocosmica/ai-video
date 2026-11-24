@@ -58,6 +58,8 @@ _ITEM_START = (
     (re.compile(r"^对白\s+(\S+)\s*·"), "audio"),
     (re.compile(r"^整理\s+(\S+)"), "assemble"),
 )
+_MUX_START = re.compile(r"^混音成片\b")
+_MUX_DONE = re.compile(r"^成片：")
 _ITEM_DONE = (re.compile(r"^已有镜头\s+(\S+)，跳过"),)
 _ITEM_FAIL = (
     re.compile(r"^镜头\s+(\S+)\s+失败"),
@@ -595,6 +597,19 @@ class ProgressEngine:
             self._bump_locked(step_id, step=n, total=total, pct=100.0 * n / max(1, total), eta_s=eta_s)
             return
 
+        if _MUX_START.match(text) and "assemble:mux" in self.steps:
+            self._activate("assemble:mux")
+            if self.steps["assemble:mux"]["status"] != "done":
+                self.steps["assemble:mux"]["status"] = "running"
+                self.steps["assemble:mux"]["pct"] = max(
+                    float(self.steps["assemble:mux"].get("pct") or 0), 1.0
+                )
+            return
+
+        if _MUX_DONE.match(text) and "assemble:mux" in self.steps:
+            self._bump_locked("assemble:mux", pct=100.0, status="done")
+            return
+
         for pattern in _ITEM_DONE:
             mm = pattern.match(text)
             if mm:
@@ -872,10 +887,17 @@ class ProgressEngine:
         with self.lock:
             self.status = "success" if success else "failed"
             for row in self.steps.values():
-                if row.get("status") == "running":
-                    row["status"] = "done" if success else "failed"
-                    if success:
+                st = row.get("status")
+                if st == "failed":
+                    continue
+                if success:
+                    # 成功收尾：pending（如未单独激活的混音成片）也要标完成，避免总进度 100% 却留空步
+                    if st in {"pending", "running"}:
+                        row["status"] = "done"
                         row["pct"] = 100.0
+                        row["eta_s"] = None
+                elif st == "running":
+                    row["status"] = "failed"
                     row["eta_s"] = None
             if success:
                 for s in self.stages:

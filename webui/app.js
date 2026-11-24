@@ -249,7 +249,6 @@ async function openProject(name, path, { autoSelectRunning = true } = {}) {
   $("#project-picker").hidden = true;
   $("#shots-card").hidden = false;
   $("#produce-card").hidden = false;
-  $("#task-detail-card").hidden = true;
   $("#current-project-name").textContent = name || state.currentOut;
   if (!isTitleEditing()) setTitleDisplay("");
   if (!isNovelEditing()) setNovelDisplay("");
@@ -277,11 +276,11 @@ async function openProject(name, path, { autoSelectRunning = true } = {}) {
   await renderShots();
   scheduleAutoValidate();
   scheduleShotsAutoRefresh();
-  // 有运行中的任务就自动打开详情，避免重开网页后还要再点一次才看得到进度
-  if (autoSelectRunning) {
-    const running = state.tasks.find((t) => t.status === "running");
-    if (running) selectTask(running.id);
-  }
+  // 任务详情始终显示：优先挂运行中，否则最近一条，没有则空态
+  const running = autoSelectRunning ? state.tasks.find((t) => t.status === "running") : null;
+  const pick = running || (autoSelectRunning ? state.tasks[0] : null);
+  if (pick) selectTask(pick.id);
+  else showTaskDetailIdle();
 }
 
 function backToProjects() {
@@ -295,7 +294,6 @@ function backToProjects() {
   if (shotsTimer) { clearInterval(shotsTimer); shotsTimer = null; }
   $("#shots-card").hidden = true;
   $("#produce-card").hidden = true;
-  $("#task-detail-card").hidden = true;
   $("#project-picker").hidden = false;
   projectsSig = "";
   refreshState();
@@ -691,27 +689,32 @@ function hasUnsavedShotsEdits() {
   );
 }
 
-async function startTask() {
-  // 只允许「保存分镜」写盘；有未保存修改时拒绝启动，避免管线读旧文件或旁路回写
+/** 网页暂存快照：给启动/单跑用；不写项目源，脏标记保持到用户点保存 */
+async function webDraftForPipeline() {
   await flushOpenEditsInShotsCard();
-  if (hasUnsavedShotsEdits()) {
-    toast("有未保存修改，请先点「保存分镜」再生成", true);
-    return;
+  if (!state.currentOut) {
+    toast("请先打开项目", true);
+    return null;
   }
+  if (!state.shotSb) await loadShotSb(state.currentOut);
+  return {
+    storyboard_data: snapshotShotSbFromUi(),
+    novel_text: novelValue(),
+  };
+}
+
+async function startTask() {
+  const draft = await webDraftForPipeline();
+  if (!draft) return;
   const payload = {
     title: titleValue(),
     name: state.project,
-    novel: projectNovelPath(),
-    storyboard: projectStoryboardPath(),
     out: state.currentOut,
     stages: [...state.selectedStages],
     only: $("#only-shots").value.trim(),
     force: $("#force").checked,
+    ...draft,
   };
-  if (!payload.novel) {
-    toast("请先保存小说正文（点「保存分镜」）", true);
-    return;
-  }
   if (!payload.stages.length) {
     toast("至少选择一个阶段", true);
     return;
@@ -738,7 +741,7 @@ function renderTasks() {
   if (!state.tasks.length) {
     if (tasksSig !== "empty") {
       tasksSig = "empty";
-      wrap.innerHTML = `<div class="empty">这个项目还没有任务。左侧启动一个。</div>`;
+      wrap.innerHTML = `<div class="empty">还没有任务。启动一个即可。</div>`;
     }
     return;
   }
@@ -777,6 +780,39 @@ function statusLabel(status) {
 let progressEs = null;
 let appliedProgressSeq = -1;
 
+function showTaskDetailIdle() {
+  state.selectedTaskId = null;
+  stageTrackSig = "";
+  liveItemsSig = "";
+  appliedProgressSeq = -1;
+  clearEtaAnchors();
+  if (progressEs) {
+    try { progressEs.close(); } catch {}
+    progressEs = null;
+  }
+  if (state.polling) { clearInterval(state.polling); state.polling = null; }
+  $("#task-detail-title").textContent = "任务";
+  const fill = $("#overall-fill");
+  if (fill) {
+    fill.style.width = "0%";
+    fill.className = "overall-fill";
+  }
+  const pctEl = $("#overall-pct");
+  if (pctEl) pctEl.textContent = "0%";
+  const stageEl = $("#overall-stage");
+  if (stageEl) stageEl.textContent = "暂无任务 · 启动后这里显示进度";
+  const track = $("#stage-track");
+  if (track) track.innerHTML = "";
+  const live = $("#live-items");
+  if (live) live.innerHTML = "";
+  const meta = $("#task-meta");
+  if (meta) meta.textContent = "";
+  $("#task-stop").disabled = true;
+  $("#log").textContent = "";
+  setLogCollapsed(true);
+  renderTasks();
+}
+
 async function selectTask(id) {
   state.selectedTaskId = id;
   state.logOffset = 0;
@@ -787,8 +823,10 @@ async function selectTask(id) {
   $("#log").textContent = "";
   setLogCollapsed(true);
   const job = state.tasks.find((t) => t.id === id);
-  if (!job) return;
-  $("#task-detail-card").hidden = false;
+  if (!job) {
+    showTaskDetailIdle();
+    return;
+  }
   $("#task-detail-title").textContent = `任务：${job.name || job.out}`;
   renderStages(job);
   $("#task-meta").textContent = `输出：${job.out} · 创建：${fmtTime(job.created_at)}`;
@@ -899,13 +937,78 @@ function renderOverall(job) {
 
 function fmtEta(sec) {
   if (sec == null || isNaN(sec)) return "";
-  sec = Math.round(sec);
+  sec = Math.max(0, Math.round(sec));
   if (sec < 60) return `剩 ${sec}s`;
   const m = Math.floor(sec / 60);
   return `剩 ${m}m${String(sec % 60).padStart(2, "0")}s`;
 }
 
 let liveItemsSig = "";
+/** stepId → { eta_s, at }：服务端 ETA 锚点；本地按墙钟递减，新进度到来则整锚重置 */
+const etaAnchors = new Map();
+let etaTickTimer = null;
+
+function stopEtaTick() {
+  if (etaTickTimer) {
+    clearInterval(etaTickTimer);
+    etaTickTimer = null;
+  }
+}
+
+function clearEtaAnchors() {
+  etaAnchors.clear();
+  stopEtaTick();
+}
+
+function syncEtaAnchors(list) {
+  const now = Date.now();
+  const seen = new Set();
+  for (const i of list || []) {
+    if (i.status !== "running" || i.eta_s == null || i.eta_s === "") continue;
+    const id = String(i.id || "");
+    if (!id) continue;
+    const eta = Number(i.eta_s);
+    if (!Number.isFinite(eta)) continue;
+    seen.add(id);
+    const prev = etaAnchors.get(id);
+    // 服务端 ETA 常原样重复推送；只在数值真变（或首次）时重锚，避免倒计时反复跳回
+    if (!prev || prev.server_eta !== eta) {
+      etaAnchors.set(id, { eta_s: eta, server_eta: eta, at: now });
+    }
+  }
+  for (const id of [...etaAnchors.keys()]) {
+    if (!seen.has(id)) etaAnchors.delete(id);
+  }
+  if (etaAnchors.size) ensureEtaTick();
+  else stopEtaTick();
+}
+
+function etaRemaining(id) {
+  const a = etaAnchors.get(String(id || ""));
+  if (!a) return null;
+  return Math.max(0, a.eta_s - (Date.now() - a.at) / 1000);
+}
+
+function paintLiveEtas() {
+  for (const el of $$("#live-items .live-item[data-id]")) {
+    const etaEl = $(".li-eta", el);
+    if (!etaEl) continue;
+    const rem = el.classList.contains("current") ? etaRemaining(el.dataset.id) : null;
+    const text = rem == null ? "" : fmtEta(rem);
+    if (etaEl.textContent !== text) etaEl.textContent = text;
+  }
+}
+
+function ensureEtaTick() {
+  if (etaTickTimer) return;
+  etaTickTimer = setInterval(() => {
+    if (!etaAnchors.size) {
+      stopEtaTick();
+      return;
+    }
+    paintLiveEtas();
+  }, 1000);
+}
 
 function renderLiveItems(job) {
   const wrap = $("#live-items");
@@ -916,14 +1019,20 @@ function renderLiveItems(job) {
   const list = steps.length
     ? steps
     : (prog.items || []).map((i) => ({ ...i, status: i.status || "running" }));
+  // 进度一到就重置 ETA 锚点；列表 DOM 未变时只重绘秒数
+  syncEtaAnchors(list);
   const sig = JSON.stringify([
     job.status,
     currentId,
     list.map((i) => [i.id, i.status, i.step, i.total, i.pct, i.eta_s]),
   ]);
-  if (sig === liveItemsSig) return;
+  if (sig === liveItemsSig) {
+    paintLiveEtas();
+    return;
+  }
   liveItemsSig = sig;
   if (!list.length) {
+    clearEtaAnchors();
     wrap.innerHTML = job.status === "running"
       ? `<div class="empty" style="padding:8px">等待步骤表…</div>`
       : "";
@@ -940,7 +1049,7 @@ function renderLiveItems(job) {
     const total = Math.max(1, Number(i.total) || 1);
     const pct = typeof i.pct === "number" ? Math.min(100, i.pct) : (total > 1 ? (100 * step) / total : 0);
     const stepText = total > 1 ? `${step}/${total}` : (pct > 0 && pct < 100 ? `${pct.toFixed(0)}%` : "");
-    const eta = i.status === "running" ? fmtEta(i.eta_s) : "";
+    const eta = i.status === "running" ? fmtEta(etaRemaining(i.id) ?? i.eta_s) : "";
     const cls = [
       "live-item",
       i.status === "done" ? "done" : "",
@@ -949,7 +1058,7 @@ function renderLiveItems(job) {
       i.status === "running" ? "current" : "",
       i.status === "pending" ? "pending" : "",
     ].filter(Boolean).join(" ");
-    parts.push(`<div class="${cls}">
+    parts.push(`<div class="${cls}" data-id="${esc(i.id || "")}">
       <span class="li-label" title="${esc(i.label || "")}">${esc(i.label || i.id)}</span>
       <span class="li-step mono">${stepText}</span>
       <div class="li-bar"><div class="li-fill" style="width:${pct}%"></div></div>
@@ -1090,12 +1199,15 @@ async function clearTasks() {
     const res = await api("/api/tasks/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     toast(res.kept ? `已清空本项目的记录（运行中的 ${res.kept} 个任务保留）` : "已清空本项目的记录");
     if (!state.tasks.some((t) => t.id === state.selectedTaskId && t.status === "running")) {
-      // 当前选中的任务被清掉时，收起详情面板
-      state.selectedTaskId = null;
-      $("#task-detail-card").hidden = true;
-      $("#log").textContent = "";
+      // 当前选中的任务被清掉时，详情面板保留为空态
+      showTaskDetailIdle();
     }
     await refreshState();
+    if (!state.selectedTaskId) {
+      const pick = state.tasks.find((t) => t.status === "running") || state.tasks[0];
+      if (pick) selectTask(pick.id);
+      else showTaskDetailIdle();
+    }
   } catch (err) {
     toast(`清空失败：${err.message}`, true);
   }
@@ -2830,11 +2942,8 @@ async function openRerunDialog(target) {
     toast("请先打开项目", true);
     return;
   }
-  await flushOpenEditsInShotsCard();
-  if (hasUnsavedShotsEdits()) {
-    toast("有未保存修改，请先点「保存分镜」再重跑", true);
-    return;
-  }
+  const draft = await webDraftForPipeline();
+  if (!draft) return;
   const dlg = $("#rerun-dialog");
   const errEl = $("#rerun-error");
   const okBtn = $("#rerun-ok");
@@ -2852,7 +2961,7 @@ async function openRerunDialog(target) {
     const plan = await api("/api/artifact/plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ out, kind: target.kind, id: target.id || "" }),
+      body: JSON.stringify({ out, kind: target.kind, id: target.id || "", ...draft }),
     });
     rerunPlan = plan;
     if (!plan.ok) {
@@ -2899,6 +3008,8 @@ async function openRerunDialog(target) {
 
 async function confirmRerunFromDialog() {
   if (!rerunPlan?.ok || !rerunPlan.target) return;
+  const draft = await webDraftForPipeline();
+  if (!draft) return;
   const out = state.currentOut;
   const posts = [];
   $$("#rerun-posts input[type=checkbox]").forEach((input) => {
@@ -2914,7 +3025,7 @@ async function confirmRerunFromDialog() {
         kind: rerunPlan.target.kind,
         id: rerunPlan.target.id || "",
         posts,
-        novel: projectNovelPath(),
+        ...draft,
       }),
     });
     closeRerunDialog();

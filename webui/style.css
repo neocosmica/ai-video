@@ -113,11 +113,112 @@ input[type="range"] {
 #produce-card { grid-column: 1 / -1; }
 #shots-card[hidden],
 #produce-card[hidden] { display: none; }
-.produce-history { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.produce-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: stretch;
+}
+.produce-main {
+  margin: 0;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-2);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.project-run {
+  margin: 0;
+  padding: 0 0 12px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  min-width: 0;
+}
+.project-run .actions { margin-top: 4px; }
+.task-detail-inline {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+.task-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.task-detail-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+}
+.task-detail-actions {
+  margin: 0;
+  gap: 6px;
+}
+.task-detail-inline .live-items {
+  max-height: 240px;
+  flex: 1;
+  min-height: 120px;
+}
+.task-detail-inline .log { max-height: 160px; }
+.produce-history {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-2);
+  min-width: 0;
+  /* 行高跟左侧走：自身不参与撑高，再撑满格子内滚动 */
+  height: 0;
+  min-height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
 .produce-history-title {
-  margin: 0 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  flex-shrink: 0;
+}
+.produce-history-title h3 {
+  margin: 0;
   font-size: 14px;
   font-weight: 600;
+}
+.produce-history-title .ghost {
+  font-size: 12px;
+  padding: 2px 10px;
+  flex-shrink: 0;
+}
+.produce-history .task-list {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+}
+@media (max-width: 1100px) {
+  .produce-body { grid-template-columns: 1fr; }
+  .produce-history {
+    height: auto;
+    min-height: 0;
+    max-height: 360px;
+  }
 }
 .shots-head {
   display: flex;
@@ -126,38 +227,6 @@ input[type="range"] {
   flex-wrap: wrap;
 }
 .shots-head .mono { color: var(--accent); }
-.run-progress-row {
-  display: grid;
-  grid-template-columns: minmax(280px, 0.9fr) minmax(340px, 1.1fr);
-  gap: 14px;
-  margin: 0 0 14px;
-  align-items: stretch;
-}
-.run-progress-row:has(#task-detail-card[hidden]) {
-  grid-template-columns: 1fr;
-}
-@media (max-width: 960px) {
-  .run-progress-row { grid-template-columns: 1fr; }
-}
-.project-run {
-  margin: 0;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--panel-2);
-  min-width: 0;
-}
-.project-run .actions { margin-top: 4px; }
-.task-detail-inline {
-  margin: 0;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-}
-.task-detail-inline[hidden] { display: none !important; }
-.task-detail-inline .live-items { max-height: 220px; }
-.task-detail-inline .log { max-height: 160px; }
 /* 每栏最后一张可见卡片弹性撑满剩余高度，使两栏底边始终对齐 */
 .col > .card:last-child:not([hidden]) { flex: 1; }
 .col > .card:not([hidden]):has(+ .card[hidden]) { flex: 1; }

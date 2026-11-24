@@ -507,6 +507,21 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     assert s002["status"] == "running" and s002["pct"] >= 50.0
     assert snap2["overall_pct"] >= o_mid
 
+    # 混音成片：整理切走后须激活 mux；成功收尾不得留下 pending 步却 overall 100%
+    eng.feed_line("整理 s001")
+    eng.feed_line("混音成片")
+    mux = next(s for s in eng.snapshot()["steps"] if s["id"] == "assemble:mux")
+    assert mux["status"] == "running", mux
+    eng.feed_line("成片：projects/demo/final.mp4，约 1.0 秒")
+    mux = next(s for s in eng.snapshot()["steps"] if s["id"] == "assemble:mux")
+    assert mux["status"] == "done" and mux["pct"] == 100.0, mux
+    eng2 = ProgressEngine(str(ROOT / "projects" / "demo"), task_id="selftest-finalize")
+    eng2.feed_line("整理 s001")
+    eng2.finalize(success=True)
+    left = [s for s in eng2.snapshot()["steps"] if s["status"] == "pending"]
+    assert not left, left
+    assert eng2.snapshot()["overall_pct"] == 100.0
+
     with tempfile.TemporaryDirectory() as tmp:
         dest = Path(tmp) / "storyboard.json"
         install_storyboard(tmp, str(ROOT / "projects" / "demo" / "storyboard.json"))
