@@ -454,7 +454,8 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     from pipeline.util import frames_for_duration
 
     assert STAGES == ("screenplay", "images", "audio", "videos", "music", "assemble"), STAGES
-    # 配乐必须排在 videos 之后：那时镜头帧数已定，配乐长度才准确
+    # 串跑仍 music 在 videos 后；数据上配乐只依赖 audio 写入的 video_frames，不依赖 clips
+    assert STAGES.index("music") > STAGES.index("audio")
     assert STAGES.index("music") > STAGES.index("videos")
     assert frames_for_duration(2.0, 24, min_frames=25, max_frames=97) == 49
     assert frames_for_duration(0.2, 24, min_frames=25, max_frames=97) == 25
@@ -604,6 +605,11 @@ def build_parser() -> argparse.ArgumentParser:
     images = sub.add_parser("images", help="角色参考图和分镜静帧")
     add_common(images)
     images.add_argument("--only", default=None, help="只做这些镜头，例如 s001,s002")
+    images.add_argument(
+        "--characters",
+        default=None,
+        help="只（重）做这些角色肖像，例如 linwan,zhouyu；可与 --only 组合",
+    )
     images.set_defaults(func=cmd_images)
 
     videos = sub.add_parser("videos", help="按静帧生成镜头视频")
@@ -622,7 +628,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     music = sub.add_parser(
         "music",
-        help="生成配乐；放在 videos 之后，按已渲染镜头长度定长（也可单独重跑）",
+        help="生成配乐；按分镜 video_frames 计划片长定长（对白后即可，不依赖 clips）",
     )
     add_common(music)
     music.set_defaults(func=cmd_music)

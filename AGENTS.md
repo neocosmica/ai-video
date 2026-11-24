@@ -2,7 +2,7 @@
 
 本仓库在 Apple Silicon Mac 上把小说做成竖屏短剧。Agent **只负责读小说、写分镜 JSON**；其余用 CLI 一条命令跑完。
 
-本机模型：FLUX.2 Klein 4B（静帧）→ Qwen3-TTS（对白）→ LTX-2.3 int4 distilled a2v/i2v（视频）→ MusicGen small（配乐，按成片长度）。
+本机模型：FLUX.2 Klein 4B（静帧）→ Qwen3-TTS（对白，并写 `video_frames`）→ LTX（服从帧数）∥ MusicGen（按 `video_frames` 定长）→ assemble。
 
 ## 工作流
 
@@ -10,8 +10,8 @@
 读小说 → budget → 写 storyboard.json → screenplay --strict → produce → final.mp4
 ```
 
-`produce` 内部阶段顺序：`screenplay → images → audio（只做对白）→ videos → music（配乐）→ assemble`。
-配乐排在视频之后：镜头帧数全部确定后才知道成片多长，配乐按这个长度生成，不会短于画面。
+`produce` 串跑顺序仍是：`screenplay → images → audio → videos → music → assemble`（执行顺序≠数据依赖）。
+镜长在 **audio** 就写进分镜 `video_frames`；配乐按该计划定长，**不依赖 clips 已渲完**。
 
 ### 1. 输入输出约定
 
@@ -126,12 +126,34 @@ projects/
 
 **启动后立刻把这条终端调到前台**：取终端记录目录里最新的、命令是 `produce` 的那份文件，读文件头 `pid:`，再打开 `vscode-terminal:/<pid>`，用户要能自己看进度。用户说「看进展 / 打开终端」时同样这么做，不要重起进程。
 
+### 7. 网页单跑（按产物依赖，不是按阶段链表）
+
+`produce` 仍可按 `screenplay → images → audio → videos → music → assemble` 串跑；**单跑只认数据依赖**。
+
+依赖（传递闭包）：
+
+- `images ∥ audio`：都只吃分镜，互不依赖
+- 有角静帧 ← 肖像；视频 ← 静帧 +（有对白则）配音
+- **`video_frames`（镜长计划）**：对白镜由 TTS 实测写入，空镜用默认帧；视频服从它
+- **配乐 ← 对白 wav（有对白的镜）**：按各镜 `video_frames` 加总定长，**不依赖 clips**
+- 成片 ← 各镜视频（+ 可选配乐）
+
+可单跑产物：肖像 / 静帧 / 配音 / 视频 / 配乐 / 成片。入口在角色卡、镜头卡、配乐旁、成片旁。
+
+流程：点 ↻ → `POST /api/artifact/plan` 算前向 `Prereq*` / 后向 `Post*` → 对话框确认 → `POST /api/artifact/rerun`。
+
+- **前置（传递）**：必选；缺则生成，已有则跳过
+- **目标**：强制重做
+- **后置（传递）**：可选；对话框里**默认全选**，用户可取消
+
+实现：`pipeline/artifact_plan.py`；肖像单跑用 `images --characters`。
+
 ## 禁止
 
 - 改写 / 删字 / 压短引号台词
 - emotion 里写「快说／放慢」
 - 编造原文没有的配饰
-- 逐步跑 images/audio/videos（用 `produce`）
+- 逐步跑 images/audio/videos（用 `produce`）；单跑产物请走网页确认框或 `artifact` API
 - 重新拉取聊天用 LLM
 
 ## 自救

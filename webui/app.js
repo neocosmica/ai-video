@@ -27,12 +27,12 @@ const state = {
   selectedStages: new Set(ALL_STAGES),
   currentOut: "",
   currentStoryboard: "",
-  sbData: null,
-  sbPath: "",
   shotSb: null, // 镜头网格里编辑的分镜（与磁盘同步；脏时不被自动刷新覆盖）
   shotSbPath: "",
   shotSbDirty: false,
+  portraits: {}, // id → {url, mtime}，镜头卡迷你头像用
   polling: null,
+  fps: 24,
 };
 
 // ---------------------------------------------------------------- utilities
@@ -295,7 +295,6 @@ function backToProjects() {
   if (shotsTimer) { clearInterval(shotsTimer); shotsTimer = null; }
   $("#shots-card").hidden = true;
   $("#produce-card").hidden = true;
-  $("#sb-editor-card").hidden = true;
   $("#task-detail-card").hidden = true;
   $("#project-picker").hidden = false;
   projectsSig = "";
@@ -1108,10 +1107,34 @@ let mediaCache = null;
 let renderShotsSeq = 0; // 防止重叠的异步渲染互相覆盖
 let shotsLastOut = "";
 const shotCards = new Map(); // shot id -> 已渲染的卡片 DOM（增量更新，不整格重建）
+let shotAddCard = null; // 网格末尾「＋」空卡
 
 function clearShotCards() {
   for (const [, card] of shotCards) card.remove();
   shotCards.clear();
+  if (shotAddCard) {
+    shotAddCard.remove();
+    shotAddCard = null;
+  }
+}
+
+function ensureShotAddCard() {
+  if (shotAddCard && document.contains(shotAddCard)) return shotAddCard;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "shot-card shot-add-card";
+  btn.title = "添加镜头";
+  btn.setAttribute("aria-label", "添加镜头");
+  btn.innerHTML = `<span class="shot-add-plus" aria-hidden="true">＋</span>`;
+  btn.addEventListener("click", () => { addShotOnGrid(); });
+  shotAddCard = btn;
+  return btn;
+}
+
+function placeShotAddCard(grid) {
+  if (!grid) return;
+  const add = ensureShotAddCard();
+  if (grid.lastElementChild !== add) grid.appendChild(add);
 }
 
 function clearShotsMsg() {
@@ -1332,6 +1355,22 @@ function fillSelectOptions(select, key, shot) {
   select.value = cur;
 }
 
+function characterBySpeakerName(name) {
+  const n = String(name || "").trim();
+  if (!n) return null;
+  return storyCharacters().find((c) => characterLabel(c) === n) || null;
+}
+
+function miniAvatarHtml(ch) {
+  const person = ch && typeof ch === "object" ? ch : { name: String(ch || "?") };
+  const url = castAvatarUrl(person, { portraits: state.portraits || {} });
+  const initial = esc(castInitial(person));
+  if (url) {
+    return `<span class="shot-mini-avatar" aria-hidden="true"><img class="shot-mini-avatar-img" src="${esc(url)}" alt="" loading="lazy" onerror="const p=this.parentElement;const fb=p&&p.querySelector('.shot-mini-avatar-fb');this.remove();if(fb)fb.hidden=false"><span class="shot-mini-avatar-fb" hidden>${initial}</span></span>`;
+  }
+  return `<span class="shot-mini-avatar" aria-hidden="true"><span class="shot-mini-avatar-fb">${initial}</span></span>`;
+}
+
 function fillCharChecks(box, shot) {
   if (!box) return;
   const selected = new Set(shotCharacters(shot));
@@ -1346,11 +1385,11 @@ function fillCharChecks(box, shot) {
     if (!id) return "";
     known.add(id);
     const label = characterLabel(ch) || id;
-    return `<label class="shot-char-check"><input type="checkbox" value="${esc(id)}"${selected.has(id) ? " checked" : ""}>${esc(label)}</label>`;
+    return `<label class="shot-char-check"><input type="checkbox" value="${esc(id)}"${selected.has(id) ? " checked" : ""}>${miniAvatarHtml(ch)}<span>${esc(label)}</span></label>`;
   }).join("");
   for (const id of selected) {
     if (known.has(id)) continue;
-    html += `<label class="shot-char-check"><input type="checkbox" value="${esc(id)}" checked>${esc(id)}</label>`;
+    html += `<label class="shot-char-check"><input type="checkbox" value="${esc(id)}" checked>${miniAvatarHtml({ id, name: id })}<span>${esc(id)}</span></label>`;
   }
   box.innerHTML = html;
 }
@@ -1376,8 +1415,22 @@ function fillShotInlineField(wrap, shot) {
   else if (wrap.dataset.kind === "checks") fillCharChecks(input, shot);
   else input.value = shotFieldRaw(shot, key);
   const shown = shotFieldShown(shot, key, placeholder);
-  display.textContent = shown.text;
   display.classList.toggle("empty", shown.empty);
+  if (!shown.empty && key === "speaker") {
+    const ch = characterBySpeakerName(shown.text) || { name: shown.text };
+    display.innerHTML = `${miniAvatarHtml(ch)}<span class="shot-mini-name">${esc(shown.text)}</span>`;
+    display.classList.add("with-avatars");
+  } else if (!shown.empty && key === "characters") {
+    display.innerHTML = shotCharacters(shot).map((id) => {
+      const ch = storyCharacters().find((c) => c.id === id) || { id, name: id };
+      const label = characterNameById(id) || id;
+      return `<span class="shot-char-chip">${miniAvatarHtml(ch)}<span class="shot-mini-name">${esc(label)}</span></span>`;
+    }).join("");
+    display.classList.add("with-avatars");
+  } else {
+    display.textContent = shown.text;
+    display.classList.remove("with-avatars");
+  }
 }
 
 function closeShotFieldOutside(wrap) {
@@ -1544,7 +1597,7 @@ function fillShotCardFields(card, shot) {
   $$(".shot-iedit", card).forEach((wrap) => fillShotInlineField(wrap, shot));
 }
 
-const SHOT_CARD_UI = 6;
+const SHOT_CARD_UI = 9;
 
 function ensureShotCard(id) {
   let card = shotCards.get(id);
@@ -1651,8 +1704,6 @@ async function saveShotSbFromGrid({ quiet = false } = {}) {
     }
     clearShotSbDirty();
     for (const [, card] of shotCards) card.classList.remove("dirty");
-    // 与浮层编辑器共用同一份数据
-    if (state.sbPath === state.shotSbPath) state.sbData = state.shotSb;
     if (!quiet) toast(`已保存分镜与正文`);
     scheduleAutoValidate();
     return true;
@@ -1863,30 +1914,55 @@ function mediaSig(entry) {
   return entry ? `${entry.mtime}:${entry.size}` : "";
 }
 
-function fmtAudioTime(sec) {
-  const s = Math.max(0, Number(sec) || 0);
-  const m = Math.floor(s / 60);
-  const r = Math.floor(s % 60);
-  return `${m}:${String(r).padStart(2, "0")}`;
+/** 产物 URL 带 mtime，文件一变就换地址，避免 video/img 吃到旧缓存 */
+function mediaUrl(entry) {
+  if (!entry?.url) return "";
+  const t = entry.mtime;
+  if (t == null || t === "") return entry.url;
+  const url = String(entry.url);
+  return `${url}${url.includes("?") ? "&" : "?"}t=${t}`;
+}
+
+function shotDurationSec(shot) {
+  const fps = Math.max(1, Number(state.fps) || 24);
+  if (shot?.video_frames != null && shot.video_frames !== "") {
+    return Math.max(0, Number(shot.video_frames) / fps);
+  }
+  if (shot?.audio_duration != null && shot.audio_duration !== "") {
+    return Math.max(0, Number(shot.audio_duration));
+  }
+  return null;
+}
+
+function fillShotDuration(card, shot) {
+  const el = $(".shot-dur", card);
+  if (!el) return;
+  const sec = shotDurationSec(shot);
+  if (sec == null || !Number.isFinite(sec)) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = `${sec.toFixed(2)}秒`;
+  el.title = shot?.video_frames != null
+    ? `${shot.video_frames} 帧 @ ${state.fps || 24}fps`
+    : "按配音时长";
 }
 
 function bindShotAudio(root) {
   const audio = $("audio", root);
   const playBtn = $(".shot-audio-play", root);
   const seek = $(".shot-audio-seek", root);
-  const timeEl = $(".shot-audio-time", root);
-  if (!audio || !playBtn || !seek || !timeEl || root._audioBound) return;
+  if (!audio || !playBtn || !seek || root._audioBound) return;
   root._audioBound = true;
   let seeking = false;
-  const syncTime = () => {
+  const syncSeek = () => {
     const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
     if (!seeking) {
       seek.max = String(dur || 0);
       seek.value = String(audio.currentTime || 0);
     }
-    timeEl.textContent = dur
-      ? `${fmtAudioTime(audio.currentTime)} / ${fmtAudioTime(dur)}`
-      : fmtAudioTime(audio.currentTime);
   };
   playBtn.addEventListener("click", () => {
     if (audio.paused) {
@@ -1904,11 +1980,11 @@ function bindShotAudio(root) {
       playBtn.textContent = "▶";
     }
   });
-  audio.addEventListener("loadedmetadata", syncTime);
-  audio.addEventListener("timeupdate", syncTime);
+  audio.addEventListener("loadedmetadata", syncSeek);
+  audio.addEventListener("timeupdate", syncSeek);
   audio.addEventListener("ended", () => {
     playBtn.textContent = "▶";
-    syncTime();
+    syncSeek();
   });
   audio.addEventListener("pause", () => {
     if (!seeking) playBtn.textContent = "▶";
@@ -1916,11 +1992,7 @@ function bindShotAudio(root) {
   seek.addEventListener("pointerdown", () => { seeking = true; });
   seek.addEventListener("pointerup", () => { seeking = false; });
   seek.addEventListener("input", () => {
-    const t = Number(seek.value) || 0;
-    audio.currentTime = t;
-    timeEl.textContent = Number.isFinite(audio.duration)
-      ? `${fmtAudioTime(t)} / ${fmtAudioTime(audio.duration)}`
-      : fmtAudioTime(t);
+    audio.currentTime = Number(seek.value) || 0;
   });
 }
 
@@ -1944,7 +2016,9 @@ function castAvatarUrl(ch, info = {}) {
   // 只认 /api/media 扫到的真实文件；删了就不返回 URL，避免浏览器缓存假图
   const id = String(ch.id || "").trim();
   if (!id) return "";
-  const entry = (info.portraits || {})[id];
+  // info 没带 portraits 时回退 state（加角色局部刷新不会丢已有头像）
+  const portraits = info.portraits || state.portraits || {};
+  const entry = portraits[id];
   if (!entry) return "";
   const url = typeof entry === "string" ? entry : String(entry.url || "");
   if (!url) return "";
@@ -2249,6 +2323,13 @@ function bindCastCard(card, info = {}) {
       rerollCastSeed(card);
     });
   }
+  $(".cast-portrait-rerun", card)?.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const ch = card._ch;
+    if (!ch?.id) return;
+    openRerunDialog({ kind: "portrait", id: ch.id });
+  });
   $(".cast-del", card)?.addEventListener("click", async () => {
     const ch = card._ch;
     if (!ch || !state.shotSb) return;
@@ -2279,7 +2360,10 @@ function castCardHtml(ch, info = {}) {
   const seedShown = castFieldShown(ch, "seed");
   return `<div class="cast-card" data-id="${esc(ch.id || "")}">
     <button type="button" class="ghost cast-del" title="删除角色">×</button>
-    <div class="cast-avatar">${avatarHtml}</div>
+    <div class="cast-avatar-col">
+      <div class="cast-avatar">${avatarHtml}</div>
+      <button type="button" class="ghost cast-portrait-rerun" title="单跑肖像">↻ 肖像</button>
+    </div>
     <div class="cast-body">
       <div class="cast-iedit" data-f="id" data-placeholder="id">
         <div class="cast-iedit-display cast-id-line${idShown.empty ? " empty" : ""}">${esc(idShown.text)}</div>
@@ -2315,20 +2399,30 @@ function castCardHtml(ch, info = {}) {
   </div>`;
 }
 
+function placeCastAddCard(castEl) {
+  if (!castEl) return;
+  let add = $(".cast-add-card", castEl);
+  if (!add) {
+    add = document.createElement("button");
+    add.type = "button";
+    add.className = "cast-card cast-add-card";
+    add.title = "添加角色";
+    add.setAttribute("aria-label", "添加角色");
+    add.innerHTML = `<span class="shot-add-plus" aria-hidden="true">＋</span>`;
+    add.addEventListener("click", () => { addCastCharacter(); });
+  }
+  if (castEl.lastElementChild !== add) castEl.appendChild(add);
+}
+
 function rebuildCastCards(chars, info = {}) {
   const castEl = $("#final-cast");
   if (!castEl) return;
-  if (!chars.length) {
-    castEl.innerHTML = `<div class="hint">暂无角色信息，点右上角「＋ 角色」添加</div>`;
-    castEl.dataset.sig = "";
-    return;
-  }
   castEl.innerHTML = chars.map((ch) => castCardHtml(ch, info)).join("");
-  const cards = $$(".cast-card", castEl);
-  cards.forEach((card, i) => {
+  $$(".cast-card:not(.cast-add-card)", castEl).forEach((card, i) => {
     card._ch = chars[i];
     bindCastCard(card, info);
   });
+  placeCastAddCard(castEl);
   castEl.dataset.sig = castListSig(chars);
 }
 
@@ -2350,8 +2444,27 @@ async function addCastCharacter() {
   };
   sb.characters.push(ch);
   const castEl = $("#final-cast");
-  if (castEl) delete castEl.dataset.sig;
-  renderFinalMeta({ characters: sb.characters, out, shots: sb.shots });
+  const info = { portraits: state.portraits || {}, characters: sb.characters, out, shots: sb.shots };
+  // 只插新卡，不整表 innerHTML，避免已有头像闪没
+  if (castEl && !isCastEditing()) {
+    const hint = castEl.querySelector(":scope > .hint");
+    if (hint) hint.remove();
+    const wrap = document.createElement("div");
+    wrap.innerHTML = castCardHtml(ch, info);
+    const card = wrap.firstElementChild;
+    if (card) {
+      card._ch = ch;
+      bindCastCard(card, info);
+      const addBtn = $(".cast-add-card", castEl);
+      if (addBtn) castEl.insertBefore(card, addBtn);
+      else castEl.appendChild(card);
+    }
+    placeCastAddCard(castEl);
+    castEl.dataset.sig = castListSig(sb.characters);
+  } else {
+    if (castEl) delete castEl.dataset.sig;
+    renderFinalMeta(info);
+  }
   await persistCastChange("add");
   // 自动进入姓名编辑
   const card = castEl?.querySelector(`.cast-card[data-id="${CSS.escape(id)}"]`);
@@ -2382,14 +2495,15 @@ function renderFinalMeta(info = {}) {
   if (castEl) {
     if (isCastEditing()) {
       // 编辑中不重建，避免打断输入
-    } else if (castEl.dataset.sig === castListSig(chars) && castEl.querySelector(".cast-card")) {
+    } else if (castEl.dataset.sig === castListSig(chars) && castEl.querySelector(".cast-add-card")) {
       // 名单未变：同步文案；头像按产物清单增删/换 mtime 刷新
-      $$(".cast-card", castEl).forEach((card, i) => {
+      $$(".cast-card:not(.cast-add-card)", castEl).forEach((card, i) => {
         if (chars[i]) {
           card._ch = chars[i];
           syncCastCardMedia(card, info);
         }
       });
+      placeCastAddCard(castEl);
     } else {
       rebuildCastCards(chars, info);
     }
@@ -2430,12 +2544,19 @@ function renderFinalVideo(final, info = {}) {
     if (meta) meta.textContent = "";
     return;
   }
+  const url = mediaUrl(final);
   const sig = mediaSig(final);
-  if (player.dataset.sig !== sig) {
+  // sig 变了、或上次加载失败（黑屏/error）：强制换源重载
+  const broken = !!(player.error) || (player.readyState === 0 && player.networkState === HTMLMediaElement.NETWORK_NO_SOURCE);
+  if (player.dataset.sig !== sig || player.getAttribute("src") !== url || broken) {
     const paused = player.paused;
     const t = player.currentTime || 0;
-    player.src = final.url;
+    player.src = url;
     player.dataset.sig = sig;
+    player.onerror = () => {
+      // 下一轮自动刷新再试（assemble 刚写完时偶发读到半截）
+      delete player.dataset.sig;
+    };
     player.load();
     // 文件更新时尽量停在原位置；首次载入不自动播
     if (!paused && t > 0) {
@@ -2447,7 +2568,7 @@ function renderFinalVideo(final, info = {}) {
   if (link) {
     const title = (titleValue() || info.title || state.project || "final").trim() || "final";
     link.hidden = false;
-    link.href = final.url;
+    link.href = url;
     link.setAttribute("download", `${title}.mp4`);
   }
   if (meta) {
@@ -2463,9 +2584,8 @@ function renderShotsIfVisible() {
 }
 
 function scheduleShotsAutoRefresh() {
-  const on = $("#auto-refresh")?.checked;
   if (shotsTimer) { clearInterval(shotsTimer); shotsTimer = null; }
-  if (on !== false) shotsTimer = setInterval(renderShots, 5000);
+  shotsTimer = setInterval(renderShots, 5000);
 }
 
 async function renderShots() {
@@ -2520,6 +2640,7 @@ async function renderShots() {
   for (const c of media?.characters || []) {
     if (c?.id && c?.url) portraits[c.id] = { url: c.url, mtime: c.mtime };
   }
+  state.portraits = portraits;
   const framesById = {};
   for (const f of media?.frames || []) {
     if (f?.id && f?.url) framesById[f.id] = f.url;
@@ -2549,13 +2670,6 @@ async function renderShots() {
     for (const c of media?.clips || []) if (!shots.some((s) => s.id === c.id)) shots.push({ id: c.id });
   }
   const grid = $("#shots-grid");
-  if (!shots.length) {
-    clearShotCards();
-    if (!grid.querySelector(":scope > .empty")) {
-      grid.innerHTML = `<div class="empty">还没有镜头。可点「＋ 镜头」手写分镜，或启动任务生成产物。</div>`;
-    }
-    return;
-  }
   // 5) 增量渲染：卡片按 shot id 复用，只有媒体文件变化才重建预览
   const emptyEl = grid.querySelector(":scope > .empty");
   if (emptyEl) emptyEl.remove();
@@ -2579,12 +2693,14 @@ async function renderShots() {
     if (card !== expected) grid.insertBefore(card, prev ? prev.nextSibling : grid.firstChild);
     prev = card;
   }
+  placeShotAddCard(grid);
 }
 
 function renderShotCard(shot, media, reuseMap, progItems) {
   const card = ensureShotCard(shot.id);
   card._shot = shot;
   $(".shot-id", card).textContent = shot.id || "";
+  fillShotDuration(card, shot);
   bindShotCardFields(card);
   fillShotCardFields(card, shot);
   const clipEntry = (media?.clips || []).find((c) => c.id === shot.id);
@@ -2604,11 +2720,11 @@ function renderShotCard(shot, media, reuseMap, progItems) {
     const preview = $(".shot-preview", card);
     const audioEl = $(".shot-audio", card);
     if (clipEntry) {
-      const poster = frameEntry ? ` poster="${esc(frameEntry.url)}"` : "";
+      const poster = frameEntry ? ` poster="${esc(mediaUrl(frameEntry))}"` : "";
       const preload = frameEntry ? "none" : "metadata"; // 有静帧当海报就不预取，点了播放才加载
-      preview.innerHTML = `<video src="${esc(clipEntry.url)}"${poster} muted ${preload} controls></video>`;
+      preview.innerHTML = `<video src="${esc(mediaUrl(clipEntry))}"${poster} muted ${preload} controls></video>`;
     } else if (frameEntry) {
-      preview.innerHTML = `<img src="${esc(frameEntry.url)}" loading="lazy" alt="">`;
+      preview.innerHTML = `<img src="${esc(mediaUrl(frameEntry))}" loading="lazy" alt="">`;
     } else {
       preview.innerHTML = "";
     }
@@ -2616,12 +2732,13 @@ function renderShotCard(shot, media, reuseMap, progItems) {
       audioEl.innerHTML = `<div class="shot-audio-bar">
         <button type="button" class="ghost shot-audio-play" title="播放/暂停">▶</button>
         <input type="range" class="shot-audio-seek" min="0" max="0" step="0.01" value="0">
-        <span class="shot-audio-time mono">0:00</span>
-        <audio src="${esc(voiceEntry.url)}" preload="metadata"></audio>
+        <audio src="${esc(mediaUrl(voiceEntry))}" preload="metadata"></audio>
       </div>`;
+      audioEl._audioBound = false;
       bindShotAudio(audioEl);
     } else {
       audioEl.innerHTML = "";
+      audioEl._audioBound = false;
     }
   }
   const statusEl = $(".shot-status", card);
@@ -2658,19 +2775,23 @@ function renderShotCard(shot, media, reuseMap, progItems) {
   if (progFill.style.width !== progWidth) progFill.style.width = progWidth;
   if (progFill.className !== progFillCls) progFill.className = progFillCls;
   if (progText.textContent !== progLabel) progText.textContent = progLabel;
-  // 重跑 / 删除只挂一次；回调读 card._shot，避免闭包过期
+  card._hasVoice = !!voiceEntry;
+  // 重跑 / 删除只挂一次；经确认框展开前向/后向传递闭包
   if (!card._btns) {
     card._btns = true;
     const actions = $(".shot-actions", card);
     const btnFrame = document.createElement("button");
     btnFrame.textContent = "↻ 静帧";
-    btnFrame.onclick = () => rerunShots([card._shot.id], ["images"]);
+    btnFrame.title = "单跑本镜静帧（先确认前置/后置）";
+    btnFrame.onclick = () => openRerunDialog({ kind: "frame", id: card._shot.id });
     const btnVideo = document.createElement("button");
     btnVideo.textContent = "↻ 视频";
-    btnVideo.onclick = () => rerunShots([card._shot.id], card._hasFrame ? ["videos"] : ["images", "videos"]);
+    btnVideo.title = "单跑本镜视频（先确认前置/后置）";
+    btnVideo.onclick = () => openRerunDialog({ kind: "clip", id: card._shot.id });
     const btnAudio = document.createElement("button");
     btnAudio.textContent = "↻ 配音";
-    btnAudio.onclick = () => rerunShots([card._shot.id], ["audio"]);
+    btnAudio.title = "单跑本镜对白（先确认前置/后置）";
+    btnAudio.onclick = () => openRerunDialog({ kind: "voice", id: card._shot.id });
     actions.appendChild(btnFrame);
     actions.appendChild(btnVideo);
     actions.appendChild(btnAudio);
@@ -2678,247 +2799,130 @@ function renderShotCard(shot, media, reuseMap, progItems) {
   }
 }
 
-async function rerunShots(shots, stages) {
+let rerunPlan = null;
+
+function closeRerunDialog() {
+  const dlg = $("#rerun-dialog");
+  if (dlg?.open) dlg.close();
+  rerunPlan = null;
+}
+
+function renderRerunItem(node, { required = false, target = false, checked = false } = {}) {
+  const id = `rerun-${node.kind}-${node.id || "x"}`;
+  const meta = target
+    ? `<div class="ri-meta">将重做</div>`
+    : required
+      ? `<div class="ri-meta ${node.status === "missing" ? "missing" : "ready"}">${
+          node.status === "missing" ? "缺失 · 将生成" : "已有 · 将跳过"
+        }</div>`
+      : `<div class="ri-meta stale">${checked ? "勾选 · 将重做" : "未勾选 · 将过时"}</div>`;
+  const disabled = required || target ? " disabled" : "";
+  const isChecked = required || target || checked ? " checked" : "";
+  return `<label class="rerun-item${required ? " required" : ""}${target ? " target" : ""}" for="${esc(id)}">
+    <input type="checkbox" id="${esc(id)}" data-kind="${esc(node.kind)}" data-id="${esc(node.id || "")}"${isChecked}${disabled}>
+    <span><div>${esc(node.label || node.kind)}</div>${meta}</span>
+  </label>`;
+}
+
+async function openRerunDialog(target) {
   const out = state.currentOut;
-  if (!out) return;
+  if (!out) {
+    toast("请先打开项目", true);
+    return;
+  }
+  await flushOpenEditsInShotsCard();
+  if (hasUnsavedShotsEdits()) {
+    toast("有未保存修改，请先点「保存分镜」再重跑", true);
+    return;
+  }
+  const dlg = $("#rerun-dialog");
+  const errEl = $("#rerun-error");
+  const okBtn = $("#rerun-ok");
+  if (!dlg) return;
+  errEl.hidden = true;
+  errEl.textContent = "";
+  okBtn.disabled = true;
+  $("#rerun-title").textContent = "分析依赖…";
+  $("#rerun-summary").textContent = "";
+  $("#rerun-prereqs").innerHTML = "";
+  $("#rerun-target").innerHTML = "";
+  $("#rerun-posts").innerHTML = "";
+  dlg.showModal();
   try {
-    const job = await api("/api/shots/rerun", {
+    const plan = await api("/api/artifact/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ out, kind: target.kind, id: target.id || "" }),
+    });
+    rerunPlan = plan;
+    if (!plan.ok) {
+      $("#rerun-title").textContent = "无法重跑";
+      errEl.hidden = false;
+      errEl.textContent = plan.error || "规划失败";
+      okBtn.disabled = true;
+      return;
+    }
+    $("#rerun-title").textContent = `重跑${plan.target.label}`;
+    $("#rerun-summary").textContent = plan.summary || "";
+    const preWrap = $("#rerun-prereqs");
+    if (!(plan.prereqs || []).length) {
+      preWrap.innerHTML = `<div class="rerun-empty">无产物前置</div>`;
+    } else {
+      preWrap.innerHTML = plan.prereqs.map((p) => renderRerunItem(p, { required: true })).join("");
+    }
+    $("#rerun-target").innerHTML = renderRerunItem(plan.target, { target: true });
+    const postWrap = $("#rerun-posts");
+    if (!(plan.posts || []).length) {
+      postWrap.innerHTML = `<div class="rerun-empty">无后置影响</div>`;
+    } else {
+      postWrap.innerHTML = plan.posts
+        .map((p) => renderRerunItem(p, { checked: true }))
+        .join("");
+      postWrap.querySelectorAll("input[type=checkbox]").forEach((input) => {
+        input.addEventListener("change", () => {
+          const meta = input.closest(".rerun-item")?.querySelector(".ri-meta");
+          if (meta) {
+            meta.textContent = input.checked ? "勾选 · 将重做" : "未勾选 · 将过时";
+            meta.classList.toggle("stale", !input.checked);
+          }
+        });
+      });
+    }
+    okBtn.disabled = false;
+  } catch (err) {
+    $("#rerun-title").textContent = "无法重跑";
+    errEl.hidden = false;
+    errEl.textContent = err.message || String(err);
+    okBtn.disabled = true;
+  }
+}
+
+async function confirmRerunFromDialog() {
+  if (!rerunPlan?.ok || !rerunPlan.target) return;
+  const out = state.currentOut;
+  const posts = [];
+  $$("#rerun-posts input[type=checkbox]").forEach((input) => {
+    if (!input.checked || input.disabled) return;
+    posts.push({ kind: input.dataset.kind, id: input.dataset.id || "" });
+  });
+  try {
+    const job = await api("/api/artifact/rerun", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         out,
-        storyboard: state.currentStoryboard,
-        shots,
-        stages,
+        kind: rerunPlan.target.kind,
+        id: rerunPlan.target.id || "",
+        posts,
         novel: projectNovelPath(),
       }),
     });
-    toast(`已启动镜头重跑：${shots.join(", ")}`);
+    closeRerunDialog();
+    toast(`已启动：${job.name || "单跑"}`);
     await refreshState();
     selectTask(job.id);
   } catch (err) {
     toast(`重跑失败：${err.message}`, true);
-  }
-}
-
-// ---------------------------------------------------------------- storyboard editor
-async function openStoryboardEditor() {
-  const path = projectStoryboardPath();
-  const out = state.currentOut;
-  if (!path) { toast("先选项目", true); return; }
-  const name = state.project || (out ? out.split("/").pop() : "");
-  let sb;
-  // 网格里已有未保存编辑时，角色编辑器直接接同一份对象
-  if (state.shotSb && state.shotSbPath === path) {
-    sb = state.shotSb;
-  } else {
-    try {
-      const data = await api("/api/storyboard/read", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
-      });
-      sb = data.storyboard;
-    } catch (err) {
-      sb = {
-        title: titleValue() || name || "新片",
-        style: "写实华语短剧，自然肤色，电影感光线，浅景深",
-        music_prompt: "English instrumental BGM, no vocals",
-        characters: [],
-        shots: [],
-      };
-    }
-  }
-  state.sbData = sb;
-  state.sbPath = path;
-  state.shotSb = sb;
-  state.shotSbPath = path;
-  $("#sb-editor-card").hidden = false;
-  $("#sb-path-label").textContent = path;
-  renderStoryboardEditor();
-}
-
-function bindSbFields(root, target, { onCharacters } = {}) {
-  $$(".fields [data-f]", root).forEach((input) => {
-    const apply = () => {
-      const f = input.dataset.f;
-      if (f === "characters" && onCharacters) {
-        onCharacters(input.value);
-        return;
-      }
-      if (f === "seed") {
-        const n = parseInt(input.value, 10);
-        target.seed = Number.isFinite(n) ? n : 0;
-        return;
-      }
-      target[f] = input.value.trim();
-    };
-    input.addEventListener("change", apply);
-    input.addEventListener("input", apply);
-  });
-}
-
-function renderStoryboardEditor() {
-  const sb = state.sbData;
-  if (!sb) return;
-  if (!Array.isArray(sb.characters)) sb.characters = [];
-  if (!Array.isArray(sb.shots)) sb.shots = [];
-  const summary = $("#sb-summary");
-  summary.textContent = `${sb.characters.length} 个角色 · ${sb.shots.length} 镜${sb.title ? ` · 《${sb.title}》` : ""}`;
-  const wrap = $("#sb-shots");
-  wrap.innerHTML = "";
-
-  // 角色：解析后按字段编辑，不再塞一整段 JSON
-  const charHead = document.createElement("div");
-  charHead.className = "sb-section-head";
-  charHead.innerHTML = `<span class="mono">characters</span><span class="hint">id / 姓名 / 性别 / 音色 / 外貌</span>`;
-  wrap.appendChild(charHead);
-
-  sb.characters.forEach((ch, idx) => {
-    const gender = ch.gender === "male" ? "male" : "female";
-    const voices = VOICE_OPTIONS[gender] || VOICE_OPTIONS.female;
-    const voice = ch.voice && voices.includes(ch.voice) ? ch.voice : (voices[0] || "");
-    ch.gender = gender;
-    if (!ch.voice) ch.voice = voice;
-    const row = document.createElement("div");
-    row.className = "sb-shot sb-char";
-    row.innerHTML = `<div class="shot-meta">
-        <span class="mono">${esc(ch.name || ch.id || `角色${idx + 1}`)}</span>
-        <button type="button" class="ghost sb-del">删除</button>
-      </div>
-      <div class="fields">
-        <label>id</label><input data-f="id" value="${esc(ch.id || "")}" placeholder="chenyuan">
-        <label>name</label><input data-f="name" value="${esc(ch.name || "")}" placeholder="陈媛">
-        <label>gender</label>
-        <select data-f="gender">
-          <option value="female"${gender === "female" ? " selected" : ""}>female</option>
-          <option value="male"${gender === "male" ? " selected" : ""}>male</option>
-        </select>
-        <label>voice</label>
-        <select data-f="voice">
-          ${voices.map((v) => `<option value="${esc(v)}"${(ch.voice || voice) === v ? " selected" : ""}>${esc(v)}</option>`).join("")}
-        </select>
-        <label>appearance</label><textarea data-f="appearance" rows="2" placeholder="只写原文可见外貌">${esc(ch.appearance || "")}</textarea>
-        <label>seed</label>
-        <div class="seed-row">
-          <input data-f="seed" type="number" value="${esc(ch.seed ?? "")}">
-          <button type="button" class="ghost seed-reroll" title="生成新随机数">🎲</button>
-        </div>
-      </div>`;
-    $(".sb-del", row).addEventListener("click", () => {
-      sb.characters.splice(idx, 1);
-      renderStoryboardEditor();
-    });
-    $(".seed-reroll", row)?.addEventListener("click", () => {
-      ch.seed = randomSeed();
-      const inp = $("input[data-f=seed]", row);
-      if (inp) inp.value = String(ch.seed);
-    });
-    bindSbFields(row, ch);
-    $$("select[data-f]", row).forEach((sel) => {
-      sel.addEventListener("change", () => {
-        ch[sel.dataset.f] = sel.value;
-        if (sel.dataset.f === "gender") renderStoryboardEditor(); // 换性别 → 刷新音色选项
-      });
-    });
-    wrap.appendChild(row);
-  });
-
-  const addChar = document.createElement("button");
-  addChar.type = "button";
-  addChar.textContent = "＋ 添加角色";
-  addChar.className = "ghost";
-  addChar.addEventListener("click", () => {
-    sb.characters.push({
-      id: `char${sb.characters.length + 1}`,
-      name: "",
-      gender: "female",
-      voice: "Serena",
-      appearance: "",
-      seed: randomSeed(),
-    });
-    renderStoryboardEditor();
-  });
-  wrap.appendChild(addChar);
-
-  const shotHead = document.createElement("div");
-  shotHead.className = "sb-section-head";
-  shotHead.innerHTML = `<span class="mono">shots</span><span class="hint">镜头列表</span>`;
-  wrap.appendChild(shotHead);
-
-  sb.shots.forEach((shot, idx) => {
-    const row = document.createElement("div");
-    row.className = "sb-shot";
-    row.innerHTML = `<div class="shot-meta">
-        <span class="mono">#${idx + 1} ${esc(shot.id || "")}</span>
-        <button type="button" class="ghost sb-del">删除</button>
-      </div>
-      <div class="fields">
-        <label>id</label><input data-f="id" value="${esc(shot.id || "")}">
-        <label>location</label><input data-f="location" value="${esc(shot.location || "")}">
-        <label>characters</label><input data-f="characters" value="${esc((shot.characters || []).join(","))}" placeholder="角色 id，逗号分隔">
-        <label>image_prompt</label><textarea data-f="image_prompt" rows="2">${esc(shot.image_prompt || "")}</textarea>
-        <label>motion_prompt</label><textarea data-f="motion_prompt" rows="2">${esc(shot.motion_prompt || "")}</textarea>
-        <label>speaker</label><input data-f="speaker" value="${esc(shot.speaker || "")}">
-        <label>dialogue</label><textarea data-f="dialogue" rows="2">${esc(shot.dialogue || "")}</textarea>
-        <label>emotion</label><input data-f="emotion" value="${esc(shot.emotion || "")}">
-        <label>seed</label>
-        <div class="seed-row">
-          <input data-f="seed" type="number" value="${esc(shot.seed ?? "")}">
-          <button type="button" class="ghost seed-reroll" title="生成新随机数">🎲</button>
-        </div>
-      </div>`;
-    $(".sb-del", row).addEventListener("click", () => {
-      sb.shots.splice(idx, 1);
-      renderStoryboardEditor();
-    });
-    $(".seed-reroll", row)?.addEventListener("click", () => {
-      shot.seed = randomSeed();
-      const inp = $("input[data-f=seed]", row);
-      if (inp) inp.value = String(shot.seed);
-    });
-    bindSbFields(row, shot, {
-      onCharacters: (value) => {
-        shot.characters = value.split(/[,，\s]+/).filter(Boolean);
-      },
-    });
-    wrap.appendChild(row);
-  });
-
-  const addBtn = document.createElement("button");
-  addBtn.type = "button";
-  addBtn.textContent = "＋ 添加镜头";
-  addBtn.className = "ghost";
-  addBtn.addEventListener("click", () => {
-    sb.shots.push({
-      id: `s${String((sb.shots.length || 0) + 1).padStart(3, "0")}`,
-      characters: [], location: "", image_prompt: "", motion_prompt: "",
-      speaker: "", dialogue: "", emotion: "calm",
-      seed: randomSeed(),
-    });
-    renderStoryboardEditor();
-  });
-  wrap.appendChild(addBtn);
-}
-
-async function saveStoryboard() {
-  if (!state.sbData) return;
-  try {
-    await api("/api/storyboard/write", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: state.sbPath, storyboard: state.sbData }),
-    });
-    // 角色编辑器保存后同步回镜头网格
-    if (state.sbPath === state.shotSbPath || state.sbPath === `${state.currentOut}/storyboard.json`) {
-      state.shotSb = state.sbData;
-      state.shotSbPath = state.sbPath;
-      clearShotSbDirty();
-    }
-    toast(`已保存 ${state.sbPath}`);
-    await renderShots();
-  } catch (err) {
-    toast(`保存失败：${err.message}`, true);
   }
 }
 
@@ -2946,6 +2950,7 @@ function connectEvents() {
 async function loadBudget() {
   try {
     const b = await api("/api/budget");
+    if (b.fps) state.fps = Number(b.fps) || 24;
     $("#budget-info").textContent =
       `单镜上限 ${b.frames} 帧 ≈ ${b.seconds}s · 台词额度约 ${b.dialogue_chars} 字/镜（${b.total_gib} GB 内存，${b.resolution}@${b.fps}fps）`;
   } catch {
@@ -3011,19 +3016,25 @@ function bind() {
   });
   $("#music-seed-input")?.addEventListener("blur", () => commitMusicSeed());
   $("#music-seed-reroll")?.addEventListener("click", rerollMusicSeed);
-  $("#sb-save").addEventListener("click", saveStoryboard);
-  $("#sb-close").addEventListener("click", () => { $("#sb-editor-card").hidden = true; });
+  $("#music-rerun")?.addEventListener("click", () => openRerunDialog({ kind: "music", id: "" }));
+  $("#final-rerun")?.addEventListener("click", () => openRerunDialog({ kind: "final", id: "" }));
+  $("#rerun-form")?.addEventListener("submit", (ev) => {
+    const submitter = ev.submitter;
+    const value = submitter?.value || "cancel";
+    if (value === "ok") {
+      ev.preventDefault();
+      confirmRerunFromDialog();
+    } else {
+      rerunPlan = null;
+    }
+  });
   $("#shots-save")?.addEventListener("click", saveShotSbFromGrid);
   $("#shots-revert")?.addEventListener("click", revertShotSbFromGrid);
   $("#shots-reroll-seeds")?.addEventListener("click", rerollAllSeeds);
-  $("#shots-add")?.addEventListener("click", addShotOnGrid);
-  $("#shots-chars")?.addEventListener("click", openStoryboardEditor);
-  $("#cast-add")?.addEventListener("click", addCastCharacter);
   $("#task-stop").addEventListener("click", stopTask);
   $("#task-rerun-failed").addEventListener("click", rerunFailed);
   $("#tasks-clear").addEventListener("click", clearTasks);
   $("#log-toggle")?.addEventListener("click", toggleLogSection);
-  $("#auto-refresh")?.addEventListener("change", scheduleShotsAutoRefresh);
   $("#new-project-btn").addEventListener("click", createProject);
   $("#new-project-name").addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") createProject();

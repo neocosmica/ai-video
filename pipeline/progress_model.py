@@ -115,19 +115,38 @@ def _existing_stems(folder: Path, exts: tuple[str, ...]) -> set[str]:
     return {p.stem for p in folder.iterdir() if p.is_file() and p.suffix.lower() in exts}
 
 
-def build_plan(out: str | Path, stages: list[str] | tuple[str, ...] | None = None) -> list[dict]:
-    """按分镜生成完整步骤表；阶段权重均分到该阶段各原子步。"""
+def _parse_only_ids(only: str | None) -> set[str] | None:
+    if not only:
+        return None
+    ids = {s.strip() for s in str(only).replace("，", ",").split(",") if s.strip()}
+    return ids or None
+
+
+def build_plan(
+    out: str | Path,
+    stages: list[str] | tuple[str, ...] | None = None,
+    *,
+    only: str | None = None,
+) -> list[dict]:
+    """按分镜生成完整步骤表；阶段权重均分到该阶段各原子步。
+
+    ``only``：镜头级重跑时只列这些镜头；且不列肖像步骤（已有头像不因重跑静帧重做）。
+    """
     selected = [s for s in (stages or STAGES) if s in STAGE_WEIGHTS]
     if not selected:
         selected = list(STAGES)
+    only_ids = _parse_only_ids(only)
     story = _load_story(out)
     shots = [s for s in (story.get("shots") or []) if str(s.get("id") or "").strip()]
     chars = [c for c in (story.get("characters") or []) if str(c.get("id") or "").strip()]
     shot_ids = [str(s["id"]).strip() for s in shots]
+    if only_ids:
+        shot_ids = [sid for sid in shot_ids if sid in only_ids]
     dialogue_ids = [
         str(s["id"]).strip()
         for s in shots
         if str(s.get("dialogue") or "").strip()
+        and (not only_ids or str(s["id"]).strip() in only_ids)
     ]
     char_ids = [str(c["id"]).strip() for c in chars]
     char_names = {str(c["id"]).strip(): str(c.get("name") or c["id"]).strip() for c in chars}
@@ -138,9 +157,11 @@ def build_plan(out: str | Path, stages: list[str] | tuple[str, ...] | None = Non
         by_stage["screenplay"].append(("screenplay:validate", "校验分镜"))
 
     if "images" in by_stage:
-        for cid in char_ids:
-            name = char_names.get(cid, cid)
-            by_stage["images"].append((f"images:portrait:{cid}", f"肖像 {name}"))
+        # 镜头级重跑不排肖像：静帧复用已有参考图
+        if not only_ids:
+            for cid in char_ids:
+                name = char_names.get(cid, cid)
+                by_stage["images"].append((f"images:portrait:{cid}", f"肖像 {name}"))
         for sid in shot_ids:
             by_stage["images"].append((f"images:{sid}", f"静帧 {sid}"))
         if not by_stage["images"]:
@@ -206,10 +227,12 @@ class ProgressEngine:
         *,
         stages: list[str] | None = None,
         task_id: str = "",
+        only: str | None = None,
         on_update: Callable[[dict], None] | None = None,
     ) -> None:
         self.out = out
         self.task_id = task_id
+        self.only = only
         self.stages = [s for s in (stages or list(STAGES)) if s in STAGE_WEIGHTS] or list(STAGES)
         self.on_update = on_update
         self.lock = threading.Lock()
@@ -233,7 +256,7 @@ class ProgressEngine:
 
     # -- plan --------------------------------------------------------------
     def _rebuild_plan(self) -> None:
-        planned = build_plan(self.out, self.stages)
+        planned = build_plan(self.out, self.stages, only=self.only)
         old = dict(self.steps)
         self.steps = {}
         self.step_order = []

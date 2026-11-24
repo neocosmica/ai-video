@@ -467,11 +467,11 @@ def _split_shot(parent: dict, offset: int, text: str) -> dict:
 
 
 def apply_shot_timings(settings: Settings, story: dict, out: Path) -> None:
-    """按对白 wav 写 audio_duration / video_frames。
+    """按对白 wav / 空镜默认，提前写齐每镜 video_frames（镜头计划时长）。
 
-    有对白的镜头：时长**跟着配音走**（向上取 8k+1 格），不为了塞进某个上限去动台词。
-    台词本身已经在 _speak_with_fit 里切到不超过 video_frames_max，所以这里正常不会
-    超上限；万一超了（极端长句），就按实际配音给足帧数，宁可这镜长一点。
+    有对白：时长跟着配音走（向上取 8k+1 格），不删字压短。
+    空镜：用 settings.video_frames。
+    视频阶段服从这个数；配乐也按各镜 video_frames 加总定长，不依赖 clips。
     """
     voice_dir = artifacts_sub(out, "audio", "voice")
     fps = max(1, settings.video_fps)
@@ -493,6 +493,20 @@ def apply_shot_timings(settings: Settings, story: dict, out: Path) -> None:
             shot.pop("audio_duration", None)
             shot["video_frames"] = int(settings.video_frames)
         shot.pop("audio_overflow", None)
+
+
+def ensure_video_frames(settings: Settings, story: dict, out: Path, *, persist: Path | None = None) -> float:
+    """保证分镜每镜都有 video_frames，返回计划片长（秒）。
+
+    供 music 等阶段在渲视频前就能定 BGM 长度；若写了新字段可 persist 回 storyboard.json。
+    """
+    before = [(s.get("id"), s.get("video_frames"), s.get("audio_duration")) for s in story.get("shots") or []]
+    apply_shot_timings(settings, story, out)
+    after = [(s.get("id"), s.get("video_frames"), s.get("audio_duration")) for s in story.get("shots") or []]
+    if persist is not None and before != after:
+        dump_json(persist, story)
+    timeline, _ = _timeline_seconds(settings, out, story)
+    return timeline
 
 
 def assert_no_overflow(settings: Settings, story: dict) -> None:
@@ -525,62 +539,35 @@ def assert_no_overflow(settings: Settings, story: dict) -> None:
 
 
 def _timeline_seconds(settings: Settings, out: Path, story: dict) -> tuple[float, str]:
-    """成片时间轴时长（秒），以及这个数字的来源说明。
+    """成片计划时长（秒）：只认分镜 video_frames，不依赖已渲 clips。
 
-    优先级刻意从「最确定」到「最估算」：
-    1. 全部镜头都有 video_frames —— 视频已经渲染完，这是最终时间轴，配乐就按它生成；
-    2. 否则读 clips/*.mp4 实测时长；
-    3. 再否则用 TTS wav 时长 / 默认帧数估算（配乐只是个大概值，assemble 会用它裁到真实长度）。
+    video_frames 由 audio（对白实测）或空镜默认提前写入；视频阶段服从该帧数。
+    若个别镜尚未写入，临时用 wav / 默认帧估算，并在说明里标出。
     """
     fps = max(1, settings.video_fps)
     shots = story.get("shots") or []
-    frames_total = sum(int(s.get("video_frames") or 0) for s in shots)
     if shots and all(s.get("video_frames") for s in shots):
-        return max(2.0, frames_total / fps), "video_frames（镜头已渲染，精确）"
+        frames_total = sum(int(s["video_frames"]) for s in shots)
+        return max(2.0, frames_total / fps), "video_frames（分镜计划时长）"
 
     total = 0.0
-    measured = 0
+    missing = 0
     voice_dir = artifacts_sub(out, "audio", "voice")
     for shot in shots:
-        clip = artifacts_sub(out, "clips", f"{shot['id']}.mp4")
-        if clip.exists():
-            total += _clip_duration(settings, clip)
-            measured += 1
-            continue
         frames = shot.get("video_frames")
         if frames:
             total += float(frames) / fps
             continue
-        voice = voice_dir / f"{shot['id']}.wav"
-        if voice.exists():
+        missing += 1
+        line = str(shot.get("dialogue") or "").strip()
+        voice = voice_dir / f"{shot.get('id')}.wav"
+        if line and voice.exists():
             total += max(0.1, wav_duration(voice))
             continue
         total += settings.video_frames / fps
-    if measured:
-        return max(2.0, total), f"clips 实测（{measured}/{len(shots)} 镜）"
-    return max(2.0, total), "TTS/默认帧数估算"
-
-
-def _clip_duration(settings: Settings, clip: Path) -> float:
-    proc = subprocess.run(
-        [
-            str(settings.ffprobe),
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(clip),
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    try:
-        return max(0.1, float(proc.stdout.strip()))
-    except ValueError:
-        return 0.1
+    if missing:
+        return max(2.0, total), f"部分估算（{missing}/{len(shots)} 镜尚无 video_frames）"
+    return max(2.0, total), "video_frames（分镜计划时长）"
 
 
 def _estimate_timeline(settings: Settings, out: Path, story: dict) -> float:
@@ -632,7 +619,7 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
         )
     if t5_dir is None or not (t5_dir / "model.safetensors").is_file():
         raise SystemExit("找不到 MusicGen 文本编码器 t5-base。请先运行 scripts/setup.sh。")
-    print(f"配乐约 {wanted:.0f}s（成片 {timeline:.1f}s，依据 {source}）：{prompt}")
+    print(f"配乐约 {wanted:.0f}s（计划片长 {timeline:.1f}s，依据 {source}）：{prompt}")
     env = child_env()
     local_bin = str(Path.home() / ".local" / "bin")
     env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
@@ -673,7 +660,7 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
 
 
 def cmd_audio(args: argparse.Namespace) -> None:
-    """只做对白（TTS）。配乐挪到 music 阶段，等视频渲染完、时间轴精确后再生成。"""
+    """只做对白（TTS），并写齐各镜 video_frames（供视频服从、配乐定长）。"""
     settings = Settings.load(resolve(args.config) if args.config else None)
     out = resolve(args.out)
     story_path = out / "storyboard.json"
@@ -684,6 +671,7 @@ def cmd_audio(args: argparse.Namespace) -> None:
     apply_shot_timings(settings, story, out)
     # 兜底：自动拆镜之后仍有超长对白就不许继续，避免成片悄悄被截台词
     assert_no_overflow(settings, story)
+    timeline, source = _timeline_seconds(settings, out, story)
     manifest = _load_manifest(out)
     manifest.update(
         {
@@ -691,7 +679,8 @@ def cmd_audio(args: argparse.Namespace) -> None:
             "music_model": settings.music_model,
             "music_prompt": str(story.get("music_prompt") or default_music_prompt(story.get("style", ""), story.get("title", ""))),
             "voices": voices,
-            "timeline_s": round(_estimate_timeline(settings, out, story), 2),
+            "timeline_s": round(timeline, 2),
+            "timeline_source": source,
         }
     )
     dump_json(artifacts_sub(out, "audio", "manifest.json"), manifest)
@@ -708,8 +697,8 @@ def cmd_audio(args: argparse.Namespace) -> None:
     dump_json(story_path, story)
     timed = sum(1 for shot in story["shots"] if shot.get("audio_duration") is not None)
     print(
-        f"对白就绪：{len(voices)} 条（其中 {timed} 镜写入 video_frames），"
-        f"时间轴估长 {manifest['timeline_s']}s；配乐在 videos 之后由 music 阶段生成"
+        f"对白就绪：{len(voices)} 条（其中 {timed} 镜按配音写入 video_frames），"
+        f"计划片长 {manifest['timeline_s']}s（{source}）；配乐可按此定长，不必等视频"
     )
 
 
@@ -724,7 +713,7 @@ def _load_manifest(out: Path) -> dict:
 
 
 def cmd_music(args: argparse.Namespace) -> None:
-    """在所有镜头渲染完之后生成配乐：此时成片长度完全确定，不会短于视频。"""
+    """按分镜 video_frames 计划片长生成配乐（不依赖 clips 已渲完）。"""
     settings = Settings.load(resolve(args.config) if args.config else None)
     ensure_runtime_layout(musicgen_dir=settings.musicgen_dir)
     out = resolve(args.out)
@@ -732,6 +721,8 @@ def cmd_music(args: argparse.Namespace) -> None:
     if not story_path.exists():
         raise SystemExit(f"还没有分镜：{story_path}")
     story = load_json(story_path)
+    # 对白镜缺 wav 时仍可估；有 wav 则写齐 video_frames 再定长
+    ensure_video_frames(settings, story, out, persist=story_path)
     timeline, source = _timeline_seconds(settings, out, story)
     music = _generate_music(settings, story, out, args.force)
     have = wav_duration(music)

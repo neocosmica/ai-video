@@ -45,12 +45,12 @@
         </div>
         <div class="movie-info">
           <header class="movie-header">
-            <div class="movie-kicker">成片</div>
             <div class="movie-title-wrap" id="title-wrap" title="点击编辑片名">
               <h3 class="movie-title-display" id="title-display">—</h3>
               <input id="title" class="movie-title-input" hidden placeholder="例：雨夜重逢" />
             </div>
             <div class="movie-actions">
+              <button type="button" id="final-rerun" class="ghost" title="单跑成片">↻ 成片</button>
               <a id="final-download" class="final-link" href="#" download hidden>下载 final.mp4</a>
               <span id="final-meta" class="hint mono"></span>
               <span id="final-badge" class="badge success" hidden>🎬 final.mp4</span>
@@ -61,11 +61,8 @@
             <textarea id="novel-text" class="movie-novel-input" hidden rows="8" placeholder="粘贴小说正文；引号台词会原样进入对白。"></textarea>
           </div>
           <section class="movie-section">
-            <div class="movie-label-row">
-              <h4 class="movie-label">演职人员</h4>
-              <button type="button" id="cast-add" class="ghost cast-add-btn">＋ 角色</button>
-            </div>
-            <div id="final-cast" class="movie-cast"><div class="hint">暂无角色信息</div></div>
+            <h4 class="movie-label">角色</h4>
+            <div id="final-cast" class="movie-cast"></div>
           </section>
           <section class="movie-section" id="final-style-section">
             <h4 class="movie-label">视觉风格</h4>
@@ -75,7 +72,10 @@
             </div>
           </section>
           <section class="movie-section" id="final-music-section">
-            <h4 class="movie-label">配乐提示 <span class="hint">英文 · 无人声</span></h4>
+            <div class="movie-label-row">
+              <h4 class="movie-label">配乐提示 <span class="hint">英文 · 无人声</span></h4>
+              <button type="button" id="music-rerun" class="ghost cast-add-btn" title="单跑配乐">↻ 配乐</button>
+            </div>
             <div class="movie-meta-iedit" data-f="music_prompt" title="点击编辑">
               <div id="music-display" class="movie-style movie-meta-display empty">点击填写 music_prompt</div>
               <textarea id="music-text" class="movie-meta-input" hidden rows="2" placeholder="English instrumental BGM, no vocals"></textarea>
@@ -95,9 +95,6 @@
       <button id="shots-save" class="primary">保存分镜</button>
       <button id="shots-revert" class="ghost">还原</button>
       <button id="shots-reroll-seeds" class="ghost" title="重新随机 music_seed、角色 seed、镜头 seed">🎲 全随机 seed</button>
-      <button id="shots-add" class="ghost">＋ 镜头</button>
-      <button id="shots-chars" class="ghost">编辑角色</button>
-      <label class="check"><input type="checkbox" id="auto-refresh" checked> 自动刷新产物（5s）</label>
       <span id="shots-dirty" class="hint" hidden>有未保存修改 · 点「保存分镜」写回</span>
     </div>
     <div id="shots-msg" class="shots-msg hint" hidden></div>
@@ -157,24 +154,15 @@
 
 </main>
 
-  <!-- 分镜编辑器：挂在 layout 外，避免占网格行；整卡弹性，镜头列表吃满剩余高度 -->
-  <div class="card" id="sb-editor-card" hidden>
-    <h2>分镜编辑器 <span id="sb-path-label" class="mono hint"></span></h2>
-    <div class="sb-toolbar">
-      <button id="sb-save" class="primary">保存</button>
-      <button id="sb-close" class="ghost">关闭</button>
-      <span id="sb-msg" class="hint"></span>
-    </div>
-    <div id="sb-summary" class="sb-summary"></div>
-    <div id="sb-shots" class="sb-shots"></div>
-  </div>
-
 <template id="shot-card-tpl">
   <div class="shot-card">
     <div class="shot-preview"></div>
     <div class="shot-body">
       <div class="shot-top">
-        <div class="shot-id mono"></div>
+        <div class="shot-title-row">
+          <div class="shot-id mono"></div>
+          <span class="shot-dur mono hint" hidden></span>
+        </div>
         <button type="button" class="ghost shot-del" title="删除此镜">删除</button>
       </div>
       <div class="shot-iedit" data-f="dialogue" data-multiline data-placeholder="空镜留空">
@@ -182,6 +170,7 @@
         <div class="shot-iedit-display"></div>
         <textarea class="shot-iedit-input" hidden rows="2" placeholder="原样台词；空镜留空"></textarea>
       </div>
+      <div class="shot-audio"></div>
       <div class="shot-row2">
         <div class="shot-iedit" data-f="speaker" data-kind="select" data-placeholder="未选">
           <div class="shot-field-label">说话人</div>
@@ -228,7 +217,6 @@
       <div class="shot-status"></div>
       <div class="shot-progress"><div class="shot-progress-fill"></div></div>
       <div class="shot-progress-text mono hint"></div>
-      <div class="shot-audio"></div>
       <div class="shot-actions"></div>
     </div>
   </div>
@@ -243,6 +231,32 @@
   <option value="surprised"></option>
   <option value="whisper"></option>
 </datalist>
+
+<!-- 产物单跑确认框 -->
+<dialog id="rerun-dialog" class="rerun-dialog">
+  <form method="dialog" id="rerun-form" class="rerun-form">
+    <h3 id="rerun-title" class="rerun-title">重跑</h3>
+    <p id="rerun-summary" class="hint rerun-summary"></p>
+    <div id="rerun-error" class="error" hidden></div>
+    <section class="rerun-section" id="rerun-pre-sec">
+      <h4>前置 <span class="hint">传递依赖 · 必选 · 缺则生成 / 已有则跳过</span></h4>
+      <div id="rerun-prereqs" class="rerun-list"></div>
+    </section>
+    <section class="rerun-section">
+      <h4>本次目标 <span class="hint">将重做</span></h4>
+      <div id="rerun-target" class="rerun-list"></div>
+    </section>
+    <section class="rerun-section" id="rerun-post-sec">
+      <h4>后置 <span class="hint">传递影响 · 可选 · 未勾选仍会过时</span></h4>
+      <div id="rerun-posts" class="rerun-list"></div>
+    </section>
+    <p class="hint rerun-foot">未勾选的后置不会重跑，但会与新结果不一致。</p>
+    <div class="rerun-actions">
+      <button type="submit" value="cancel" class="ghost" id="rerun-cancel">取消</button>
+      <button type="submit" value="ok" class="primary" id="rerun-ok">开始重跑</button>
+    </div>
+  </form>
+</dialog>
 
 <script src="/app.js"></script>
 </body>

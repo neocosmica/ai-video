@@ -151,35 +151,72 @@ def _selected(shots: list[dict], only: str | None) -> list[dict]:
     return [s for s in shots if s["id"] in wanted]
 
 
+def _parse_id_list(raw: str | None) -> set[str] | None:
+    if not raw:
+        return None
+    ids = {item.strip() for item in str(raw).replace("，", ",").split(",") if item.strip()}
+    return ids or None
+
+
 def _cast_of(shot: dict, characters: list[dict]) -> list[dict]:
     by_id = {c["id"]: c for c in characters}
     return [by_id[cid] for cid in shot.get("characters") or [] if cid in by_id][:2]
 
 
-def run_t2i(story: dict, out: Path, settings: Settings, only: str | None, force: bool) -> bool:
+def run_t2i(
+    story: dict,
+    out: Path,
+    settings: Settings,
+    only: str | None,
+    force: bool,
+    characters: str | None = None,
+) -> bool:
     portraits = artifacts_sub(out, "characters")
     frames = artifacts_sub(out, "frames")
     shots = _selected(story["shots"], only)
+    wanted_chars = _parse_id_list(characters)
+    # 肖像：
+    # - 缺文件 → 补生成
+    # - --characters + --force → 只重做这些肖像
+    # - 全量 --force（无 --only / --characters）→ 重做全部肖像
+    # - 镜头 --only + --force（无 --characters）→ 不动已有肖像
+    redo_all_portraits = bool(force) and not only and wanted_chars is None
     pending_portraits = []
     for char in story.get("characters") or []:
-        path = portraits / f"{char['id']}.png"
-        if force or not path.exists():
-            if only and not any(char["id"] in (s.get("characters") or []) for s in shots):
+        cid = str(char.get("id") or "").strip()
+        if not cid:
+            continue
+        if wanted_chars is not None and cid not in wanted_chars:
+            continue
+        path = portraits / f"{cid}.png"
+        if path.exists():
+            if wanted_chars is not None and force and cid in wanted_chars:
+                pass  # 单跑肖像：强制重做
+            elif redo_all_portraits:
+                pass
+            else:
                 continue
-            pending_portraits.append((char, path))
+        if wanted_chars is None and only and not any(
+            cid in (s.get("characters") or []) for s in shots
+        ):
+            continue
+        pending_portraits.append((char, path))
+    # 仅 --characters、未指定 --only：只做肖像，不进静帧
+    portrait_only = wanted_chars is not None and not only
     pending_frames = []
     needs_edit = False
-    for shot in shots:
-        path = frames / f"{shot['id']}.png"
-        cast = _cast_of(shot, story.get("characters") or [])
-        if cast:
-            needs_edit = True
-            continue
-        if force or not path.exists():
-            pending_frames.append((shot, path))
+    if not portrait_only:
+        for shot in shots:
+            path = frames / f"{shot['id']}.png"
+            cast = _cast_of(shot, story.get("characters") or [])
+            if cast:
+                needs_edit = True
+                continue
+            if force or not path.exists():
+                pending_frames.append((shot, path))
     if not pending_portraits and not pending_frames:
         print("文生图阶段没有新的肖像或空镜。")
-        return needs_edit
+        return needs_edit and not portrait_only
     cls, config, weights = _load_class("t2i")
     print(f"加载文生图模型 {weights}")
     model = cls(model_config=config, quantize=None, model_path=weights)
@@ -259,11 +296,14 @@ def cmd_images(args: argparse.Namespace) -> None:
     if not story_path.exists():
         raise SystemExit(f"还没有分镜：{story_path}")
     story = load_json(story_path)
+    characters = getattr(args, "characters", None)
     phase = os.environ.get("NOVEL_IMAGE_PHASE", "t2i")
     if phase != "edit":
         # 只在第一阶段做硬预检；edit 是同进程 exec 续跑，不必再卡一次
         preflight(timeout_s=120.0, soft=False)
-        needs_edit = run_t2i(story, out, settings, args.only, args.force)
+        needs_edit = run_t2i(
+            story, out, settings, args.only, args.force, characters=characters
+        )
         if needs_edit:
             env = os.environ.copy()
             env["NOVEL_IMAGE_PHASE"] = "edit"

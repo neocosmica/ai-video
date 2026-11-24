@@ -144,7 +144,9 @@ class Job:
         self.stage_status[self.stages[0]] = "running"
         self.pid: int | None = None
         # 细进度只走 /api/progress SSE，不在每步 bump 时刷全局 change（避免列表狂刷新）
-        self.engine = ProgressEngine(out, stages=list(self.stages), task_id=task_id)
+        self.engine = ProgressEngine(
+            out, stages=list(self.stages), task_id=task_id, only=only
+        )
         self.tracker = _EngineTracker(self.engine)
         self.returncode: int | None = None
         self.created_at = time.time()
@@ -674,7 +676,9 @@ class _AttachedJob(Job):
         self._watch_started = False
         stages = [s["key"] if isinstance(s, dict) else s for s in (snap.get("stages") or self.stages)]
         self.stages = [s for s in stages if s in STAGE_LABELS] or list(STAGES)
-        self.engine = ProgressEngine(self.out, stages=list(self.stages), task_id=self.id)
+        self.engine = ProgressEngine(
+            self.out, stages=list(self.stages), task_id=self.id, only=self.only
+        )
         self.tracker = _EngineTracker(self.engine)
         self.refresh_from_disk()
 
@@ -775,6 +779,7 @@ def _single_stage_cmd(
     storyboard: str | None = None,
     only: str | None = None,
     force: bool = False,
+    characters: str | None = None,
 ) -> list[str]:
     """单阶段命令；CLI 子命令一次只能一个，多阶段靠 run / bash && 串。"""
     cmd = [sys.executable, "-m", "pipeline", stage, "--out", str(out)]
@@ -786,9 +791,47 @@ def _single_stage_cmd(
             cmd += ["--storyboard", str(resolve(storyboard))]
     if only and stage in {"images", "audio", "videos"}:
         cmd += ["--only", str(only)]
+    if characters and stage == "images":
+        cmd += ["--characters", str(characters)]
     if force:
         cmd.append("--force")
     return cmd
+
+
+def build_artifact_groups_cmd(
+    *,
+    out: str,
+    groups: list[dict],
+) -> tuple[list[str], Path, list[str]]:
+    """按 execution_groups 拼 bash && 串跑；返回 (argv, log, stage_keys)。"""
+    out_dir = resolve(out)
+    parts: list[str] = []
+    stage_keys: list[str] = []
+    for g in groups:
+        stage = g["stage"]
+        stage_keys.append(stage)
+        chars = g.get("characters") or []
+        parts.append(
+            shlex.join(
+                _single_stage_cmd(
+                    stage,
+                    out=out_dir,
+                    only=g.get("only"),
+                    force=bool(g.get("force")),
+                    characters=",".join(chars) if chars else None,
+                )
+            )
+        )
+    if not parts:
+        raise ValueError("没有可执行的阶段")
+    # 打印阶段分隔，便于进度引擎识别
+    script_parts = []
+    for g, part in zip(groups, parts):
+        script_parts.append(f"echo '== {g['stage']} =='")
+        script_parts.append(part)
+    cmd = ["/bin/bash", "-c", " && ".join(script_parts)]
+    log_path = artifacts_sub(out_dir, "logs", f"webui-{time.strftime('%Y%m%d-%H%M%S')}.log")
+    return cmd, log_path, stage_keys
 
 
 def build_pipeline_cmd(
@@ -1344,6 +1387,10 @@ class _Handler(BaseHTTPRequestHandler):
                     self._json(result)
             elif path == "/api/shots/rerun":
                 self._json(self.rerun_shots(data))
+            elif path == "/api/artifact/plan":
+                self._json(self.artifact_plan(data))
+            elif path == "/api/artifact/rerun":
+                self._json(self.artifact_rerun(data))
             else:
                 self._json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -1487,6 +1534,101 @@ class _Handler(BaseHTTPRequestHandler):
         job.start()
         notify_change()
         return job.snapshot()
+
+    def artifact_plan(self, data: dict) -> dict:
+        """单跑计划：前向/后向传递闭包，供确认对话框。"""
+        from pipeline.artifact_plan import plan_rerun
+
+        out = str(data.get("out") or "").strip()
+        if not out:
+            raise ValueError("没给输出目录")
+        kind = str(data.get("kind") or "").strip()
+        nid = str(data.get("id") or "").strip()
+        return plan_rerun(out, kind=kind, id=nid)
+
+    def artifact_rerun(self, data: dict) -> dict:
+        """按确认清单单跑：缺前置必补，目标+勾选后置 force。"""
+        from pipeline.artifact_plan import (
+            clear_nodes,
+            execution_groups,
+            plan_rerun,
+        )
+
+        out = str(data.get("out") or "").strip()
+        if not out:
+            raise ValueError("没给输出目录")
+        kind = str(data.get("kind") or "").strip()
+        nid = str(data.get("id") or "").strip()
+        plan = plan_rerun(out, kind=kind, id=nid)
+        if not plan.get("ok"):
+            raise ValueError(plan.get("error") or "无法规划单跑")
+        target = plan["target"]
+        # 只接受计划里出现过的后置，防篡改
+        allowed = {
+            (p["kind"], p.get("id") or "")
+            for p in plan.get("posts") or []
+        }
+        selected_posts: list[dict] = []
+        for raw in data.get("posts") or []:
+            if not isinstance(raw, dict):
+                continue
+            pk = str(raw.get("kind") or "").strip()
+            pid = str(raw.get("id") or "").strip()
+            if (pk, pid) not in allowed:
+                continue
+            label = next(
+                (p["label"] for p in plan["posts"] if p["kind"] == pk and (p.get("id") or "") == pid),
+                pk,
+            )
+            selected_posts.append({"kind": pk, "id": pid, "label": label})
+
+        # 只清目标 + 勾选后置；已有前置不动
+        removed = clear_nodes(out, [target, *selected_posts])
+        groups = execution_groups(
+            prereqs=plan.get("prereqs") or [],
+            target=target,
+            posts=selected_posts,
+        )
+        if not groups:
+            raise ValueError("没有可执行的阶段")
+        cmd, log_path, stage_keys = build_artifact_groups_cmd(out=out, groups=groups)
+        # only：镜级聚合，供进度引擎缩小步骤表
+        only_shots = sorted(
+            {
+                *(p.get("id") or "" for p in plan.get("prereqs") or [] if p.get("kind") in {"frame", "voice", "clip"} and p.get("status") == "missing"),
+                *([nid] if kind in {"frame", "voice", "clip"} and nid else []),
+                *(p.get("id") or "" for p in selected_posts if p.get("kind") in {"frame", "voice", "clip"}),
+            }
+        )
+        only_shots = [s for s in only_shots if s]
+        only = ",".join(only_shots) if only_shots and kind not in {"music", "final"} else None
+        # 肖像单跑：进度不缩 only
+        if kind == "portrait" and not selected_posts:
+            only = None
+
+        label = target.get("label") or f"{kind}:{nid}"
+        job = Job(
+            uuid.uuid4().hex[:12],
+            name=f"单跑 {label}",
+            novel=str(data.get("novel") or "").strip(),
+            out=out,
+            stages=stage_keys,
+            only=only,
+            cmd=cmd,
+            log_path=log_path,
+            detail=plan.get("summary") or "",
+        )
+        register_job(job)
+        job.start()
+        notify_change()
+        snap = job.snapshot()
+        snap["plan"] = {
+            "target": target,
+            "posts": selected_posts,
+            "removed": removed,
+            "groups": groups,
+        }
+        return snap
 
     def api_media(self, query: str) -> dict:
         """列出某输出目录下已生成的静帧 / 视频 / 配音文件（相对路径 + 修改时间）。"""
