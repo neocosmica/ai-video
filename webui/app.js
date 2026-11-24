@@ -29,10 +29,21 @@ const state = {
   currentStoryboard: "",
   sbData: null,
   sbPath: "",
+  shotSb: null, // 镜头网格里编辑的分镜（与磁盘同步；脏时不被自动刷新覆盖）
+  shotSbPath: "",
+  shotSbDirty: false,
   polling: null,
 };
 
 // ---------------------------------------------------------------- utilities
+function projectNovelPath(out = state.currentOut) {
+  return out ? `${out.replace(/\/+$/, "")}/novel.txt` : "";
+}
+
+function projectStoryboardPath(out = state.currentOut) {
+  return out ? `${out.replace(/\/+$/, "")}/storyboard.json` : "";
+}
+
 function esc(text) {
   const div = document.createElement("div");
   div.textContent = text == null ? "" : String(text);
@@ -191,10 +202,7 @@ function renderProjects() {
 }
 
 function renderDatalists() {
-  $("#novel-list").innerHTML = (state.novels || [])
-    .map((n) => `<option value="${esc(n.path)}">${esc(n.name)}</option>`).join("");
-  $("#sb-list").innerHTML = (state.storyboards || [])
-    .map((n) => `<option value="${esc(n.path)}">${esc(n.name)}</option>`).join("");
+  // 路径已固定为项目默认，不再展示文件选择器
 }
 
 async function createProject() {
@@ -225,7 +233,7 @@ function pickerMsg(msg, bad = false) {
 async function openProject(name, path, { autoSelectRunning = true } = {}) {
   state.project = name;
   state.currentOut = path || `projects/${name}`;
-  state.currentStoryboard = `${state.currentOut}/storyboard.json`;
+  state.currentStoryboard = projectStoryboardPath(state.currentOut);
   state.selectedTaskId = null;
   state.logOffset = 0;
   stageTrackSig = "";
@@ -240,14 +248,14 @@ async function openProject(name, path, { autoSelectRunning = true } = {}) {
   $("#task-detail-card").hidden = true;
   $("#current-project-name").textContent = name || state.currentOut;
   $("#title").value = name;
-  // 默认路径固定到项目 novel.txt；有没有文件由自动载入决定
-  const defaultNovel = `${state.currentOut}/novel.txt`;
-  const known = (state.novels || []).find((n) => n.path === defaultNovel || n.path.startsWith(`${state.currentOut}/`));
-  $("#novel-path").value = known?.path || defaultNovel;
   $("#novel-text").value = "";
-  $("#storyboard-path").value = `${state.currentOut}/storyboard.json`;
   clearShotCards();
   shotsLastOut = "";
+  state.shotSb = null;
+  state.shotSbPath = "";
+  clearShotSbDirty();
+  const shotsMsg = $("#shots-msg");
+  if (shotsMsg) shotsMsg.textContent = "";
   try {
     await api("/api/project/select", {
       method: "POST",
@@ -256,11 +264,6 @@ async function openProject(name, path, { autoSelectRunning = true } = {}) {
     });
   } catch {}
   await refreshState();
-  // refresh 后 novels 清单可能更全，再对齐一次默认路径并自动载入正文
-  if (!(state.novels || []).some((n) => n.path === $("#novel-path").value.trim())) {
-    const again = (state.novels || []).find((n) => n.path === defaultNovel) || (state.novels || []).find((n) => n.path.startsWith(`${state.currentOut}/`));
-    $("#novel-path").value = again?.path || defaultNovel;
-  }
   await loadNovel({ quiet: true });
   renderShots();
   scheduleShotsAutoRefresh();
@@ -274,6 +277,9 @@ async function openProject(name, path, { autoSelectRunning = true } = {}) {
 function backToProjects() {
   state.project = "";
   state.selectedTaskId = null;
+  state.shotSb = null;
+  state.shotSbPath = "";
+  clearShotSbDirty();
   try { localStorage.removeItem("nv_last_project"); } catch {}
   if (state.polling) { clearInterval(state.polling); state.polling = null; }
   if (shotsTimer) { clearInterval(shotsTimer); shotsTimer = null; }
@@ -305,10 +311,10 @@ function renderStagePicks() {
 }
 
 async function loadNovel({ quiet = false } = {}) {
-  const path = $("#novel-path").value.trim();
+  const path = projectNovelPath();
   if (!path) {
     $("#novel-text").value = "";
-    if (!quiet) toast("没有小说路径", true);
+    if (!quiet) toast("先选项目", true);
     return;
   }
   try {
@@ -330,16 +336,16 @@ async function startTask() {
   const payload = {
     title: $("#title").value.trim(),
     name: state.project,
-    novel: $("#novel-path").value.trim(),
+    novel: projectNovelPath(),
     novel_text: $("#novel-text").value.trim(),
-    storyboard: $("#storyboard-path").value.trim(),
+    storyboard: projectStoryboardPath(),
     out: state.currentOut,
     stages: [...state.selectedStages],
     only: $("#only-shots").value.trim(),
     force: $("#force").checked,
   };
   if (!payload.novel && !payload.novel_text) {
-    toast("请先载入小说或直接粘贴片段", true);
+    toast("请先粘贴小说正文", true);
     return;
   }
   if (!payload.stages.length) {
@@ -737,15 +743,206 @@ function clearShotCards() {
   shotCards.clear();
 }
 
+function markShotSbDirty() {
+  state.shotSbDirty = true;
+  const el = $("#shots-dirty");
+  if (el) el.hidden = false;
+}
+
+function clearShotSbDirty() {
+  state.shotSbDirty = false;
+  const el = $("#shots-dirty");
+  if (el) el.hidden = true;
+  for (const [, card] of shotCards) card.classList.remove("dirty");
+}
+
+function nextShotId(shots) {
+  let max = 0;
+  for (const s of shots || []) {
+    const m = String(s.id || "").match(/^s(\d+)/i);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return `s${String(max + 1).padStart(3, "0")}`;
+}
+
+function bindShotCardFields(card) {
+  const map = [
+    [".shot-f-dialogue", "dialogue"],
+    [".shot-f-speaker", "speaker"],
+    [".shot-f-emotion", "emotion"],
+    [".shot-f-location", "location"],
+    [".shot-f-image", "image_prompt"],
+    [".shot-f-motion", "motion_prompt"],
+  ];
+  for (const [sel, key] of map) {
+    const el = $(sel, card);
+    if (!el || el._bound) continue;
+    el._bound = true;
+    const apply = () => {
+      const shot = card._shot;
+      if (!shot) return;
+      const v = el.value;
+      if ((shot[key] || "") === v) return;
+      shot[key] = v;
+      card.classList.add("dirty");
+      markShotSbDirty();
+    };
+    el.addEventListener("input", apply);
+    el.addEventListener("change", apply);
+  }
+  const charsEl = $(".shot-f-characters", card);
+  if (charsEl && !charsEl._bound) {
+    charsEl._bound = true;
+    const apply = () => {
+      const shot = card._shot;
+      if (!shot) return;
+      const next = charsEl.value.split(/[,，\s]+/).filter(Boolean);
+      const prev = Array.isArray(shot.characters) ? shot.characters : [];
+      if (next.join(",") === prev.join(",")) return;
+      shot.characters = next;
+      card.classList.add("dirty");
+      markShotSbDirty();
+    };
+    charsEl.addEventListener("input", apply);
+    charsEl.addEventListener("change", apply);
+  }
+}
+
+function fillShotCardFields(card, shot) {
+  // 焦点在输入框时不覆盖用户正在打的字
+  const setVal = (sel, value) => {
+    const el = $(sel, card);
+    if (!el) return;
+    if (document.activeElement === el) return;
+    const v = value == null ? "" : String(value);
+    if (el.value !== v) el.value = v;
+  };
+  setVal(".shot-f-dialogue", shot.dialogue || "");
+  setVal(".shot-f-speaker", shot.speaker || "");
+  setVal(".shot-f-emotion", shot.emotion || "");
+  setVal(".shot-f-location", shot.location || "");
+  setVal(".shot-f-characters", (shot.characters || []).join(","));
+  setVal(".shot-f-image", shot.image_prompt || "");
+  setVal(".shot-f-motion", shot.motion_prompt || "");
+}
+
 function ensureShotCard(id) {
   let card = shotCards.get(id);
   if (!card) {
     const node = $("#shot-card-tpl").content.cloneNode(true);
     card = $(".shot-card", node);
     $(".shot-id", card).textContent = id;
+    $(".shot-more-toggle", card)?.addEventListener("click", () => {
+      const more = $(".shot-more", card);
+      if (!more) return;
+      const open = more.hidden;
+      more.hidden = !open;
+      $(".shot-more-toggle", card).textContent = open ? "提示词 ▾" : "提示词 ▸";
+    });
     shotCards.set(id, card);
   }
   return card;
+}
+
+async function loadShotSb(out, { force = false } = {}) {
+  const path = `${out}/storyboard.json`;
+  if (!force && state.shotSb && state.shotSbPath === path) return state.shotSb;
+  try {
+    const data = await api("/api/storyboard/read", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    state.shotSb = data.storyboard || { title: state.project || "", characters: [], shots: [] };
+  } catch {
+    state.shotSb = {
+      title: $("#title")?.value?.trim() || state.project || "新片",
+      style: "写实华语短剧，自然肤色，电影感光线，浅景深",
+      music_prompt: "English instrumental BGM, no vocals",
+      characters: [],
+      shots: [],
+    };
+  }
+  if (!Array.isArray(state.shotSb.shots)) state.shotSb.shots = [];
+  if (!Array.isArray(state.shotSb.characters)) state.shotSb.characters = [];
+  state.shotSbPath = path;
+  state.currentStoryboard = path;
+  clearShotSbDirty();
+  return state.shotSb;
+}
+
+async function saveShotSbFromGrid() {
+  if (!state.shotSb || !state.shotSbPath) {
+    toast("没有可保存的分镜", true);
+    return;
+  }
+  try {
+    await api("/api/storyboard/write", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: state.shotSbPath, storyboard: state.shotSb }),
+    });
+    clearShotSbDirty();
+    // 与浮层编辑器共用同一份数据
+    if (state.sbPath === state.shotSbPath) state.sbData = state.shotSb;
+    const msg = $("#shots-msg");
+    if (msg) msg.textContent = `已保存 ${state.shotSbPath}`;
+    toast(`已保存 ${state.shotSbPath}`);
+  } catch (err) {
+    toast(`保存失败：${err.message}`, true);
+  }
+}
+
+async function validateShotSbFromGrid() {
+  await saveShotSbFromGrid();
+  if (!state.shotSbPath) return;
+  try {
+    const data = await api("/api/storyboard/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: state.shotSbPath, strict: true }),
+    });
+    const msg = $("#shots-msg");
+    if (msg) {
+      msg.textContent = `校验通过：${data.shots} 镜 · 单镜台词额度 ${data.limit_chars} 字 ≈ ${data.max_seconds}s`;
+    }
+    toast(`校验通过：${data.shots} 镜，${data.dialogue_lines} 条对白`);
+  } catch (err) {
+    const msg = $("#shots-msg");
+    if (msg) msg.textContent = "";
+    toast(`校验失败：${err.message}`, true);
+  }
+}
+
+async function addShotOnGrid() {
+  const out = state.currentOut;
+  if (!out) return;
+  const sb = await loadShotSb(out);
+  sb.shots.push({
+    id: nextShotId(sb.shots),
+    characters: [],
+    location: "",
+    image_prompt: "",
+    motion_prompt: "",
+    speaker: "",
+    dialogue: "",
+    emotion: "calm",
+  });
+  markShotSbDirty();
+  await renderShots();
+}
+
+async function deleteShotOnGrid(shotId) {
+  if (!state.shotSb) return;
+  if (!confirm(`删除镜头 ${shotId}？未保存的修改会一起丢掉该镜。`)) return;
+  state.shotSb.shots = state.shotSb.shots.filter((s) => s.id !== shotId);
+  const card = shotCards.get(shotId);
+  if (card) {
+    card.remove();
+    shotCards.delete(shotId);
+  }
+  markShotSbDirty();
+  await renderShots();
 }
 
 function mediaSig(entry) {
@@ -916,42 +1113,25 @@ async function renderShots() {
   }
   if (seq !== renderShotsSeq) return;
   if (!media && shotCards.size) return; // 产物清单暂时拿不到：保持现状，别清空预览
-  // 2) 拉分镜（决定镜头顺序、台词，以及成片卡片元信息）
-  let shots = [];
-  let reuseMap = {};
+  // 2) 分镜：网格内编辑用内存副本；脏时不从磁盘覆盖
+  const sb = await loadShotSb(out, { force: false });
+  if (seq !== renderShotsSeq) return;
+  let shots = Array.isArray(sb.shots) ? sb.shots : [];
+  const reuseMap = {};
+  for (const s of shots) if (s.reuse_frame) reuseMap[s.id] = s.reuse_frame;
   let sbMeta = {
-    title: $("#title")?.value?.trim() || state.project || "",
-    characters: [],
-    style: "",
+    title: (sb.title || $("#title")?.value?.trim() || state.project || "").trim(),
+    characters: Array.isArray(sb.characters) ? sb.characters : [],
+    style: sb.style || "",
     novelText: $("#novel-text")?.value?.trim() || "",
   };
-  try {
-    const data = await api("/api/storyboard/read", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: `${out}/storyboard.json` }),
-    });
-    const sb = data.storyboard || {};
-    shots = sb.shots || [];
-    for (const s of shots) if (s.reuse_frame) reuseMap[s.id] = s.reuse_frame;
-    sbMeta = {
-      title: (sb.title || sbMeta.title || "").trim(),
-      characters: Array.isArray(sb.characters) ? sb.characters : [],
-      style: sb.style || "",
-      novelText: sbMeta.novelText,
-    };
-  } catch (err) {
-    // 没分镜就只按产物文件展示
-    shots = [];
-  }
   // 正文优先用左侧编辑器；空则尝试读项目 novel.txt
   if (!sbMeta.novelText) {
-    const novelPath = $("#novel-path")?.value?.trim() || `${out}/novel.txt`;
     try {
       const novel = await api("/api/file/read", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: novelPath }),
+        body: JSON.stringify({ path: projectNovelPath(out) }),
       });
       if (novel?.content) sbMeta.novelText = String(novel.content);
     } catch {}
@@ -993,7 +1173,7 @@ async function renderShots() {
   if (!shots.length) {
     clearShotCards();
     if (!grid.querySelector(":scope > .empty")) {
-      grid.innerHTML = `<div class="empty">还没有产物。启动任务跑到「静帧生成」后，这里会出现每个镜头的图 / 视频 / 配音。</div>`;
+      grid.innerHTML = `<div class="empty">还没有镜头。可点「＋ 镜头」手写分镜，或启动任务生成产物。</div>`;
     }
     return;
   }
@@ -1024,6 +1204,10 @@ async function renderShots() {
 
 function renderShotCard(shot, media, reuseMap, progItems) {
   const card = ensureShotCard(shot.id);
+  card._shot = shot;
+  $(".shot-id", card).textContent = shot.id || "";
+  bindShotCardFields(card);
+  fillShotCardFields(card, shot);
   const clipEntry = (media?.clips || []).find((c) => c.id === shot.id);
   const frameEntry = (media?.frames || []).find((f) => f.id === (reuseMap[shot.id] || shot.id));
   const voiceEntry = (media?.voices || []).find((v) => v.id === shot.id);
@@ -1051,9 +1235,6 @@ function renderShotCard(shot, media, reuseMap, progItems) {
     }
     audioEl.innerHTML = voiceEntry ? `<audio src="${esc(voiceEntry.url)}" controls preload="none"></audio>` : "";
   }
-  // 台词 / 状态 / 进度条：就地文本更新，值没变不写 DOM
-  const dlg = $(".shot-dialogue", card);
-  if (dlg.textContent !== (shot.dialogue || "")) dlg.textContent = shot.dialogue || "";
   const statusEl = $(".shot-status", card);
   let statusText, statusCls;
   if (clipEntry) {
@@ -1088,18 +1269,23 @@ function renderShotCard(shot, media, reuseMap, progItems) {
   if (progFill.style.width !== progWidth) progFill.style.width = progWidth;
   if (progFill.className !== progFillCls) progFill.className = progFillCls;
   if (progText.textContent !== progLabel) progText.textContent = progLabel;
-  // 重跑按钮只在卡片首次创建时挂一次
+  // 重跑 / 删除只挂一次；回调读 card._shot，避免闭包过期
   if (!card._btns) {
     card._btns = true;
     const actions = $(".shot-actions", card);
     const btnFrame = document.createElement("button");
     btnFrame.textContent = "↻ 静帧";
-    btnFrame.onclick = () => rerunShots([shot.id], ["images"]);
+    btnFrame.onclick = () => rerunShots([card._shot.id], ["images"]);
     const btnVideo = document.createElement("button");
     btnVideo.textContent = "↻ 视频";
-    btnVideo.onclick = () => rerunShots([shot.id], card._hasFrame ? ["videos"] : ["images", "videos"]);
+    btnVideo.onclick = () => rerunShots([card._shot.id], card._hasFrame ? ["videos"] : ["images", "videos"]);
+    const btnAudio = document.createElement("button");
+    btnAudio.textContent = "↻ 配音";
+    btnAudio.onclick = () => rerunShots([card._shot.id], ["audio"]);
     actions.appendChild(btnFrame);
     actions.appendChild(btnVideo);
+    actions.appendChild(btnAudio);
+    $(".shot-del", card)?.addEventListener("click", () => deleteShotOnGrid(card._shot.id));
   }
 }
 
@@ -1115,7 +1301,7 @@ async function rerunShots(shots, stages) {
         storyboard: state.currentStoryboard,
         shots,
         stages,
-        novel: $("#novel-path").value.trim(),
+        novel: projectNovelPath(),
       }),
     });
     toast(`已启动镜头重跑：${shots.join(", ")}`);
@@ -1128,31 +1314,36 @@ async function rerunShots(shots, stages) {
 
 // ---------------------------------------------------------------- storyboard editor
 async function openStoryboardEditor() {
-  let path = $("#storyboard-path").value.trim();
+  const path = projectStoryboardPath();
   const out = state.currentOut;
-  if (!path && out) path = `${out}/storyboard.json`;
   if (!path) { toast("先选项目", true); return; }
   const name = state.project || (out ? out.split("/").pop() : "");
   let sb;
-  try {
-    const data = await api("/api/storyboard/read", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
-    });
-    sb = data.storyboard;
-  } catch (err) {
-    // 新建一个空骨架
-    sb = {
-      title: $("#title").value.trim() || name || "新片",
-      style: "写实华语短剧，自然肤色，电影感光线，浅景深",
-      music_prompt: "English instrumental BGM, no vocals",
-      characters: [],
-      shots: [],
-    };
+  // 网格里已有未保存编辑时，角色编辑器直接接同一份对象
+  if (state.shotSb && state.shotSbPath === path) {
+    sb = state.shotSb;
+  } else {
+    try {
+      const data = await api("/api/storyboard/read", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      sb = data.storyboard;
+    } catch (err) {
+      sb = {
+        title: $("#title").value.trim() || name || "新片",
+        style: "写实华语短剧，自然肤色，电影感光线，浅景深",
+        music_prompt: "English instrumental BGM, no vocals",
+        characters: [],
+        shots: [],
+      };
+    }
   }
   state.sbData = sb;
   state.sbPath = path;
+  state.shotSb = sb;
+  state.shotSbPath = path;
   $("#sb-editor-card").hidden = false;
   $("#sb-path-label").textContent = path;
   renderStoryboardEditor();
@@ -1314,7 +1505,14 @@ async function saveStoryboard() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: state.sbPath, storyboard: state.sbData }),
     });
+    // 角色编辑器保存后同步回镜头网格
+    if (state.sbPath === state.shotSbPath || state.sbPath === `${state.currentOut}/storyboard.json`) {
+      state.shotSb = state.sbData;
+      state.shotSbPath = state.sbPath;
+      clearShotSbDirty();
+    }
     toast(`已保存 ${state.sbPath}`);
+    await renderShots();
   } catch (err) {
     toast(`保存失败：${err.message}`, true);
   }
@@ -1369,16 +1567,14 @@ async function loadBudget() {
 }
 
 function bind() {
-  // 改路径后失焦/回车即自动载入，不再需要「载入」按钮
-  $("#novel-path").addEventListener("change", () => loadNovel({ quiet: false }));
-  $("#novel-path").addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter") { ev.preventDefault(); loadNovel({ quiet: false }); }
-  });
   $("#start-btn").addEventListener("click", startTask);
-  $("#storyboard-edit").addEventListener("click", openStoryboardEditor);
   $("#sb-save").addEventListener("click", saveStoryboard);
   $("#sb-validate").addEventListener("click", validateStoryboard);
   $("#sb-close").addEventListener("click", () => { $("#sb-editor-card").hidden = true; });
+  $("#shots-save")?.addEventListener("click", saveShotSbFromGrid);
+  $("#shots-validate")?.addEventListener("click", validateShotSbFromGrid);
+  $("#shots-add")?.addEventListener("click", addShotOnGrid);
+  $("#shots-chars")?.addEventListener("click", openStoryboardEditor);
   $("#task-stop").addEventListener("click", stopTask);
   $("#task-rerun-failed").addEventListener("click", rerunFailed);
   $("#tasks-clear").addEventListener("click", clearTasks);

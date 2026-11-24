@@ -38,23 +38,8 @@
         <input id="title" placeholder="例：雨夜重逢" />
       </div>
       <div class="row">
-        <label>小说文件 <span class="hint">（打开项目自动载入；默认 <项目文件夹>/novel.txt）</span></label>
-        <div class="fileline">
-          <input id="novel-path" list="novel-list" placeholder="projects/xxx/novel.txt" />
-          <datalist id="novel-list"></datalist>
-        </div>
-      </div>
-      <div class="row">
-        <label>小说正文 <span class="hint">（可直接改；启动任务时写回 novel.txt）</span></label>
+        <label>小说正文 <span class="hint">（写回项目 novel.txt）</span></label>
         <textarea id="novel-text" rows="9" placeholder="打开项目后自动载入。也可在此粘贴/修改；引号台词会原样进入对白。"></textarea>
-      </div>
-      <div class="row split">
-        <label>分镜文件（可选） <span class="hint">（默认 <项目文件夹>/storyboard.json）</span></label>
-        <div class="fileline">
-          <input id="storyboard-path" list="sb-list" placeholder="projects/xxx/storyboard.json" />
-          <button id="storyboard-edit" class="ghost">打开编辑器</button>
-          <datalist id="sb-list"></datalist>
-        </div>
       </div>
       <div class="row">
         <label>执行阶段</label>
@@ -105,10 +90,16 @@
 
   <!-- 底部：成片 + 镜头产物，横跨左右两栏（属于当前项目） -->
   <div class="card" id="shots-card" hidden>
-    <h2>③ 镜头产物 <span id="shots-out-label" class="mono hint"></span></h2>
-    <div class="actions" style="margin:0 0 10px">
-      <label class="check"><input type="checkbox" id="auto-refresh" checked> 自动刷新（5s）</label>
+    <h2>③ 镜头分镜 <span id="shots-out-label" class="mono hint"></span></h2>
+    <div class="actions shots-toolbar" style="margin:0 0 10px">
+      <button id="shots-save" class="primary">保存分镜</button>
+      <button id="shots-validate" class="ghost">硬校验</button>
+      <button id="shots-add" class="ghost">＋ 镜头</button>
+      <button id="shots-chars" class="ghost">编辑角色</button>
+      <label class="check"><input type="checkbox" id="auto-refresh" checked> 自动刷新产物（5s）</label>
+      <span id="shots-dirty" class="hint" hidden>未保存</span>
       <span id="final-badge" class="badge success" hidden>🎬 final.mp4</span>
+      <span id="shots-msg" class="hint"></span>
     </div>
     <div id="final-wrap" class="final-wrap" hidden>
       <article class="movie-card">
@@ -158,8 +149,43 @@
   <div class="shot-card">
     <div class="shot-preview"></div>
     <div class="shot-body">
-      <div class="shot-id mono"></div>
-      <div class="shot-dialogue"></div>
+      <div class="shot-top">
+        <div class="shot-id mono"></div>
+        <button type="button" class="ghost shot-del" title="删除此镜">删除</button>
+      </div>
+      <label class="shot-field">
+        <span>对白</span>
+        <textarea class="shot-f-dialogue" rows="2" placeholder="原样台词；空镜留空"></textarea>
+      </label>
+      <div class="shot-row2">
+        <label class="shot-field">
+          <span>说话人</span>
+          <input class="shot-f-speaker" placeholder="中文名">
+        </label>
+        <label class="shot-field">
+          <span>情绪</span>
+          <input class="shot-f-emotion" list="emotion-list" placeholder="calm">
+        </label>
+      </div>
+      <button type="button" class="ghost shot-more-toggle">提示词 ▸</button>
+      <div class="shot-more" hidden>
+        <label class="shot-field">
+          <span>地点</span>
+          <input class="shot-f-location">
+        </label>
+        <label class="shot-field">
+          <span>角色</span>
+          <input class="shot-f-characters" placeholder="id，逗号分隔">
+        </label>
+        <label class="shot-field">
+          <span>画面</span>
+          <textarea class="shot-f-image" rows="2" placeholder="image_prompt"></textarea>
+        </label>
+        <label class="shot-field">
+          <span>运镜</span>
+          <textarea class="shot-f-motion" rows="2" placeholder="motion_prompt（英文）"></textarea>
+        </label>
+      </div>
       <div class="shot-status"></div>
       <div class="shot-progress"><div class="shot-progress-fill"></div></div>
       <div class="shot-progress-text mono hint"></div>
@@ -168,6 +194,16 @@
     </div>
   </div>
 </template>
+<datalist id="emotion-list">
+  <option value="calm"></option>
+  <option value="warm"></option>
+  <option value="sad"></option>
+  <option value="tense"></option>
+  <option value="bitter"></option>
+  <option value="nostalgic"></option>
+  <option value="surprised"></option>
+  <option value="whisper"></option>
+</datalist>
 
 <script src="/app.js"></script>
 </body>
