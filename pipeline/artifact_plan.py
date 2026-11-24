@@ -122,8 +122,9 @@ def direct_pre(story: dict, out: str | Path, kind: str, nid: str = "") -> list[t
         # 配乐只认计划片长：对白镜要有 voice（写入 video_frames）；空镜用默认帧，无产物前置
         return [("voice", sid) for sid, shot in shots.items() if _has_dialogue(shot)]
     if kind == "final":
+        # 有 music_prompt 就必须先有配乐；以前只在 bgm 已存在时才挂边，缺文件时对话框会漏掉 BGM
         pre = [("clip", sid) for sid in shots]
-        if _exists(out, "music"):
+        if str(story.get("music_prompt") or "").strip():
             pre.append(("music", ""))
         return pre
     raise ValueError(f"未知产物类型：{kind}")

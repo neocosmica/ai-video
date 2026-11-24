@@ -17,7 +17,8 @@ const STAGE_LABELS = {
 
 const state = {
   project: "", // 当前打开的项目名（projects/<片名> 的 <片名>）
-  tasks: [], // 只装当前项目的任务
+  tasks: [], // 历史任务（点一次启动算一条）
+  queue: { items: [], updated_at: 0 }, // 左边待跑队列
   projects: [],
   novels: [],
   storyboards: [],
@@ -78,6 +79,35 @@ function toast(msg, bad = false) {
   el._t = setTimeout(() => { el.hidden = true; }, bad ? 8000 : 4000);
 }
 
+/** 任务完成：只走前端系统通知声（不调用后台播音） */
+const jobStatusSeen = new Map();
+
+function playTaskDoneChime() {
+  try {
+    if (!("Notification" in window)) return;
+    const title = "任务完成";
+    const body = "短剧流水线已跑完";
+    const show = () => {
+      const n = new Notification(title, { body, silent: false });
+      setTimeout(() => n.close(), 4000);
+    };
+    if (Notification.permission === "granted") show();
+    else if (Notification.permission !== "denied") {
+      Notification.requestPermission().then((p) => { if (p === "granted") show(); });
+    }
+  } catch (_) {}
+}
+
+function noteJobStatuses(tasks) {
+  for (const job of tasks || []) {
+    if (!job?.id) continue;
+    const next = job.status || "";
+    const prev = jobStatusSeen.get(job.id);
+    jobStatusSeen.set(job.id, next);
+    if (prev === "running" && next === "success") playTaskDoneChime();
+  }
+}
+
 // ---------------------------------------------------------------- projects
 let refreshInFlight = false;
 let refreshQueued = false;
@@ -96,36 +126,39 @@ async function refreshState() {
     state.novels = data.novels || [];
     state.storyboards = data.storyboards || [];
     if (state.project) {
-      // 合并任务：保留本地已通过进度 SSE 拿到的更新 seq，避免 4s 全量刷新把条打回去
+      // 合并历史任务：保留本地已通过进度 SSE 拿到的更新 seq
       const prevById = Object.create(null);
       for (const t of state.tasks || []) prevById[t.id] = t;
       state.tasks = (data.tasks || []).map((t) => {
         const old = prevById[t.id];
-        if (!old?.progress) return t;
-        const oldSeq = Number(old.progress.seq) || 0;
-        const newSeq = Number(t.progress?.seq) || 0;
-        if (oldSeq > newSeq) {
-          return { ...t, progress: old.progress, stages: old.stages?.length ? old.stages : t.stages };
+        let merged = t;
+        if (old?.progress) {
+          const oldSeq = Number(old.progress.seq) || 0;
+          const newSeq = Number(t.progress?.seq) || 0;
+          if (oldSeq > newSeq && t.status === "running") {
+            merged = { ...t, progress: old.progress, stages: old.stages?.length ? old.stages : t.stages };
+          }
         }
-        return t;
+        return normalizeJobStages(merged);
       });
+      noteJobStatuses(state.tasks);
+      if (data.queue) state.queue = data.queue;
     }
     setConn(true);
     renderProjects();
     renderDatalists();
+    renderRunQueue();
     renderTasks();
-    // 列表刷新不覆盖进度 SSE；只同步按钮等元数据
     if (state.selectedTaskId) {
       const job = state.tasks.find((t) => t.id === state.selectedTaskId);
       if (job) {
-        $("#task-stop").disabled = job.status !== "running";
-        // 若尚无进度 SSE 数据，用 state 里的 progress 渲染一次
         if (job.progress && (Number(job.progress.seq) || 0) >= appliedProgressSeq) {
           appliedProgressSeq = Number(job.progress.seq) || appliedProgressSeq;
           renderStages(job);
         }
       }
     }
+    syncRunControls();
     renderShotsIfVisible();
   } catch (err) {
     setConn(false);
@@ -181,7 +214,7 @@ function renderProjects() {
     return;
   }
   wrap.innerHTML = state.projects.map((p) => {
-    const t = p.tasks || { done: 0, running: 0, failed: 0, total: 0 };
+    const t = p.tasks || { done: 0, running: 0, failed: 0, queued: 0, total: 0 };
     const badges = [
       p.novel ? "📖 小说" : "",
       p.has_storyboard ? "📋 分镜" : "",
@@ -189,6 +222,7 @@ function renderProjects() {
     ].filter(Boolean).join("　");
     const stat = [
       t.running ? `<span class="dot run">${t.running} 运行中…</span>` : "",
+      t.queued ? `<span class="dot">${t.queued} 待跑</span>` : "",
       t.done ? `<span class="dot done">${t.done} 完成</span>` : "",
       t.failed ? `<span class="dot fail">${t.failed} 失败</span>` : "",
       !t.total ? `<span class="dot">还没跑过任务</span>` : "",
@@ -276,10 +310,9 @@ async function openProject(name, path, { autoSelectRunning = true } = {}) {
   await renderShots();
   scheduleAutoValidate();
   scheduleShotsAutoRefresh();
-  // 任务详情始终显示：优先挂运行中，否则最近一条，没有则空态
+  // 只自动挂「在跑」；历史/中断不占详情，避免重启后像还有任务在跑、启动钮却是灰的
   const running = autoSelectRunning ? state.tasks.find((t) => t.status === "running") : null;
-  const pick = running || (autoSelectRunning ? state.tasks[0] : null);
-  if (pick) selectTask(pick.id);
+  if (running) selectTask(running.id);
   else showTaskDetailIdle();
 }
 
@@ -302,6 +335,7 @@ function backToProjects() {
 // ---------------------------------------------------------------- start form
 function renderStagePicks() {
   const wrap = $("#stage-picks");
+  if (!wrap) return;
   wrap.innerHTML = "";
   for (const s of ALL_STAGES) {
     const el = document.createElement("label");
@@ -703,31 +737,152 @@ async function webDraftForPipeline() {
   };
 }
 
-async function startTask() {
-  const draft = await webDraftForPipeline();
-  if (!draft) return;
-  const payload = {
-    title: titleValue(),
-    name: state.project,
-    out: state.currentOut,
-    stages: [...state.selectedStages],
-    only: $("#only-shots").value.trim(),
-    force: $("#force").checked,
-    ...draft,
-  };
-  if (!payload.stages.length) {
-    toast("至少选择一个阶段", true);
+function queueItems() {
+  return state.queue?.items || [];
+}
+
+function queuedCount() {
+  return queueItems().length;
+}
+
+function runningTask() {
+  return (state.tasks || []).find((t) => t.status === "running") || null;
+}
+
+function syncRunControls() {
+  const n = queuedCount();
+  const running = runningTask();
+  const countEl = $("#queue-count");
+  if (countEl) countEl.textContent = n ? `（${n}）` : "";
+  const btn = $("#start-btn");
+  if (btn) {
+    btn.disabled = !!running || n === 0;
+    btn.title = running
+      ? "有任务在跑，先停止"
+      : n === 0
+        ? "先点上方 ↻ 加入待跑队列"
+        : `启动队列里 ${n} 项`;
+  }
+  const stopBtn = $("#task-stop");
+  if (stopBtn) {
+    stopBtn.disabled = !running;
+    stopBtn.title = running ? "停止后台进程；待跑队列保留" : "当前没有在跑任务";
+  }
+  const clearBtn = $("#queue-clear");
+  if (clearBtn) clearBtn.disabled = n === 0 || !!running;
+  const hint = $("#run-hint") || $(".run-hint");
+  if (hint) {
+    if (running) {
+      hint.textContent = `正在跑：${running.name || "管线"} · 可随时停止；停止后队列保留，进度归零`;
+    } else if (n > 0) {
+      hint.textContent = `待跑 ${n} 项 · 点启动开跑；上方 ↻ 可继续添加`;
+    } else {
+      hint.textContent = "在上方点 ↻ 打开对话框，确认后加入下方待跑队列；队列非空即可启动。";
+    }
+  }
+}
+
+let runQueueSig = "";
+
+function renderRunQueue() {
+  const wrap = $("#run-queue");
+  if (!wrap) return;
+  syncRunControls();
+  const items = queueItems();
+  const sig = JSON.stringify(items.map((it) => [it.key, it.force, it.status, it.removable]));
+  if (sig === runQueueSig) return;
+  runQueueSig = sig;
+  if (!items.length) {
+    wrap.innerHTML = `<div class="empty">还没有待跑项。点上方 ↻ 添加。</div>`;
     return;
   }
+  wrap.innerHTML = items.map((it) => {
+    const force = it.force ? "重做" : "补缺";
+    const st = it.status === "running" ? "跑着" : it.status === "done" ? "完成" : "待跑";
+    const dis = it.removable === false ? " disabled" : "";
+    const title = it.block_reason || (it.removable === false ? "被其它项依赖，不能删" : "从队列移除");
+    return `<div class="queue-item" data-key="${esc(it.key)}">
+      <span class="qi-label">${esc(it.label || it.key)}</span>
+      <span class="qi-meta">${force} · ${st}</span>
+      <button type="button" class="ghost qi-del" data-key="${esc(it.key)}" title="${esc(title)}"${dis}>删除</button>
+    </div>`;
+  }).join("");
+  $$(".qi-del", wrap).forEach((btn) => {
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (btn.disabled) return;
+      removeQueueItem(btn.dataset.key);
+    });
+  });
+}
+
+async function removeQueueItem(key) {
+  if (!state.currentOut || !key) return;
   try {
-    const job = await api("/api/task", {
+    const res = await api("/api/queue/remove", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ out: state.currentOut, key }),
     });
-    toast(`任务已启动：${job.id}`);
+    state.queue = res.queue || state.queue;
+    runQueueSig = "";
+    renderRunQueue();
+    toast("已从待跑队列移除");
+  } catch (err) {
+    toast(`无法删除：${err.message}`, true);
+  }
+}
+
+async function clearRunQueue() {
+  if (!state.currentOut) return;
+  if (!queuedCount()) return;
+  try {
+    const res = await api("/api/queue/clear", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ out: state.currentOut }),
+    });
+    state.queue = res.queue || { items: [] };
+    runQueueSig = "";
+    renderRunQueue();
+    toast("已清空待跑队列");
+  } catch (err) {
+    toast(`清空失败：${err.message}`, true);
+  }
+}
+
+async function startTask() {
+  if (!state.currentOut) {
+    toast("请先打开项目", true);
+    return;
+  }
+  if (runningTask()) {
+    toast("已有任务在跑，请先停止", true);
+    return;
+  }
+  if (!queuedCount()) {
+    toast("待跑队列为空；请先点上方 ↻ 添加", true);
+    return;
+  }
+  const draft = await webDraftForPipeline();
+  if (!draft) return;
+  try {
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
+    const res = await api("/api/queue/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ out: state.currentOut, ...draft }),
+    });
+    toast(res.message || "已启动");
+    const tid = res.id || res.task_id;
+    if (tid) jobStatusSeen.set(tid, "running");
+    if (res.queue) state.queue = res.queue;
+    runQueueSig = "";
     await refreshState();
-    selectTask(job.id);
+    if (tid) selectTask(tid);
+    syncRunControls();
   } catch (err) {
     toast(`启动失败：${err.message}`, true);
   }
@@ -738,24 +893,27 @@ let tasksSig = "";
 
 function renderTasks() {
   const wrap = $("#task-list");
-  if (!state.tasks.length) {
+  // 历史：排除旧版误写入的 queued 占位
+  const hist = (state.tasks || []).filter((t) => t.status !== "queued");
+  if (!hist.length) {
     if (tasksSig !== "empty") {
       tasksSig = "empty";
-      wrap.innerHTML = `<div class="empty">还没有任务。启动一个即可。</div>`;
+      wrap.innerHTML = `<div class="empty">还没有历史。点一次「启动任务」会产生一条。</div>`;
     }
     return;
   }
-  // 内容没变就不重建 DOM：任务列表轮询时重建会让列表闪烁
   const sig = JSON.stringify([
     state.selectedTaskId,
-    state.tasks.map((t) => [t.id, t.name, t.status, t.created_at, (t.stages || []).map((s) => [s.key, s.status])]),
+    hist.map((t) => [t.id, t.name, t.status, t.created_at, (t.stages || []).map((s) => [s.key, s.status])]),
   ]);
   if (sig === tasksSig) return;
   tasksSig = sig;
-  wrap.innerHTML = state.tasks.map((t) => {
+  const ordered = [...hist].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  wrap.innerHTML = ordered.map((t) => {
     const dots = (t.stages || []).map((s) => {
       const cls = s.status === "done" ? "done" : s.status === "running" ? "run" : s.status === "failed" ? "fail" : "";
-      return `<span class="dot ${cls}">${STAGE_LABELS[s.key] || s.key}${s.status === "running" ? "…" : s.status === "failed" ? "✕" : s.status === "done" ? "✓" : ""}</span>`;
+      const mark = s.status === "running" ? "…" : s.status === "failed" ? "✕" : s.status === "done" ? "✓" : "";
+      return `<span class="dot ${cls}">${STAGE_LABELS[s.key] || s.key}${mark}</span>`;
     }).join("");
     const active = t.id === state.selectedTaskId ? " active" : "";
     return `<div class="task-item${active}" data-id="${t.id}">
@@ -773,14 +931,21 @@ function renderTasks() {
 }
 
 function statusLabel(status) {
-  return { running: "运行中", success: "完成", failed: "失败", interrupted: "中断" }[status] || status;
+  return {
+    running: "运行中",
+    success: "完成",
+    failed: "失败",
+    interrupted: "中断",
+  }[status] || status;
 }
 
 // ---------------------------------------------------------------- task detail
 let progressEs = null;
 let appliedProgressSeq = -1;
+let detailEpoch = 0; // 停止/切空态时递增，作废进行中的进度回调
 
 function showTaskDetailIdle() {
+  detailEpoch += 1;
   state.selectedTaskId = null;
   stageTrackSig = "";
   liveItemsSig = "";
@@ -800,17 +965,38 @@ function showTaskDetailIdle() {
   const pctEl = $("#overall-pct");
   if (pctEl) pctEl.textContent = "0%";
   const stageEl = $("#overall-stage");
-  if (stageEl) stageEl.textContent = "暂无任务 · 启动后这里显示进度";
+  if (stageEl) stageEl.textContent = "未在跑 · 队列非空时可点启动";
   const track = $("#stage-track");
   if (track) track.innerHTML = "";
   const live = $("#live-items");
   if (live) live.innerHTML = "";
   const meta = $("#task-meta");
   if (meta) meta.textContent = "";
-  $("#task-stop").disabled = true;
   $("#log").textContent = "";
   setLogCollapsed(true);
   renderTasks();
+  syncRunControls(); // 顺带按是否还有在跑设置停止钮
+}
+
+/** 任务已结束时，阶段里不允许再留 running（否则会一直 pulse） */
+function normalizeJobStages(job) {
+  if (!job || !Array.isArray(job.stages)) return job;
+  if (job.status === "running" || job.status === "queued") return job;
+  const fall = job.status === "success" ? "done" : "failed";
+  job.stages = job.stages.map((s) => (
+    s.status === "running" ? { ...s, status: fall } : s
+  ));
+  if (job.progress && typeof job.progress === "object") {
+    job.progress = {
+      ...job.progress,
+      status: job.status,
+      current_stage: null,
+      current: job.status === "interrupted" ? "已中断"
+        : job.status === "failed" ? "失败"
+          : job.status === "success" ? "完成" : job.progress.current,
+    };
+  }
+  return job;
 }
 
 async function selectTask(id) {
@@ -827,10 +1013,10 @@ async function selectTask(id) {
     showTaskDetailIdle();
     return;
   }
-  $("#task-detail-title").textContent = `任务：${job.name || job.out}`;
+  $("#task-detail-title").textContent = `本次运行：${job.name || job.out}`;
   renderStages(job);
   $("#task-meta").textContent = `输出：${job.out} · 创建：${fmtTime(job.created_at)}`;
-  $("#task-stop").disabled = job.status !== "running";
+  syncRunControls();
   $("#shots-out-label").textContent = job.out;
   state.currentOut = job.out;
   state.currentStoryboard = `${job.out}/storyboard.json`;
@@ -846,10 +1032,12 @@ function connectProgress(taskId) {
     progressEs = null;
   }
   if (!taskId) return;
+  const epoch = detailEpoch;
   const es = new EventSource(`/api/progress/${encodeURIComponent(taskId)}`);
   progressEs = es;
   const apply = (payload) => {
-    if (state.selectedTaskId !== taskId) return;
+    // 停止/切空态后作废；避免异步进度把 running 阶段画回去闪烁
+    if (epoch !== detailEpoch || state.selectedTaskId !== taskId) return;
     const prog = payload?.progress || payload;
     if (!prog || typeof prog !== "object") return;
     const seq = Number(prog.seq) || 0;
@@ -857,6 +1045,14 @@ function connectProgress(taskId) {
     appliedProgressSeq = seq;
     const job = state.tasks.find((t) => t.id === taskId);
     if (!job) return;
+    // 已中断/失败/完成：忽略引擎还在推的 running 快照
+    if (job.status && job.status !== "running") {
+      normalizeJobStages(job);
+      if (epoch !== detailEpoch || state.selectedTaskId !== taskId) return;
+      renderStages(job);
+      syncRunControls();
+      return;
+    }
     job.progress = prog;
     if (Array.isArray(prog.stages) && prog.stages.length) {
       job.stages = prog.stages.map((s) => ({
@@ -868,11 +1064,9 @@ function connectProgress(taskId) {
       }));
     }
     if (prog.current_stage !== undefined) job.current_stage = prog.current_stage;
-    if (prog.status && prog.status !== "running") {
-      // 引擎终态；任务级 status 仍以 /api/state 为准，这里只刷新 UI
-    }
+    if (epoch !== detailEpoch || state.selectedTaskId !== taskId) return;
     renderStages(job);
-    $("#task-stop").disabled = job.status !== "running";
+    syncRunControls();
   };
   es.addEventListener("progress", (ev) => {
     try { apply(JSON.parse(ev.data)); } catch {}
@@ -897,14 +1091,24 @@ function connectProgress(taskId) {
 let stageTrackSig = "";
 
 function renderStages(job) {
+  if (!job || !state.selectedTaskId || job.id !== state.selectedTaskId) return;
+  normalizeJobStages(job);
   const wrap = $("#stage-track");
   const stages = job.stages || [];
-  const sig = JSON.stringify(stages.map((s) => [s.key, s.status, s.pct]));
+  // 任务非 running 时，阶段绝不再用 running 样式（停了还闪就是这里）
+  const paintStatus = (s) => {
+    if (job.status !== "running" && s.status === "running") {
+      return job.status === "success" ? "done" : "failed";
+    }
+    return s.status;
+  };
+  const sig = JSON.stringify([job.status, stages.map((s) => [s.key, paintStatus(s), s.pct])]);
   if (sig !== stageTrackSig) {
     stageTrackSig = sig;
     wrap.innerHTML = stages.map((s) => {
-      const cls = s.status === "done" ? "done" : s.status === "running" ? "running" : s.status === "failed" ? "failed" : "";
-      const icon = s.status === "done" ? "✓" : s.status === "running" ? "⏳" : s.status === "failed" ? "✕" : "·";
+      const st = paintStatus(s);
+      const cls = st === "done" ? "done" : st === "running" ? "running" : st === "failed" ? "failed" : "";
+      const icon = st === "done" ? "✓" : st === "running" ? "⏳" : st === "failed" ? "✕" : "·";
       const pct = typeof s.pct === "number" ? ` ${Math.min(100, s.pct).toFixed(0)}%` : "";
       return `<div class="stage-step ${cls}">${icon} ${STAGE_LABELS[s.key] || s.label || s.key}<span class="stage-pct mono">${pct}</span></div>`;
     }).join("");
@@ -922,13 +1126,18 @@ function renderOverall(job) {
   if (job.status === "success") pct = 100;
   let currentLabel = "";
   if (job.status === "success") currentLabel = "完成";
-  else if (job.status === "failed") currentLabel = "失败（可点「重跑失败阶段」）";
+  else if (job.status === "failed") currentLabel = "失败";
   else if (job.status === "interrupted") currentLabel = "已中断";
+  else if (job.status === "queued") currentLabel = "待跑 · 点「启动任务」开始";
   else if (prog.current) currentLabel = `正在：${prog.current}`;
   else if (job.current_stage) currentLabel = `正在：${STAGE_LABELS[job.current_stage] || job.current_stage}`;
   const pctText = `${Math.min(100, pct).toFixed(1)}%`;
   const width = `${Math.min(100, pct).toFixed(1)}%`;
-  const fillCls = "overall-fill " + (job.status === "success" ? "done" : job.status === "failed" ? "failed" : "");
+  const fillCls = "overall-fill " + (
+    job.status === "success" ? "done"
+      : (job.status === "failed" || job.status === "interrupted") ? "failed"
+        : ""
+  );
   if (fill.style.width !== width) fill.style.width = width;
   if (fill.className !== fillCls) fill.className = fillCls;
   if (pctEl.textContent !== pctText) pctEl.textContent = pctText;
@@ -1010,27 +1219,83 @@ function ensureEtaTick() {
   }, 1000);
 }
 
+function liveItemPct(i) {
+  const step = Number(i.step) || 0;
+  const total = Math.max(1, Number(i.total) || 1);
+  if (typeof i.pct === "number") return Math.min(100, i.pct);
+  return total > 1 ? (100 * step) / total : 0;
+}
+
+function liveItemStepText(i, pct) {
+  const step = Number(i.step) || 0;
+  const total = Math.max(1, Number(i.total) || 1);
+  if (total > 1) return `${step}/${total}`;
+  if (pct > 0 && pct < 100) return `${pct.toFixed(0)}%`;
+  return "";
+}
+
+function liveItemClass(job, i) {
+  return [
+    "live-item",
+    i.status === "done" ? "done" : "",
+    i.status === "failed" ? "failed" : "",
+    // 只给真正 running 的项标 current；已完成的不要因 current_step_id 残留高亮/抢焦
+    job.status === "running" && i.status === "running" ? "current" : "",
+    i.status === "pending" ? "pending" : "",
+  ].filter(Boolean).join(" ");
+}
+
+function patchLiveItem(el, job, i) {
+  const pct = liveItemPct(i);
+  const width = `${pct}%`;
+  const cls = liveItemClass(job, i);
+  const stepText = liveItemStepText(i, pct);
+  const eta = job.status === "running" && i.status === "running"
+    ? fmtEta(etaRemaining(i.id) ?? i.eta_s) : "";
+  if (el.className !== cls) el.className = cls;
+  const stepEl = $(".li-step", el);
+  if (stepEl && stepEl.textContent !== stepText) stepEl.textContent = stepText;
+  const fill = $(".li-fill", el);
+  // 就地改 width，CSS transition 才能跟总进度条一样平滑
+  if (fill && fill.style.width !== width) fill.style.width = width;
+  const etaEl = $(".li-eta", el);
+  if (etaEl && etaEl.textContent !== eta) etaEl.textContent = eta;
+}
+
 function renderLiveItems(job) {
   const wrap = $("#live-items");
   const prog = job.progress || {};
   const steps = Array.isArray(prog.steps) ? prog.steps : [];
-  const currentId = prog.current_step_id;
+  const fall = job.status === "success" ? "done" : "failed";
+  const paintItem = (i) => {
+    if (job.status === "running") return i;
+    if (i.status === "running" || i.status === "pending") return { ...i, status: fall };
+    return i;
+  };
   // 完整步骤表；无 steps 时退回旧 items
-  const list = steps.length
+  const raw = steps.length
     ? steps
     : (prog.items || []).map((i) => ({ ...i, status: i.status || "running" }));
+  const list = raw.map(paintItem);
   // 进度一到就重置 ETA 锚点；列表 DOM 未变时只重绘秒数
-  syncEtaAnchors(list);
-  const sig = JSON.stringify([
+  syncEtaAnchors(job.status === "running" ? list : []);
+  // 结构签名：只决定要不要重建 DOM；进度变化走就地 patch，保留条宽 transition
+  const structureSig = JSON.stringify([
+    job.status === "running" ? "run" : job.status,
+    list.map((i) => [i.id, i.stage || "", i.label || ""]),
+  ]);
+  const progressSig = JSON.stringify([
     job.status,
-    currentId,
     list.map((i) => [i.id, i.status, i.step, i.total, i.pct, i.eta_s]),
   ]);
-  if (sig === liveItemsSig) {
-    paintLiveEtas();
+  if (progressSig === liveItemsSig) {
+    if (job.status === "running") paintLiveEtas();
     return;
   }
-  liveItemsSig = sig;
+  const structureSame = structureSig === (wrap.dataset.structureSig || "");
+  liveItemsSig = progressSig;
+  wrap.dataset.structureSig = structureSig;
+
   if (!list.length) {
     clearEtaAnchors();
     wrap.innerHTML = job.status === "running"
@@ -1038,6 +1303,17 @@ function renderLiveItems(job) {
       : "";
     return;
   }
+
+  const existing = $$(".live-item[data-id]", wrap);
+  const canPatch = structureSame
+    && existing.length === list.length
+    && existing.every((el, idx) => el.dataset.id === String(list[idx].id || ""));
+
+  if (canPatch) {
+    existing.forEach((el, idx) => patchLiveItem(el, job, list[idx]));
+    return;
+  }
+
   let lastStage = null;
   const parts = [];
   for (const i of list) {
@@ -1045,20 +1321,11 @@ function renderLiveItems(job) {
       lastStage = i.stage;
       parts.push(`<div class="step-group">${esc(STAGE_LABELS[i.stage] || i.stage)}</div>`);
     }
-    const step = Number(i.step) || 0;
-    const total = Math.max(1, Number(i.total) || 1);
-    const pct = typeof i.pct === "number" ? Math.min(100, i.pct) : (total > 1 ? (100 * step) / total : 0);
-    const stepText = total > 1 ? `${step}/${total}` : (pct > 0 && pct < 100 ? `${pct.toFixed(0)}%` : "");
-    const eta = i.status === "running" ? fmtEta(etaRemaining(i.id) ?? i.eta_s) : "";
-    const cls = [
-      "live-item",
-      i.status === "done" ? "done" : "",
-      i.status === "failed" ? "failed" : "",
-      // 只给真正 running 的项标 current；已完成的不要因 current_step_id 残留高亮/抢焦
-      i.status === "running" ? "current" : "",
-      i.status === "pending" ? "pending" : "",
-    ].filter(Boolean).join(" ");
-    parts.push(`<div class="${cls}" data-id="${esc(i.id || "")}">
+    const pct = liveItemPct(i);
+    const stepText = liveItemStepText(i, pct);
+    const eta = job.status === "running" && i.status === "running"
+      ? fmtEta(etaRemaining(i.id) ?? i.eta_s) : "";
+    parts.push(`<div class="${liveItemClass(job, i)}" data-id="${esc(i.id || "")}">
       <span class="li-label" title="${esc(i.label || "")}">${esc(i.label || i.id)}</span>
       <span class="li-step mono">${stepText}</span>
       <div class="li-bar"><div class="li-fill" style="width:${pct}%"></div></div>
@@ -1103,7 +1370,8 @@ function startLogPolling(id) {
         }
         if (data.status) job.status = data.status;
         if (data.current_stage !== undefined) job.current_stage = data.current_stage;
-        $("#task-stop").disabled = job.status !== "running";
+        noteJobStatuses([job]);
+        syncRunControls();
         if (job.status === "failed" || job.status === "success" || job.status === "interrupted") {
           renderShotsIfVisible();
         }
@@ -1148,49 +1416,52 @@ function toggleLogSection() {
 }
 
 async function stopTask() {
-  const id = state.selectedTaskId;
-  if (!id) return;
-  try {
-    await api("/api/task/stop", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
-    });
-    toast("已请求停止");
-  } catch (err) {
-    toast(`停止失败：${err.message}`, true);
-  }
-}
-
-async function rerunFailed() {
-  const job = state.tasks.find((t) => t.id === state.selectedTaskId);
-  if (!job) return;
-  const failed = (job.stages || []).filter((s) => s.status === "failed").map((s) => s.key);
-  if (!failed.length) {
-    toast("没有失败阶段可重跑", true);
+  if (!state.currentOut) {
+    toast("请先打开项目", true);
     return;
   }
-  // 从最早失败的那个阶段起重跑其后全部
-  const keys = ALL_STAGES.filter((s) => job.stages.some((x) => x.key === s));
-  const firstIdx = Math.min(...failed.map((s) => keys.indexOf(s)));
-  const stages = keys.slice(firstIdx);
+  // 本地立刻：历史标中断；队列保持，状态改回待跑；进度清零
+  for (const job of state.tasks || []) {
+    if (job.status === "running") {
+      job.status = "interrupted";
+      job.error = "用户停止";
+      (job.stages || []).forEach((s) => {
+        if (s.status === "running") s.status = "failed";
+      });
+    }
+  }
+  if (state.queue?.items) {
+    state.queue.items = state.queue.items.map((it) => ({ ...it, status: "pending" }));
+  }
+  runQueueSig = "";
+  showTaskDetailIdle();
+  mediaCache = null;
+  tasksSig = "";
+  renderRunQueue();
+  renderTasks();
+  syncRunControls();
   try {
-    const newJob = await api("/api/task", {
+    const res = await api("/api/task/stop", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title: `${job.name || job.out} · 续跑`,
-        novel: job.novel,
-        out: job.out,
-        stages,
-        only: job.only,
-      }),
+      body: JSON.stringify({ out: state.currentOut }),
     });
-    toast(`已启动续跑：${stages.join(" → ")}`);
+    toast(res.message || "已停止");
+    if (res.queue) state.queue = res.queue;
+    refreshInFlight = false;
+    refreshQueued = false;
     await refreshState();
-    selectTask(newJob.id);
+    showTaskDetailIdle();
+    mediaCache = null;
+    await renderShots();
+    runQueueSig = "";
+    renderRunQueue();
+    syncRunControls();
   } catch (err) {
-    toast(`续跑失败：${err.message}`, true);
+    toast(`停止失败：${err.message}`, true);
+    await refreshState();
+    showTaskDetailIdle();
+    syncRunControls();
   }
 }
 
@@ -1204,7 +1475,7 @@ async function clearTasks() {
     }
     await refreshState();
     if (!state.selectedTaskId) {
-      const pick = state.tasks.find((t) => t.status === "running") || state.tasks[0];
+      const pick = state.tasks.find((t) => t.status === "running");
       if (pick) selectTask(pick.id);
       else showTaskDetailIdle();
     }
@@ -1639,6 +1910,22 @@ async function commitShotField(wrap, card, { cancel = false } = {}) {
 
   card.classList.add("dirty");
   markShotSbDirty();
+  if (key === "dialogue") syncShotDialogueUi(card, shot);
+}
+
+function shotHasDialogue(shot) {
+  return Boolean(String(shot?.dialogue || "").trim());
+}
+
+/** 空镜隐去说话人 / 情绪 / 配音播放器 / ↻ 配音 */
+function syncShotDialogueUi(card, shot) {
+  if (!card) return;
+  const has = shotHasDialogue(shot);
+  const row2 = $(".shot-row2", card);
+  if (row2) row2.hidden = !has;
+  const audioEl = $(".shot-audio", card);
+  if (audioEl) audioEl.hidden = !has;
+  if (card._btnAudio) card._btnAudio.hidden = !has;
 }
 
 function rerollShotSeed(card) {
@@ -2957,11 +3244,13 @@ function renderShotCard(shot, media, reuseMap, progItems) {
     btnAudio.textContent = "↻ 配音";
     btnAudio.title = "单跑本镜对白（先确认前置/后置）";
     btnAudio.onclick = () => openRerunDialog({ kind: "voice", id: card._shot.id });
+    card._btnAudio = btnAudio;
     actions.appendChild(btnFrame);
     actions.appendChild(btnVideo);
     actions.appendChild(btnAudio);
     $(".shot-del", card)?.addEventListener("click", () => deleteShotOnGrid(card._shot.id));
   }
+  syncShotDialogueUi(card, shot);
 }
 
 let rerunPlan = null;
@@ -3018,13 +3307,13 @@ async function openRerunDialog(target) {
     });
     rerunPlan = plan;
     if (!plan.ok) {
-      $("#rerun-title").textContent = "无法重跑";
+      $("#rerun-title").textContent = "无法添加";
       errEl.hidden = false;
       errEl.textContent = plan.error || "规划失败";
       okBtn.disabled = true;
       return;
     }
-    $("#rerun-title").textContent = `重跑${plan.target.label}`;
+    $("#rerun-title").textContent = `添加：${plan.target.label}`;
     $("#rerun-summary").textContent = plan.summary || "";
     const preWrap = $("#rerun-prereqs");
     if (!(plan.prereqs || []).length) {
@@ -3052,7 +3341,7 @@ async function openRerunDialog(target) {
     }
     okBtn.disabled = false;
   } catch (err) {
-    $("#rerun-title").textContent = "无法重跑";
+    $("#rerun-title").textContent = "无法添加";
     errEl.hidden = false;
     errEl.textContent = err.message || String(err);
     okBtn.disabled = true;
@@ -3070,7 +3359,7 @@ async function confirmRerunFromDialog() {
     posts.push({ kind: input.dataset.kind, id: input.dataset.id || "" });
   });
   try {
-    const job = await api("/api/artifact/rerun", {
+    const res = await api("/api/queue/add", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3082,11 +3371,23 @@ async function confirmRerunFromDialog() {
       }),
     });
     closeRerunDialog();
-    toast(`已启动：${job.name || "单跑"}`);
+    if (res.queue) state.queue = res.queue;
+    runQueueSig = "";
+    renderRunQueue();
+    syncRunControls();
+    const nAdd = (res.added || []).length;
+    const nUp = (res.upgraded || []).length;
+    toast(
+      nAdd || nUp
+        ? `已入队${nAdd ? ` ${nAdd} 项` : ""}${nUp ? `，升级 ${nUp} 项` : ""}`
+        : "已在队列中（未重复添加）"
+    );
     await refreshState();
-    selectTask(job.id);
+    runQueueSig = "";
+    renderRunQueue();
+    syncRunControls();
   } catch (err) {
-    toast(`重跑失败：${err.message}`, true);
+    toast(`添加失败：${err.message}`, true);
   }
 }
 
@@ -3196,8 +3497,8 @@ function bind() {
   $("#shots-save")?.addEventListener("click", saveShotSbFromGrid);
   $("#shots-revert")?.addEventListener("click", revertShotSbFromGrid);
   $("#shots-reroll-seeds")?.addEventListener("click", rerollAllSeeds);
-  $("#task-stop").addEventListener("click", stopTask);
-  $("#task-rerun-failed").addEventListener("click", rerunFailed);
+  $("#task-stop")?.addEventListener("click", stopTask);
+  $("#queue-clear")?.addEventListener("click", clearRunQueue);
   $("#tasks-clear").addEventListener("click", clearTasks);
   $("#log-toggle")?.addEventListener("click", toggleLogSection);
   $("#new-project-btn").addEventListener("click", createProject);

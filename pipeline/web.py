@@ -111,7 +111,10 @@ class _NullTracker:
 
 
 class Job:
-    """一条流水线子进程：日志流 + 结束回调。阶段粒度的状态由调用方给 detail。"""
+    """一条流水线子进程：日志流 + 结束回调。阶段粒度的状态由调用方给 detail。
+
+    status=queued 时只入列表、不拉起进程；点「启动任务」后再 start。
+    """
 
     def __init__(
         self,
@@ -125,6 +128,8 @@ class Job:
         cmd: list[str],
         log_path: Path,
         detail: str = "",
+        status: str = "running",
+        queue_clear: list[dict] | None = None,
     ) -> None:
         self.id = task_id
         self.name = name
@@ -132,16 +137,18 @@ class Job:
         self.out = out
         self.stages = stages
         self.only = only
-        self.cmd = cmd
+        self.cmd = list(cmd or [])
         self.log_path = log_path
         self.detail = detail
-        self.status = "running"
+        self.status = status if status in {"queued", "running"} else "running"
+        self.queue_clear = list(queue_clear or [])  # 真正 start 时再清的产物节点
         self.lock = threading.Lock()
         self.log: list[str] = []
         self.subscribers: list[queue.Queue] = []
         self.stages = list(stages) or list(STAGES)
         self.stage_status: dict[str, str] = {s: "pending" for s in self.stages}
-        self.stage_status[self.stages[0]] = "running"
+        if self.status == "running" and self.stages:
+            self.stage_status[self.stages[0]] = "running"
         self.pid: int | None = None
         # 细进度只走 /api/progress SSE，不在每步 bump 时刷全局 change（避免列表狂刷新）
         self.engine = ProgressEngine(
@@ -153,6 +160,38 @@ class Job:
         self.started_at: float | None = None
         self.finished_at: float | None = None
         self.error: str | None = None
+        self.stop_requested = False
+
+    @classmethod
+    def from_queued_snapshot(cls, snap: dict) -> "Job":
+        """从 state.json 恢复可再 start 的待跑任务。"""
+        stages_raw = snap.get("stages") or []
+        if stages_raw and isinstance(stages_raw[0], str):
+            stage_keys = list(stages_raw)
+        else:
+            stage_keys = [s.get("key") for s in stages_raw if isinstance(s, dict) and s.get("key")]
+        stage_keys = [s for s in stage_keys if s] or list(STAGES)
+        cmd = snap.get("cmd") or []
+        if not isinstance(cmd, list) or not cmd:
+            raise ValueError("待跑任务缺少可执行命令，请重新添加")
+        job = cls(
+            snap.get("id") or uuid.uuid4().hex[:12],
+            name=str(snap.get("name") or ""),
+            novel=str(snap.get("novel") or ""),
+            out=str(snap.get("out") or ""),
+            stages=stage_keys,
+            only=snap.get("only"),
+            cmd=[str(x) for x in cmd],
+            log_path=Path(snap.get("log_path") or ROOT / "output"),
+            detail=str(snap.get("detail") or ""),
+            status="queued",
+            queue_clear=[n for n in (snap.get("queue_clear") or []) if isinstance(n, dict)],
+        )
+        try:
+            job.created_at = float(snap.get("created_at") or job.created_at)
+        except (TypeError, ValueError):
+            pass
+        return job
 
     # -- 序列化 ------------------------------------------------------------
     def snapshot(self) -> dict:
@@ -160,7 +199,7 @@ class Job:
             prog = self.tracker.snapshot()
             # 阶段状态以引擎为准（含 pct）；任务级 status 仍用 self.stage_status 兜底
             eng_stages = prog.get("stages") or []
-            if eng_stages:
+            if eng_stages and self.status != "queued":
                 stages = [
                     {
                         "key": s["key"],
@@ -178,6 +217,21 @@ class Job:
                     {"key": s, "label": STAGE_LABELS.get(s, s), "status": self.stage_status.get(s, "pending")}
                     for s in self.stages
                 ]
+            # 任务已终态时，禁止阶段再带 running（否则前端会一直闪）
+            if self.status in {"interrupted", "failed", "success"}:
+                terminal_running = "done" if self.status == "success" else "failed"
+                for s in stages:
+                    if s.get("status") == "running":
+                        s["status"] = terminal_running
+                        self.stage_status[s["key"]] = terminal_running
+                prog = {**prog, "status": self.status, "current_stage": None, "current": None}
+                if self.status == "interrupted":
+                    prog["current"] = "已中断"
+                elif self.status == "failed":
+                    prog["current"] = "失败"
+                elif self.status == "success":
+                    prog["current"] = "完成"
+                    prog["overall_pct"] = 100.0
             return {
                 "id": self.id,
                 "name": self.name,
@@ -187,9 +241,17 @@ class Job:
                 "detail": self.detail,
                 "status": self.status,
                 "stages": stages,
-                "current_stage": prog.get("current_stage")
-                or next((s["key"] for s in stages if s["status"] == "running"), None),
-                "progress": prog,
+                "current_stage": None
+                if self.status in {"interrupted", "failed", "success", "queued"}
+                else (
+                    prog.get("current_stage")
+                    or next((s["key"] for s in stages if s["status"] == "running"), None)
+                ),
+                "progress": prog if self.status != "queued" else {
+                    **prog,
+                    "status": "queued",
+                    "overall_pct": 0.0,
+                },
                 "returncode": self.returncode,
                 "error": self.error,
                 "created_at": self.created_at,
@@ -199,6 +261,9 @@ class Job:
                 "media_base": self.out,
                 "pid": self.pid,
                 "source": getattr(self, "source", "web"),
+                # 待跑 / 中断都留 cmd，服务重启后可退回待跑再点启动
+                "cmd": list(self.cmd) if self.status in {"queued", "interrupted"} else [],
+                "queue_clear": list(self.queue_clear) if self.status in {"queued", "interrupted"} else [],
             }
 
     # -- 日志 --------------------------------------------------------------
@@ -242,6 +307,31 @@ class Job:
 
     # -- 执行 --------------------------------------------------------------
     def start(self) -> None:
+        """queued → 先清约定产物再真正跑；已是 running 则直接拉起线程。"""
+        with self.lock:
+            if self.status == "queued":
+                clear_nodes = list(self.queue_clear or [])
+                self.status = "running"
+                self.stage_status = {s: "pending" for s in self.stages}
+                if self.stages:
+                    self.stage_status[self.stages[0]] = "running"
+                self.queue_clear = []
+            elif self.status != "running":
+                raise RuntimeError(f"任务状态 {self.status} 不能启动")
+            else:
+                clear_nodes = []
+            out = self.out
+        if clear_nodes:
+            try:
+                from pipeline.artifact_plan import clear_nodes as _clear
+
+                removed = _clear(out, clear_nodes)
+                if removed:
+                    self.append_log(f"[webui] 启动前已清除 {len(removed)} 项产物")
+            except Exception as exc:
+                self.append_log(f"[webui] 启动前清产物失败：{exc}")
+        _persist()
+        notify_change()
         threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self) -> None:
@@ -263,6 +353,14 @@ class Job:
                 parse_stage_progress(text, self)
                 # 引擎内部节流推送；这里只喂行
                 self.engine.feed_line(text, self.current_stage_safe())
+                try:
+                    from pipeline.run_queue import prune_queue_by_steps
+
+                    snap = self.engine.snapshot()
+                    if prune_queue_by_steps(self.out, snap.get("steps") or []):
+                        notify_change()
+                except Exception:
+                    pass
                 now = time.time()
                 if now - last_persist[0] >= 2.0:
                     last_persist[0] = now
@@ -274,30 +372,106 @@ class Job:
 
             code = run_tee(self.cmd, log=self.log_path, env=env, cwd=ROOT, on_line=on_line, on_start=on_start)
             self.returncode = code
-            self.status = "success" if code == 0 else "failed"
-            self.engine.finalize(success=(code == 0))
-            with self.lock:
-                for s, st in self.stage_status.items():
-                    if st == "running":
-                        self.stage_status[s] = "done" if code == 0 else "failed"
+            # 已被 stop_all 退回 queued：不要再改成 interrupted/failed
+            if self.status == "queued":
+                pass
+            elif self.stop_requested or self.status == "interrupted":
+                self.status = "interrupted"
+                self.engine.finalize(success=False)
+                with self.lock:
+                    for s, st in self.stage_status.items():
+                        if st == "running":
+                            self.stage_status[s] = "failed"
+            else:
+                self.status = "success" if code == 0 else "failed"
+                self.engine.finalize(success=(code == 0))
+                with self.lock:
+                    for s, st in self.stage_status.items():
+                        if st == "running":
+                            self.stage_status[s] = "done" if code == 0 else "failed"
         except Exception as exc:
             self.error = str(exc)
-            self.status = "failed"
+            if self.status != "queued":
+                self.status = "interrupted" if self.stop_requested else "failed"
             self.append_log(f"[webui] 任务异常：{exc}")
         finally:
-            self.finished_at = time.time()
-            self.append_log(f"[webui] 任务结束：{self.status}（退出码 {self.returncode}）")
+            parked = self.status == "queued"
+            if not parked:
+                self.finished_at = time.time()
+            self.append_log(
+                f"[webui] 任务结束：{self.status}（退出码 {self.returncode}）"
+                if not parked
+                else f"[webui] 进程已停，保持待跑（退出码 {self.returncode}）"
+            )
             notify_change()
-            _persist()  # 终态落盘：否则重启后完成的任务会被误标成「中断」
+            _persist()
+            disarm_queue(self.out)
+            # 成功：待跑项清空；失败/中断：复位 pending 可再启
+            try:
+                from pipeline.run_queue import clear_queue, load_queue, reset_statuses, save_queue
+
+                if self.status == "success":
+                    clear_queue(self.out)
+                elif not parked:
+                    q = load_queue(self.out)
+                    reset_statuses(q, "pending")
+                    save_queue(self.out, q)
+                notify_change()
+            except Exception as exc:
+                print(f"[webui] 同步队列状态失败：{exc}", flush=True)
+
+    def park_as_queued(self) -> bool:
+        """把已停下的任务重新挂回待跑（保留 cmd，可再点启动）。"""
+        with self.lock:
+            if not self.cmd:
+                return False
+            self.status = "queued"
+            self.stop_requested = False
+            self.error = None
+            self.returncode = None
+            self.pid = None
+            self.started_at = None
+            self.finished_at = None
+            self.stage_status = {s: "pending" for s in self.stages}
+            # 已跑过一轮：再启动时按 cmd 里的 --force 重做即可
+            self.queue_clear = []
+        try:
+            # 新进度引擎，避免沿用已 finalize 的旧状态
+            self.engine = ProgressEngine(
+                self.out, stages=list(self.stages), task_id=self.id, only=self.only
+            )
+            self.tracker = _EngineTracker(self.engine)
+        except Exception:
+            pass
+        self.append_log("[webui] 已退回待跑，点「启动任务」继续")
+        return True
 
     def stop(self) -> None:
-        """向进程组发 SIGTERM（run_tee 的子进程是独立 PTY 会话，用组信号才收得住）。"""
+        """向进程组发 SIGTERM；立刻离开 running，好让启动区/停止按钮马上复位。"""
         import os
         import signal
 
+        with self.lock:
+            if self.status != "running":
+                return
+            self.stop_requested = True
+            self.status = "interrupted"
+            self.error = "用户停止"
+            for s, st in self.stage_status.items():
+                if st == "running":
+                    self.stage_status[s] = "failed"
+            self.finished_at = self.finished_at or time.time()
+        disarm_queue(self.out)
+        try:
+            if self.engine is not None:
+                self.engine.finalize(success=False)
+        except Exception:
+            pass
         pid = self.pid
         if not pid:
-            self.append_log("[webui] 任务还没拿到进程号，无法停止")
+            self.append_log("[webui] 已标记停止（进程尚未拉起）")
+            notify_change()
+            _persist()
             return
         try:
             if sys.platform == "win32":
@@ -306,9 +480,11 @@ class Job:
                 os.killpg(os.getpgid(pid), signal.SIGTERM)
             self.append_log("[webui] 已请求停止…")
         except ProcessLookupError:
-            pass
+            self.append_log("[webui] 进程已结束")
         except Exception as exc:
             self.append_log(f"[webui] 停止失败：{exc}")
+        notify_change()
+        _persist()
 
 
 _JOBS: dict[str, Job] = {}
@@ -316,6 +492,27 @@ _LOCK = threading.Lock()
 _CHANGE_QUEUES: list[queue.Queue] = []
 # 当前网页打开的项目名下的任务 id：清空记录时只清这些，别的项目不受影响
 CURRENT_PROJECT_JOB_IDS: set[str] = set()
+# 用户点过「启动任务」的 out：只有 armed 才会在上一项成功后自动续跑待跑队列。
+# 绝不能仅因「列表里有 queued」或「别的任务碰巧跑完」就开跑。
+_QUEUE_ARMED: set[str] = set()
+
+
+def _norm_out(out: str) -> str:
+    return (out or "").replace("\\", "/").strip("/")
+
+
+def arm_queue(out: str) -> None:
+    out_n = _norm_out(out)
+    if out_n:
+        _QUEUE_ARMED.add(out_n)
+
+
+def disarm_queue(out: str) -> None:
+    _QUEUE_ARMED.discard(_norm_out(out))
+
+
+def queue_is_armed(out: str) -> bool:
+    return _norm_out(out) in _QUEUE_ARMED
 
 
 def notify_change() -> None:
@@ -412,6 +609,168 @@ def register_job(job: Job) -> None:
     _persist()
 
 
+def queued_jobs_for_out(out: str) -> list[Job]:
+    """某输出目录下按创建时间排序的待跑任务。"""
+    out_n = _norm_out(out)
+    with _LOCK:
+        jobs = [
+            j for j in _JOBS.values()
+            if j.status == "queued" and _norm_out(job_out(j)) == out_n
+        ]
+    return sorted(jobs, key=lambda j: j.created_at)
+
+
+def pump_queued_jobs(out: str) -> Job | None:
+    """同项目没有运行中任务、且已 armed 时，启动最早一条待跑。返回启动的任务或 None。"""
+    out_n = _norm_out(out)
+    if not out_n:
+        return None
+    if not queue_is_armed(out_n):
+        return None
+    with _LOCK:
+        busy = any(
+            j.status == "running" and _norm_out(job_out(j)) == out_n
+            for j in _JOBS.values()
+        )
+        if busy:
+            return None
+        queued = sorted(
+            [
+                j for j in _JOBS.values()
+                if j.status == "queued" and _norm_out(job_out(j)) == out_n
+            ],
+            key=lambda j: j.created_at,
+        )
+        nxt = queued[0] if queued else None
+        if not nxt:
+            return None
+        # 在全局锁内抢占，避免并发 pump 双开
+        clear_nodes = list(nxt.queue_clear or [])
+        nxt.status = "running"
+        nxt.stage_status = {s: "pending" for s in nxt.stages}
+        if nxt.stages:
+            nxt.stage_status[nxt.stages[0]] = "running"
+        nxt.queue_clear = []
+    if clear_nodes:
+        try:
+            from pipeline.artifact_plan import clear_nodes as _clear
+
+            removed = _clear(out_n, clear_nodes)
+            if removed:
+                nxt.append_log(f"[webui] 启动前已清除 {len(removed)} 项产物")
+        except Exception as exc:
+            nxt.append_log(f"[webui] 启动前清产物失败：{exc}")
+    _persist()
+    notify_change()
+    threading.Thread(target=nxt._run, daemon=True).start()
+    return nxt
+
+
+def start_queued_tasks(out: str) -> dict:
+    """启动指定 out 任务列表里的待跑项；同项目已有运行中则等它结束后自动续跑。"""
+    out_n = _norm_out(out)
+    if not out_n:
+        raise ValueError("请指定项目 out")
+    queued = queued_jobs_for_out(out_n)
+    if not queued:
+        raise ValueError("任务列表里没有待跑项；请先通过单跑对话框添加")
+    # 显式点启动才 armed；之后同 out 上一项成功才会续跑
+    arm_queue(out_n)
+    with _LOCK:
+        running = [
+            j for j in _JOBS.values()
+            if j.status == "running" and _norm_out(job_out(j)) == out_n
+        ]
+    if running:
+        return {
+            "ok": True,
+            "started": None,
+            "queued": len(queued),
+            "message": f"已有任务在跑，排队中还有 {len(queued)} 项，结束后自动续跑",
+            "running": running[0].snapshot(),
+        }
+    started = pump_queued_jobs(out_n)
+    return {
+        "ok": True,
+        "started": started.snapshot() if started else None,
+        "queued": max(0, len(queued) - (1 if started else 0)),
+        "message": f"已启动：{started.name}" if started else "未能启动",
+    }
+
+
+def _drop_task_from_disk(out: str, task_id: str) -> None:
+    """从 state.json 删掉指定任务（合并持久化不会自动删）。"""
+    path = state_path_for(out)
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        tasks = dict(data.get("tasks") or {})
+        if task_id not in tasks:
+            return
+        del tasks[task_id]
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"tasks": tasks}, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:
+        print(f"[webui] 从磁盘移除任务失败：{exc}", flush=True)
+
+
+def cancel_queued_task(task_id: str) -> dict:
+    """从列表移除一条待跑任务（未开始的）。"""
+    job = get_job(task_id)
+    if not job:
+        raise FileNotFoundError("task not found")
+    if job.status != "queued":
+        raise ValueError("只能移除待跑任务")
+    out = job_out(job)
+    with _LOCK:
+        _JOBS.pop(job.id, None)
+        CURRENT_PROJECT_JOB_IDS.discard(job.id)
+    if out:
+        _drop_task_from_disk(out, task_id)
+    if out and not queued_jobs_for_out(out):
+        disarm_queue(out)
+    _persist()
+    notify_change()
+    return {"ok": True, "id": task_id}
+
+
+def stop_pipeline_keep_queue(out: str) -> dict:
+    """杀掉本项目在跑的历史任务；待跑队列内容不变，状态全部复位 pending。"""
+    from pipeline.run_queue import annotate_removable, load_queue, reset_statuses, save_queue
+
+    out_n = _norm_out(out)
+    if not out_n:
+        raise ValueError("请指定项目 out")
+    disarm_queue(out_n)
+    with _LOCK:
+        running = [
+            j for j in _JOBS.values()
+            if _norm_out(job_out(j)) == out_n and j.status == "running"
+        ]
+    stopped: list[str] = []
+    for job in running:
+        job.stop()
+        stopped.append(job.id)
+    queue = load_queue(out_n)
+    reset_statuses(queue, "pending")
+    save_queue(out_n, queue)
+    _persist()
+    notify_change()
+    return {
+        "ok": True,
+        "out": out_n,
+        "stopped": stopped,
+        "queue": annotate_removable(out_n, queue),
+        "message": (
+            f"已停止 {len(stopped)} 个运行中任务；待跑队列仍有 {len(queue.get('items') or [])} 项"
+            if stopped
+            else "当前没有在跑任务"
+        ),
+    }
+
+
 def load_project_tasks(name: str) -> list[Job]:
     """读某项目的 state.json → 恢复成只读历史任务，返回该项目的全部任务。
 
@@ -432,6 +791,54 @@ def load_project_tasks(name: str) -> list[Job]:
         for task_id, snap in (data.get("tasks") or {}).items():
             if get_job(task_id):
                 continue  # 内存里已经有了（例如刚重启后仍在跑的任务）
+            if snap.get("status") in {"queued", "interrupted"} and snap.get("cmd"):
+                # 中断但留着 cmd：服务重启后当作待跑，点启动即可继续
+                try:
+                    qsnap = dict(snap)
+                    qsnap["status"] = "queued"
+                    job = Job.from_queued_snapshot(qsnap)
+                except Exception as exc:
+                    if snap.get("status") == "queued":
+                        snap = dict(snap)
+                        snap["status"] = "interrupted"
+                        snap["error"] = f"待跑任务无法恢复：{exc}"
+                        dirty = True
+                        try:
+                            created = float(snap.get("created_at") or 0)
+                        except (TypeError, ValueError):
+                            created = 0.0
+                        job = _RestoredJob(snap, created)
+                        with _LOCK:
+                            _JOBS[task_id] = job
+                            CURRENT_PROJECT_JOB_IDS.add(job.id)
+                        restored.append(job)
+                        continue
+                    # 普通中断无 cmd 可恢复：走下面只读历史
+                    pass
+                else:
+                    if snap.get("status") == "interrupted":
+                        dirty = True  # 写回 queued
+                    with _LOCK:
+                        _JOBS[task_id] = job
+                        CURRENT_PROJECT_JOB_IDS.add(job.id)
+                    restored.append(job)
+                    continue
+            if snap.get("status") == "queued":
+                # 无 cmd 的待跑：降级历史
+                snap = dict(snap)
+                snap["status"] = "interrupted"
+                snap["error"] = "待跑任务缺少命令，请重新添加"
+                dirty = True
+                try:
+                    created = float(snap.get("created_at") or 0)
+                except (TypeError, ValueError):
+                    created = 0.0
+                job = _RestoredJob(snap, created)
+                with _LOCK:
+                    _JOBS[task_id] = job
+                    CURRENT_PROJECT_JOB_IDS.add(job.id)
+                restored.append(job)
+                continue
             if snap.get("status") == "running":
                 if pid_alive(snap.get("pid")):
                     # 已有同 out / 同 pid 的挂载（例如启动时扫到的 CLI），不要再挂一份
@@ -574,27 +981,43 @@ def migrate_legacy_state() -> None:
 
 
 def _persist() -> None:
-    """把任务历史写回各自项目的 <项目>/work/webui/state.json。"""
+    """把任务历史写回各自项目的 <项目>/work/webui/state.json。
+
+    与磁盘合并写入：内存里的同 id 覆盖磁盘；磁盘上其它历史保留。
+    避免服务刚启动、内存尚未 load 全量时，一次入队把整份历史冲成只剩一条。
+    """
     try:
-        buckets: dict[str, dict] = {}
         with _LOCK:
             jobs = list(_JOBS.values())
+        mem_by_out: dict[str, dict] = {}
         for job in jobs:
             out = job_out(job)
             if not out:
                 continue
-            buckets.setdefault(out, {})[job.id] = job.snapshot()
-        for out, tasks in buckets.items():
+            mem_by_out.setdefault(out, {})[job.id] = job.snapshot()
+        for out, mem_tasks in mem_by_out.items():
             path = state_path_for(out)
-            if len(tasks) > HISTORY:
-                keep = sorted(tasks.items(), key=lambda kv: kv[1].get("created_at", 0), reverse=True)[:HISTORY]
-                tasks = dict(keep)
+            disk_tasks: dict = {}
+            if path.exists():
+                try:
+                    disk_tasks = dict((json.loads(path.read_text(encoding="utf-8")) or {}).get("tasks") or {})
+                except Exception:
+                    disk_tasks = {}
+            merged = dict(disk_tasks)
+            merged.update(mem_tasks)
+            if len(merged) > HISTORY:
+                keep = sorted(
+                    merged.items(),
+                    key=lambda kv: kv[1].get("created_at", 0),
+                    reverse=True,
+                )[:HISTORY]
+                merged = dict(keep)
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"tasks": tasks}, ensure_ascii=False, indent=1), encoding="utf-8")
+            tmp.write_text(json.dumps({"tasks": merged}, ensure_ascii=False, indent=1), encoding="utf-8")
             tmp.replace(path)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[webui] 持久化任务失败：{exc}", flush=True)
 
 
 class _RestoredJob(Job):
@@ -730,9 +1153,26 @@ class _AttachedJob(Job):
                 self.append_log(f"[webui] 外部任务结束：{self.status}")
                 notify_change()
                 _persist()
+                try:
+                    from pipeline.run_queue import clear_queue, load_queue, reset_statuses, save_queue
+
+                    if ok:
+                        clear_queue(self.out)
+                    else:
+                        q = load_queue(self.out)
+                        reset_statuses(q, "pending")
+                        save_queue(self.out, q)
+                    notify_change()
+                except Exception as exc:
+                    print(f"[webui] 同步队列状态失败：{exc}", flush=True)
                 return
             try:
                 self.refresh_from_disk()
+                from pipeline.run_queue import prune_queue_by_steps
+
+                snap = self.engine.snapshot()
+                if prune_queue_by_steps(self.out, snap.get("steps") or []):
+                    notify_change()
             except Exception as exc:
                 self.append_log(f"[webui] 刷新外部进度失败：{exc}")
             time.sleep(0.5)  # 挂载任务 0.5s 扫盘，配合引擎节流
@@ -978,7 +1418,7 @@ def _all_projects() -> dict:
 
     for item in projects:
         path = state_path_for(item["path"])
-        done = running = failed = 0
+        done = running = failed = queued = 0
         last = None
         if path.exists():
             try:
@@ -989,6 +1429,8 @@ def _all_projects() -> dict:
                 status = snap.get("status")
                 if status == "running":
                     running += 1
+                elif status == "queued":
+                    queued += 1
                 elif status == "failed" or status == "interrupted":
                     failed += 1
                 else:
@@ -1000,7 +1442,13 @@ def _all_projects() -> dict:
         live_run = mem_running.get(item["name"], 0)
         if live_run > running:
             running = live_run
-        item["tasks"] = {"done": done, "running": running, "failed": failed, "total": done + running + failed}
+        item["tasks"] = {
+            "done": done,
+            "running": running,
+            "failed": failed,
+            "queued": queued,
+            "total": done + running + failed + queued,
+        }
         item["last_activity"] = last
     return {"projects": projects}
 
@@ -1424,8 +1872,16 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(self.rerun_shots(data))
             elif path == "/api/artifact/plan":
                 self._json(self.artifact_plan(data))
-            elif path == "/api/artifact/rerun":
-                self._json(self.artifact_rerun(data))
+            elif path in ("/api/artifact/rerun", "/api/queue/add"):
+                self._json(self.queue_add(data))
+            elif path == "/api/queue/remove":
+                self._json(self.queue_remove(data))
+            elif path == "/api/queue/clear":
+                self._json(self.queue_clear(data))
+            elif path in ("/api/tasks/start", "/api/queue/start"):
+                self._json(self.queue_start(data))
+            elif path == "/api/task/cancel":
+                self._json(self.queue_remove(data))
             else:
                 self._json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -1439,13 +1895,20 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- API ---------------------------------------------------------------
     def api_state(self, query: str) -> dict:
-        """选了项目 → 返回该项目的一切（任务、项目卡片、小说/分镜备选）。"""
+        """选了项目 → 返回该项目的一切（待跑队列、历史任务、项目卡片…）。"""
         from urllib.parse import parse_qs, unquote
+
+        from pipeline.run_queue import annotate_removable, load_queue
 
         params = parse_qs(query)
         name = unquote(params.get("project", [""])[0]).strip()
+        queue = {"items": [], "updated_at": 0}
         if name:
             tasks = load_project_tasks(name)
+            try:
+                queue = annotate_removable(f"{PROJECTS_DIRNAME}/{name}", load_queue(f"{PROJECTS_DIRNAME}/{name}"))
+            except Exception:
+                queue = load_queue(f"{PROJECTS_DIRNAME}/{name}")
         else:
             # 项目选择页也要发现外部 produce，卡片才能显示「运行中」
             try:
@@ -1460,6 +1923,7 @@ class _Handler(BaseHTTPRequestHandler):
             "novels": file_options["novels"],
             "storyboards": file_options["storyboards"],
             "tasks": [j.snapshot() for j in tasks],
+            "queue": queue,
             "server_time": time.time(),
         }
 
@@ -1532,11 +1996,14 @@ class _Handler(BaseHTTPRequestHandler):
         return job.snapshot()
 
     def stop_task(self, data: dict) -> dict:
-        job = get_job(str(data.get("id") or ""))
-        if not job:
-            raise FileNotFoundError("task not found")
-        job.stop()
-        return {"ok": True}
+        """停止本项目在跑的历史任务；待跑队列保留并复位为 pending。"""
+        out = str(data.get("out") or "").strip()
+        if not out:
+            job = get_job(str(data.get("id") or ""))
+            if not job:
+                raise FileNotFoundError("task not found")
+            out = job_out(job)
+        return stop_pipeline_keep_queue(out)
 
     def rerun_shots(self, data: dict) -> dict:
         """对指定镜头重跑所选阶段（前端传什么阶段就跑什么）。"""
@@ -1594,12 +2061,66 @@ class _Handler(BaseHTTPRequestHandler):
         nid = str(data.get("id") or "").strip()
         return plan_rerun(out, kind=kind, id=nid)
 
-    def artifact_rerun(self, data: dict) -> dict:
-        """按确认清单单跑：缺前置必补，目标+勾选后置 force。"""
-        from pipeline.artifact_plan import (
-            clear_nodes,
-            execution_groups,
-            plan_rerun,
+    def queue_add(self, data: dict) -> dict:
+        """对话框确认 → 加入左边待跑队列（去重 + 补缺失前置）。"""
+        from pipeline.run_queue import add_from_plan
+
+        out = str(data.get("out") or "").strip()
+        if not out:
+            raise ValueError("没给输出目录")
+        sb_data = data.get("storyboard_data")
+        has_novel_text = "novel_text" in data
+        if isinstance(sb_data, dict) or has_novel_text:
+            materialize_web_draft(
+                out,
+                storyboard_data=sb_data if isinstance(sb_data, dict) else None,
+                novel_text=None if not has_novel_text else str(data.get("novel_text") or ""),
+            )
+        result = add_from_plan(
+            out,
+            kind=str(data.get("kind") or "").strip(),
+            id=str(data.get("id") or "").strip(),
+            posts=data.get("posts") or [],
+        )
+        if not result.get("ok"):
+            raise ValueError(result.get("error") or "无法加入队列")
+        notify_change()
+        return result
+
+    def queue_remove(self, data: dict) -> dict:
+        from pipeline.run_queue import remove_item
+
+        out = str(data.get("out") or "").strip()
+        key = str(data.get("key") or data.get("id") or "").strip()
+        if not out or not key:
+            raise ValueError("需要 out 与 key")
+        result = remove_item(out, key)
+        if not result.get("ok"):
+            raise ValueError(result.get("error") or "无法删除")
+        notify_change()
+        return result
+
+    def queue_clear(self, data: dict) -> dict:
+        from pipeline.run_queue import clear_queue
+
+        out = str(data.get("out") or "").strip()
+        if not out:
+            raise ValueError("没给输出目录")
+        # 在跑时不允许清空？允许——用户可清队列，不影响已拉起的进程；或禁止
+        result = clear_queue(out)
+        notify_change()
+        return result
+
+    def queue_start(self, data: dict) -> dict:
+        """点启动：按待跑队列拉起一条历史任务。"""
+        from pipeline.artifact_plan import clear_nodes
+        from pipeline.run_queue import (
+            annotate_removable,
+            build_groups_from_queue,
+            load_queue,
+            queue_only_shots,
+            reset_statuses,
+            save_queue,
         )
 
         out = str(data.get("out") or "").strip()
@@ -1614,78 +2135,57 @@ class _Handler(BaseHTTPRequestHandler):
                 storyboard_data=sb_data if isinstance(sb_data, dict) else None,
                 novel_text=None if not has_novel_text else str(data.get("novel_text") or ""),
             )
-        kind = str(data.get("kind") or "").strip()
-        nid = str(data.get("id") or "").strip()
-        plan = plan_rerun(out, kind=kind, id=nid)
-        if not plan.get("ok"):
-            raise ValueError(plan.get("error") or "无法规划单跑")
-        target = plan["target"]
-        # 只接受计划里出现过的后置，防篡改
-        allowed = {
-            (p["kind"], p.get("id") or "")
-            for p in plan.get("posts") or []
-        }
-        selected_posts: list[dict] = []
-        for raw in data.get("posts") or []:
-            if not isinstance(raw, dict):
-                continue
-            pk = str(raw.get("kind") or "").strip()
-            pid = str(raw.get("id") or "").strip()
-            if (pk, pid) not in allowed:
-                continue
-            label = next(
-                (p["label"] for p in plan["posts"] if p["kind"] == pk and (p.get("id") or "") == pid),
-                pk,
+        queue = load_queue(out)
+        if not (queue.get("items") or []):
+            raise ValueError("待跑队列为空；请先通过 ↻ 添加")
+        out_n = _norm_out(out)
+        with _LOCK:
+            busy = any(
+                j.status == "running" and _norm_out(job_out(j)) == out_n
+                for j in _JOBS.values()
             )
-            selected_posts.append({"kind": pk, "id": pid, "label": label})
+        if busy:
+            raise ValueError("已有任务在跑，请先停止")
 
-        # 只清目标 + 勾选后置；已有前置不动
-        removed = clear_nodes(out, [target, *selected_posts])
-        groups = execution_groups(
-            prereqs=plan.get("prereqs") or [],
-            target=target,
-            posts=selected_posts,
-        )
+        groups = build_groups_from_queue(out, queue)
         if not groups:
-            raise ValueError("没有可执行的阶段")
+            raise ValueError("队列里没有可执行项（产物可能已齐全）")
+        # 强制项：启动前清产物
+        to_clear = [
+            {"kind": it["kind"], "id": it.get("id") or ""}
+            for it in queue["items"]
+            if it.get("force")
+        ]
+        if to_clear:
+            clear_nodes(out, to_clear)
         cmd, log_path, stage_keys = build_artifact_groups_cmd(out=out, groups=groups)
-        # only：镜级聚合，供进度引擎缩小步骤表
-        only_shots = sorted(
-            {
-                *(p.get("id") or "" for p in plan.get("prereqs") or [] if p.get("kind") in {"frame", "voice", "clip"} and p.get("status") == "missing"),
-                *([nid] if kind in {"frame", "voice", "clip"} and nid else []),
-                *(p.get("id") or "" for p in selected_posts if p.get("kind") in {"frame", "voice", "clip"}),
-            }
-        )
-        only_shots = [s for s in only_shots if s]
-        only = ",".join(only_shots) if only_shots and kind not in {"music", "final"} else None
-        # 肖像单跑：进度不缩 only
-        if kind == "portrait" and not selected_posts:
-            only = None
-
-        label = target.get("label") or f"{kind}:{nid}"
+        only = queue_only_shots(queue)
+        n = len(queue["items"])
+        labels = "、".join(it.get("label") or it["key"] for it in queue["items"][:4])
+        if n > 4:
+            labels += f" 等 {n} 项"
         novel = novel_rel or str(data.get("novel") or "").strip()
         job = Job(
             uuid.uuid4().hex[:12],
-            name=f"单跑 {label}",
+            name=f"启动 · {n} 项",
             novel=novel,
             out=out,
             stages=stage_keys,
             only=only,
             cmd=cmd,
             log_path=log_path,
-            detail=plan.get("summary") or "",
+            detail=labels,
+            status="running",
         )
+        reset_statuses(queue, "running")
+        save_queue(out, queue)
         register_job(job)
         job.start()
         notify_change()
         snap = job.snapshot()
-        snap["plan"] = {
-            "target": target,
-            "posts": selected_posts,
-            "removed": removed,
-            "groups": groups,
-        }
+        snap["queue"] = annotate_removable(out, load_queue(out))
+        snap["ok"] = True
+        snap["message"] = f"已启动：{job.name}"
         return snap
 
     def api_media(self, query: str) -> dict:
@@ -1846,7 +2346,22 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             assert q is not None
             engine.subscribe(q)
-            while job.status == "running":
+            # queued 也挂着：点启动后同一条 SSE 能接到 running；被移出列表则结束
+            while job.status in {"queued", "running"} and get_job(task_id) is job:
+                if job.status == "queued":
+                    try:
+                        time.sleep(1.0)
+                    except Exception:
+                        break
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    # 刚被启动：推一次快照再进 running 循环
+                    if job.status == "running":
+                        snap = job.tracker.snapshot()
+                        if int(snap.get("seq") or 0) > last_id:
+                            last_id = int(snap.get("seq") or 0)
+                            self._sse_progress_event(snap)
+                    continue
                 try:
                     snap = q.get(timeout=15.0)
                 except queue.Empty:

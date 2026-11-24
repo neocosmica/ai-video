@@ -168,11 +168,27 @@ input[type="range"] {
   gap: 6px;
 }
 .task-detail-inline .live-items {
+  /* 按内容高度，别 flex 撑出大块空白 */
   max-height: 240px;
-  flex: 1;
-  min-height: 120px;
+  flex: 0 1 auto;
+  min-height: 0;
 }
-.task-detail-inline .log { max-height: 160px; }
+.task-detail-inline .log-section {
+  margin-top: 4px;
+  flex: 0 0 auto;
+}
+.task-detail-inline .log-section:not(.collapsed) {
+  flex: 1 1 auto;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.task-detail-inline .log {
+  flex: 1 1 auto;
+  min-height: 160px;
+  max-height: none;
+}
 .produce-history {
   margin: 0;
   padding: 12px 14px;
@@ -321,10 +337,64 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .task-item .t-name { font-weight: 600; }
 .task-item .t-time { color: var(--muted); font-size: 12px; margin-left: auto; }
 .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid; }
+.badge.queued { color: var(--accent); border-color: var(--accent); }
 .badge.running { color: var(--run); border-color: var(--run); }
 .badge.success { color: var(--ok); border-color: var(--ok); }
 .badge.failed { color: var(--bad); border-color: var(--bad); }
 .badge.interrupted { color: var(--warn); border-color: var(--warn); }
+.task-item .t-remove {
+  font-size: 12px;
+  padding: 0 6px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.task-item .t-remove:hover { color: var(--bad); border-color: var(--bad); }
+.run-hint { margin: 0 0 8px; line-height: 1.5; }
+.queue-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 4px 0 8px;
+}
+.queue-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.run-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+  margin-bottom: 10px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+.run-queue .empty { color: var(--muted); font-size: 12px; padding: 6px 2px; }
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 13px;
+}
+.queue-item:hover { border-color: var(--border); }
+.queue-item .qi-label { flex: 1; min-width: 0; }
+.queue-item .qi-meta { color: var(--muted); font-size: 11px; }
+.queue-item .qi-del {
+  font-size: 12px;
+  padding: 2px 8px;
+  color: var(--muted);
+}
+.queue-item .qi-del:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
+.queue-item .qi-del:disabled { opacity: 0.35; cursor: not-allowed; }
+.badge.pending { color: var(--muted); border-color: var(--border); }
 .task-item .t-stages { display: flex; gap: 4px; flex-wrap: wrap; }
 .t-stages .dot { font-size: 11px; color: var(--muted); }
 .t-stages .dot.done { color: var(--ok); }
@@ -362,6 +432,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 
 /* 阶段轨道 */
 .stage-track { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 12px; }
+.stage-track:empty { display: none; margin: 0; }
 .stage-step {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -450,6 +521,10 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   overflow: auto;
   padding-right: 4px;
 }
+.live-items:empty {
+  display: none;
+  margin: 0;
+}
 .step-group {
   font-size: 11px;
   color: var(--muted);
@@ -490,7 +565,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   background: var(--run);
   /* 圆角交给父级 overflow 裁切，避免短进度看起来像悬空胶囊 */
   border-radius: 0;
-  transition: width .35s ease;
+  transition: width .6s ease;
 }
 .live-item.done .li-fill { background: var(--ok); }
 .live-item.failed .li-fill { background: var(--bad); }
@@ -1242,6 +1317,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 .shot-mini-name { min-width: 0; }
 .shot-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.shot-row2[hidden],
+.shot-audio[hidden] { display: none !important; }
 .shot-more-toggle {
   align-self: flex-start;
   font-size: 11px;

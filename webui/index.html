@@ -41,7 +41,7 @@
       <article class="movie-card">
         <div class="movie-poster">
           <video id="final-player" class="final-player" controls playsinline preload="metadata"></video>
-          <div id="final-empty" class="final-empty" hidden>尚无成片 · 启动任务生成</div>
+          <div id="final-empty" class="final-empty" hidden>尚无成片 · 点 ↻ 成片加入列表后启动</div>
         </div>
         <div class="movie-info">
           <header class="movie-header">
@@ -105,22 +105,21 @@
     <div id="shots-grid" class="shots-grid"></div>
   </div>
 
-  <!-- 生成过程：启动 + 进度 -->
+  <!-- 生成过程：左待跑队列 + 进度；右历史 -->
   <div class="card" id="produce-card" hidden>
     <h2>生成过程</h2>
     <div class="produce-body">
       <div class="produce-main">
         <div class="project-run">
-          <div class="row">
-            <label>执行阶段</label>
-            <div class="stages" id="stage-picks"></div>
+          <p class="hint run-hint" id="run-hint">在上方点 ↻ 打开对话框，确认后加入下方待跑队列；队列非空即可启动。</p>
+          <div class="queue-toolbar">
+            <h3 class="queue-title">待跑队列 <span id="queue-count" class="hint"></span></h3>
+            <button type="button" id="queue-clear" class="ghost" title="清空全部待跑">清空待跑</button>
           </div>
-          <div class="row inline">
-            <label class="check"><input type="checkbox" id="force"> 强制重做（先清空产物再生成）</label>
-            <label class="check">只重做镜头 <input id="only-shots" placeholder="s003,s004 留空=全部" style="width:150px"/></label>
-          </div>
+          <div id="run-queue" class="run-queue"><div class="empty">还没有待跑项。点上方 ↻ 添加。</div></div>
           <div class="actions">
             <button id="start-btn" class="primary">🚀 启动任务</button>
+            <button id="task-stop" class="danger" disabled>⏹ 停止</button>
             <span id="budget-info" class="hint"></span>
           </div>
           <div id="start-error" class="error" hidden></div>
@@ -128,11 +127,7 @@
 
         <div class="task-detail-inline" id="task-detail-card">
           <div class="task-detail-head">
-            <h3 id="task-detail-title">任务</h3>
-            <div class="actions task-detail-actions">
-              <button id="task-stop" class="danger">⏹ 停止</button>
-              <button id="task-rerun-failed" class="ghost">↻ 重跑失败阶段</button>
-            </div>
+            <h3 id="task-detail-title">本次运行</h3>
           </div>
           <div class="overall">
             <div class="overall-bar"><div id="overall-fill" class="overall-fill"></div></div>
@@ -155,10 +150,10 @@
 
       <aside class="produce-history">
         <div class="produce-history-title">
-          <h3>任务历史</h3>
+          <h3>历史任务</h3>
           <button id="tasks-clear" class="ghost" type="button">🧹 清空</button>
         </div>
-        <div id="task-list" class="task-list"><div class="empty">还没有任务。启动一个即可。</div></div>
+        <div id="task-list" class="task-list"><div class="empty">还没有历史。点一次「启动任务」会产生一条。</div></div>
       </aside>
     </div>
   </div>
@@ -254,17 +249,17 @@
       <div id="rerun-prereqs" class="rerun-list"></div>
     </section>
     <section class="rerun-section">
-      <h4>本次目标 <span class="hint">将重做</span></h4>
+      <h4>本次目标 <span class="hint">入队后重做</span></h4>
       <div id="rerun-target" class="rerun-list"></div>
     </section>
     <section class="rerun-section" id="rerun-post-sec">
       <h4>后置 <span class="hint">传递影响 · 可选 · 未勾选仍会过时</span></h4>
       <div id="rerun-posts" class="rerun-list"></div>
     </section>
-    <p class="hint rerun-foot">未勾选的后置不会重跑，但会与新结果不一致。</p>
+    <p class="hint rerun-foot">确认后加入左边待跑队列（自动补缺失前置、去重）；点「启动任务」再跑。未勾选的后置会与新结果不一致。</p>
     <div class="rerun-actions">
       <button type="submit" value="cancel" class="ghost" id="rerun-cancel">取消</button>
-      <button type="submit" value="ok" class="primary" id="rerun-ok">开始重跑</button>
+      <button type="submit" value="ok" class="primary" id="rerun-ok">加入待跑队列</button>
     </div>
   </form>
 </dialog>

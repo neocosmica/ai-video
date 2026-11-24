@@ -140,13 +140,13 @@ projects/
 
 可单跑产物：肖像 / 静帧 / 配音 / 视频 / 配乐 / 成片。入口在角色卡、镜头卡、配乐旁、成片旁。
 
-流程：点 ↻ → `POST /api/artifact/plan` 算前向 `Prereq*` / 后向 `Post*` → 对话框确认 → `POST /api/artifact/rerun`。
+流程：点 ↻ → `POST /api/artifact/plan` → 对话框确认 → `POST /api/queue/add` 写入**左边待跑队列**（去重、补缺失前置）→ 点「启动任务」→ `POST /api/queue/start` 拉起一条**历史任务**。右侧「历史任务」= 每次启动一条记录。停止只杀进程，队列保留并复位为待跑。
 
-- **前置（传递）**：必选；缺则生成，已有则跳过
-- **目标**：强制重做
-- **后置（传递）**：可选；对话框里**默认全选**，用户可取消
+- **前置（传递）**：缺失则入队；已有则跳过
+- **目标 / 勾选后置**：入队强制重做（start 时清产物）
+- 队列项被其它项依赖时不可删；可一键清空待跑
 
-实现：`pipeline/artifact_plan.py`；肖像单跑用 `images --characters`。
+实现：`pipeline/run_queue.py` + `pipeline/artifact_plan.py`。
 
 ## 禁止
 
