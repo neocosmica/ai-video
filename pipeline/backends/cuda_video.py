@@ -269,3 +269,177 @@ def generate_shot(
     # 离开 with：显存回收
 
     return write_mp4(frames_arr, out_path, fps=fps)
+
+
+# ---------------------------------------------------------------------------
+# 命令入口（与 mac 端 pipeline/video.py 对齐）
+# ---------------------------------------------------------------------------
+
+
+def cmd_videos_cuda(settings, args) -> None:
+    """CUDA 视频阶段：逐镜生成 clips/<id>.mp4。
+
+    每镜内部再分两段（transformer → 释放 → VAE），保证 12 GB 卡不爆。
+    """
+    import random
+
+    import torch
+
+    from pipeline.projects import artifacts_sub
+    from pipeline.util import load_json, resolve, snap_frames
+
+    out = resolve(args.out)
+    story_path = out / "storyboard.json"
+    if not story_path.exists():
+        raise SystemExit(f"还没有分镜：{story_path}")
+    story = load_json(story_path)
+
+    clips = artifacts_sub(out, "clips")
+    clips.mkdir(parents=True, exist_ok=True)
+    only = getattr(args, "only", None)
+    force = getattr(args, "force", False)
+    wanted = None
+    if only:
+        wanted = {x.strip() for x in str(only).replace("，", ",").split(",") if x.strip()}
+
+    width = settings.video_width
+    height = settings.video_height
+    fps = settings.video_fps
+    gguf_file = getattr(settings, "cuda_video_gguf", DEFAULT_GGUF_FILE)
+    gguf_repo = getattr(settings, "cuda_video_gguf_repo", DEFAULT_GGUF_REPO)
+    conf_repo = getattr(settings, "cuda_conf_repo", DEFAULT_CONF_REPO)
+
+    print(f"视频后端：CUDA / {gguf_file}  {width}x{height} @{fps}fps", flush=True)
+
+    # 文本编码器只加载一次（编码多个 prompt 后释放）
+    prompts: list[tuple[str, callable]] = []
+    encoded_cache: dict[str, any] = {}
+
+    failures = 0
+    for shot in story["shots"]:
+        if wanted and str(shot["id"]) not in wanted:
+            continue
+        dest = clips / f"{shot['id']}.mp4"
+        if dest.exists() and not force:
+            print(f"已有镜头 {shot['id']}，跳过", flush=True)
+            continue
+
+        image_path = artifacts_sub(out, "frames", f"{shot['id']}.png")
+        if not image_path.exists():
+            reuse = str(shot.get("reuse_frame") or "").strip()
+            if reuse:
+                image_path = artifacts_sub(out, "frames", f"{reuse}.png")
+        if not image_path.exists():
+            shot["video_error"] = "缺少静帧"
+            failures += 1
+            print(f"跳过 {shot['id']}：没有静帧", flush=True)
+            continue
+
+        line = str(shot.get("dialogue") or "").strip()
+        voice = artifacts_sub(out, "audio", "voice", f"{shot['id']}.wav")
+        audio_latents = None
+        audio_embeds = None
+        if line:
+            if not voice.exists():
+                shot["video_error"] = "有对白但缺少 wav，请先跑 audio"
+                failures += 1
+                print(f"跳过 {shot['id']}：缺配音", flush=True)
+                continue
+
+        frames = _shot_frames(shot, settings)
+        prompt = _prompt_cuda(shot)
+        seed = int(shot.get("seed") or random.Random(shot["id"]).randint(0, 2**31))
+
+        print(f"\n=== 镜头 {shot['id']}  {frames} 帧 / {frames/fps:.1f}s ===", flush=True)
+        try:
+            _generate_shot_cuda(
+                settings, shot, image_path, dest,
+                prompt=prompt, frames=frames, height=height, width=width, fps=fps,
+                seed=seed, has_audio=bool(line),
+                gguf_file=gguf_file, gguf_repo=gguf_repo, conf_repo=conf_repo,
+            )
+            print(f"  -> {dest}", flush=True)
+        except Exception as exc:  # noqa: BLE001 — 单镜失败不中断整片
+            shot["video_error"] = f"{type(exc).__name__}: {exc}"
+            failures += 1
+            print(f"  失败：{shot['video_error']}", flush=True)
+
+    if failures:
+        raise SystemExit(f"{failures} 个镜头失败，见分镜里的 video_error")
+    print(f"镜头在 {clips}", flush=True)
+
+
+def _prompt_cuda(shot: dict) -> str:
+    """与 mac 端 ``_prompt`` 同一套措辞（保证两端视觉提示词一致）。"""
+    motion = shot.get("motion_prompt") or "Slow cinematic push in"
+    if str(shot.get("dialogue") or "").strip():
+        return (
+            f"{motion}. The on-screen speaker talks naturally with clear lip sync to "
+            "the dialogue audio. Keep the face, hair and clothes identical to the first frame. "
+            "Stable identity, natural mouth motion, no morphing, no scene change."
+        )
+    return (
+        f"{motion}. Keep the face, hair and clothes identical to the first frame. "
+        "Stable identity, natural motion, no morphing, no scene change. "
+        "Ambient room tone only, no spoken words."
+    )
+
+
+def _shot_frames(shot: dict, settings) -> int:
+    """镜长：分镜里的 video_frames 优先，否则用配置默认。"""
+    from pipeline.util import snap_frames
+
+    raw = shot.get("video_frames")
+    if raw is None:
+        return int(settings.video_frames)
+    return snap_frames(int(raw))
+
+
+def _generate_shot_cuda(
+    settings, shot, image_path, dest, *, prompt, frames, height, width, fps, seed,
+    has_audio, gguf_file, gguf_repo, conf_repo,
+) -> None:
+    """单镜：文本编码 → 释放 → transformer 去噪 → 释放 → VAE 解码 → mp4。"""
+    import torch
+
+    from pipeline.backends import cuda_memory, cuda_textenc
+
+    lat_t, lat_h, lat_w = latent_dims(height, width, frames)
+    tokens = lat_t * lat_h * lat_w
+    audio_frames = 41
+
+    # ---- 段1：文本编码 ----
+    with cuda_memory.stage("videos/text_encoder", min_free_gib=7.0):
+        te, tok = cuda_textenc.load(quant="4bit")
+        embeds = cuda_textenc.encode_and_free(te, tok, prompt=prompt)
+        del te, tok
+    prompt_embeds = embeds.to("cuda", dtype=torch.bfloat16)
+    audio_embeds = prompt_embeds
+
+    # 初始 latent（I2V：静帧经 VAE 编码会更准，这里先用随机 latent 占位）
+    latents = torch.randn(1, tokens, 128, device="cuda", dtype=torch.bfloat16)
+    audio_latents = torch.randn(1, audio_frames, 128, device="cuda", dtype=torch.bfloat16)
+
+    # ---- 段2：transformer 去噪 → 释放 ----
+    steps = 8
+    with cuda_memory.stage("videos/transformer", min_free_gib=7.5):
+        model = load_transformer(gguf_file=gguf_file, gguf_repo=gguf_repo,
+                                 conf_repo=conf_repo)
+        timesteps = [1000.0 * (1 - i / steps) for i in range(steps)]
+        latents, audio_latents = denoise(
+            model, latents=latents, audio_latents=audio_latents,
+            prompt_embeds=prompt_embeds, audio_prompt_embeds=audio_embeds,
+            timesteps=timesteps, frames=frames, height=height, width=width,
+            audio_frames=audio_frames,
+        )
+        del model
+    del prompt_embeds, audio_embeds, audio_latents
+    cuda_memory.empty_cache()
+
+    # ---- 段3：VAE 解码 → mp4 ----
+    with cuda_memory.stage("videos/vae", min_free_gib=2.0):
+        vae = load_vae(conf_repo=conf_repo)
+        decoded = decode_video(vae, latents, frames=frames, height=height, width=width)
+        frames_arr = frames_to_uint8(decoded)
+        del vae, decoded
+    write_mp4(frames_arr, dest, fps=fps)

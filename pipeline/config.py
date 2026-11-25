@@ -129,4 +129,12 @@ class Settings:
             settings.ffmpeg = resolve(settings.ffmpeg)
         if not settings.ffprobe.is_absolute():
             settings.ffprobe = resolve(settings.ffprobe)
+        # Windows 上可执行文件带 .exe：配置里写 tools/ffmpeg，实际要找 tools/ffmpeg.exe
+        from pipeline.platform import IS_WIN
+
+        if IS_WIN:
+            if settings.ffmpeg.suffix.lower() != ".exe":
+                settings.ffmpeg = settings.ffmpeg.with_suffix(".exe")
+            if settings.ffprobe.suffix.lower() != ".exe":
+                settings.ffprobe = settings.ffprobe.with_suffix(".exe")
         return settings

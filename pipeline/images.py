@@ -290,6 +290,14 @@ def run_edit(story: dict, out: Path, settings: Settings, only: str | None, force
 
 def cmd_images(args: argparse.Namespace) -> None:
     settings = Settings.load(resolve(args.config) if args.config else None)
+    # ---- 后端分支：CUDA（Windows/Linux + NVIDIA）走 PyTorch/diffusers ----
+    from pipeline.backends import resolve_backend
+
+    if resolve_backend(settings.backend).is_cuda:
+        from pipeline.backends.cuda_images import cmd_images_cuda
+
+        cmd_images_cuda(settings, args)
+        return
     ensure_runtime_layout()
     out = resolve(args.out)
     story_path = out / "storyboard.json"

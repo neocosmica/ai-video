@@ -662,6 +662,13 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
 def cmd_audio(args: argparse.Namespace) -> None:
     """只做对白（TTS），并写齐各镜 video_frames（供视频服从、配乐定长）。"""
     settings = Settings.load(resolve(args.config) if args.config else None)
+    from pipeline.backends import resolve_backend
+
+    if resolve_backend(settings.backend).is_cuda:
+        from pipeline.backends.cuda_audio import cmd_audio_cuda
+
+        cmd_audio_cuda(settings, args)
+        return
     out = resolve(args.out)
     story_path = out / "storyboard.json"
     if not story_path.exists():
@@ -715,6 +722,13 @@ def _load_manifest(out: Path) -> dict:
 def cmd_music(args: argparse.Namespace) -> None:
     """按分镜 video_frames 计划片长生成配乐（不依赖 clips 已渲完）。"""
     settings = Settings.load(resolve(args.config) if args.config else None)
+    from pipeline.backends import resolve_backend
+
+    if resolve_backend(settings.backend).is_cuda:
+        from pipeline.backends.cuda_audio import cmd_music_cuda
+
+        cmd_music_cuda(settings, args)
+        return
     ensure_runtime_layout(musicgen_dir=settings.musicgen_dir)
     out = resolve(args.out)
     story_path = out / "storyboard.json"

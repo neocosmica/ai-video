@@ -380,7 +380,9 @@ def cmd_assemble(args: argparse.Namespace) -> None:
     subs = artifacts_sub(out, "subs.ass")
     _write_ass(subs, cues, settings)
     final = out / "final.mp4"
-    fonts = f"ass={WORK_DIRNAME}/subs.ass:fontsdir={FONT_DIR}"
+    from pipeline.platform import ass_filter
+
+    fonts = ass_filter(f"{WORK_DIRNAME}/subs.ass")
     work = artifacts_dir(out)
     work.mkdir(parents=True, exist_ok=True)
     _run(

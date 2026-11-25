@@ -468,6 +468,13 @@ def generate_storyboard_dict(
 
 def cmd_storyboard(args: argparse.Namespace) -> None:
     settings = Settings.load(resolve(args.config) if args.config else None)
+    from pipeline.backends import resolve_backend
+
+    if resolve_backend(settings.backend).is_cuda:
+        from pipeline.backends.cuda_storyboard import cmd_storyboard_cuda
+
+        cmd_storyboard_cuda(settings, args)
+        return
     if args.max_shots:
         settings.max_shots = args.max_shots
     out = resolve(args.out)

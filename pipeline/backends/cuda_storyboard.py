@@ -132,3 +132,89 @@ def extract_json(text: str) -> dict:
             if depth == 0:
                 return json.loads(cleaned[start:idx + 1])
     raise ValueError("JSON 对象未闭合（可能被 max_tokens 截断）")
+
+
+# ---------------------------------------------------------------------------
+# 命令入口（与 mac 端 pipeline/storyboard_gen.py 对齐）
+# ---------------------------------------------------------------------------
+
+
+def cmd_storyboard_cuda(settings, args) -> None:
+    """CUDA 分镜阶段：小说 → storyboard.json。
+
+    提示词与 mac 端 ``storyboard_gen`` 共用同一套结构约束（字段名、音色、
+    英文 motion/music prompt），保证两端产出的分镜可互相通用。
+    """
+    from pipeline.backends import cuda_memory
+    from pipeline.util import dump_json, load_json, resolve
+
+    out = resolve(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    story_path = out / "storyboard.json"
+    novel = resolve(args.novel) if getattr(args, "novel", None) else out / "novel.txt"
+    if not novel.exists():
+        raise SystemExit(f"找不到小说：{novel}")
+    if story_path.exists() and not getattr(args, "force", False):
+        print(f"已有分镜，跳过生成：{story_path}（要重写请加 --force）", flush=True)
+        return
+
+    novel_text = novel.read_text(encoding="utf-8")
+    if not novel_text.strip():
+        raise SystemExit(f"小说是空的：{novel}")
+
+    model_name = getattr(settings, "cuda_llm_model", DEFAULT_MODEL)
+    quant = getattr(settings, "cuda_llm_quant", DEFAULT_QUANT)
+    max_shots = int(getattr(args, "max_shots", 0) or settings.max_shots)
+    print(f"小说 → 分镜：{model_name}（{quant}）", flush=True)
+
+    schema = (
+        '{"title":"标题","style":"中文画面风格",'
+        '"music_prompt":"English BGM, no vocals",'
+        '"characters":[{"id":"pinyin","name":"中文名","gender":"female|male",'
+        '"voice":"Serena|Vivian|Dylan|Uncle_Fu|Eric","appearance":"年龄性别发型衣服"}],'
+        '"shots":[{"id":"s001","characters":["id"],"location":"地点",'
+        '"image_prompt":"中文画面，勿写对白字","motion_prompt":"English camera only",'
+        '"speaker":"说话人中文名或空","dialogue":"原文对白，没有就空",'
+        '"emotion":"calm|warm|sad|tense|surprised"}]}'
+    )
+    system = "你是专业短剧分镜师，只输出 JSON，不输出任何其他文字。"
+    user = (
+        f"把下面小说改编成竖屏短剧分镜。只输出 JSON，不要任何分析或解释。\n\n"
+        f"结构（严格遵守字段名）：\n{schema}\n\n"
+        f"要求：{max_shots} 个镜头以内；motion_prompt 与 music_prompt 必须是英文；"
+        f"dialogue 必须逐字抄原文引号内台词；不要输出思考过程。\n\n"
+        f"小说：\n<<<\n{novel_text}\n>>>"
+    )
+
+    with cuda_memory.stage("storyboard", min_free_gib=3.0):
+        model, tokenizer = load_model(model=model_name, quant=quant)
+        last_err = None
+        data = None
+        for attempt in range(2):
+            temp = settings.llm_temperature if attempt == 0 else 0.2
+            raw = chat(
+                model, tokenizer, system=system, user=user,
+                max_new_tokens=int(settings.llm_max_tokens), temperature=temp,
+            )
+            print(f"  生成 {len(raw)} 字符（尝试 {attempt+1}）", flush=True)
+            try:
+                data = extract_json(raw)
+                if not isinstance(data.get("shots"), list) or not data["shots"]:
+                    raise ValueError("JSON 缺少 shots")
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                data = None
+                print(f"  解析失败：{exc}", flush=True)
+        del model, tokenizer
+    cuda_memory.empty_cache()
+
+    if data is None:
+        raise SystemExit(f"分镜生成失败：{last_err}")
+
+    data.setdefault("title", novel.stem)
+    data["novel"] = ""
+    dump_json(story_path, data)
+    n_shots = len(data.get("shots") or [])
+    n_chars = len(data.get("characters") or [])
+    print(f"分镜已写入：{story_path}（{n_shots} 镜 / {n_chars} 角色）", flush=True)

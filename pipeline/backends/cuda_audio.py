@@ -223,3 +223,168 @@ def _main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_main())
+
+
+# ---------------------------------------------------------------------------
+# 命令入口（与 mac 端 pipeline/audio.py 对齐）
+# ---------------------------------------------------------------------------
+
+
+def cmd_audio_cuda(settings, args) -> None:
+    """CUDA 对白阶段：逐镜合成 wav，写 video_frames 与 manifest。
+
+    产物与 mac 端完全一致（``work/audio/voice/<id>.wav``、``manifest.json``），
+    因为后续 videos / music / assemble 不区分后端。
+    """
+    import json
+
+    from pipeline.audio import (
+        _character_map,
+        _speaker_profile,
+        _load_manifest,
+        _timeline_seconds,
+        apply_shot_timings,
+        assert_no_overflow,
+    )
+    from pipeline.voices import default_music_prompt
+    from pipeline.projects import artifacts_sub
+    from pipeline.util import dump_json, load_json, resolve
+
+    out = resolve(args.out)
+    story_path = out / "storyboard.json"
+    if not story_path.exists():
+        raise SystemExit(f"还没有分镜：{story_path}")
+    story = load_json(story_path)
+
+    voice_dir = artifacts_sub(out, "audio", "voice")
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    characters = _character_map(story)
+    force = getattr(args, "force", False)
+    only = getattr(args, "only", None)
+
+    wanted = None
+    if only:
+        wanted = {x.strip() for x in str(only).replace("，", ",").split(",") if x.strip()}
+
+    jobs = []
+    for shot in story["shots"]:
+        line = str(shot.get("dialogue") or "").strip()
+        if not line:
+            continue
+        if wanted is not None and str(shot["id"]) not in wanted:
+            continue
+        profile = _speaker_profile(shot, characters)
+        jobs.append((shot, voice_dir / f"{shot['id']}.wav", profile, line))
+
+    # --only 模式下其余镜头必须有配音，否则后面 videos 会静默跳过
+    if wanted is not None:
+        for shot in story["shots"]:
+            if str(shot["id"]) in wanted:
+                continue
+            if not str(shot.get("dialogue") or "").strip():
+                continue
+            if not (voice_dir / f"{shot['id']}.wav").exists():
+                raise SystemExit(
+                    f"--only 只重做 {sorted(wanted)}，但镜头 {shot['id']} 有对白却没有配音。"
+                    "请先不带 --only 完整跑一次 audio。"
+                )
+
+    pending = [(s, p, pr, t) for (s, p, pr, t) in jobs if force or not p.exists()]
+    print(f"对白：共 {len(jobs)} 条，待合成 {len(pending)} 条", flush=True)
+
+    tts_model = getattr(settings, "cuda_tts_model", DEFAULT_TTS_MODEL)
+    interpreter = tts_python()
+    print(f"TTS 环境：{interpreter}", flush=True)
+
+    voices_list = []
+    for shot, dest, profile, line in jobs:
+        if dest.exists() and not force:
+            print(f"  复用 {shot['id']}", flush=True)
+        else:
+            print(f"  合成 {shot['id']}（{profile.get('voice')}）…", flush=True)
+            synth_line(
+                text=line,
+                speaker=profile.get("voice") or "Serena",
+                language="Chinese",
+                model=tts_model,
+                out_wav=dest,
+                py=interpreter,
+            )
+            print(f"    -> {dest.name} {dest.stat().st_size//1024} KB", flush=True)
+        voices_list.append({"shot_id": shot["id"], "path": str(dest), **profile, "text": line})
+
+    apply_shot_timings(settings, story, out)
+    assert_no_overflow(settings, story)
+    timeline, source = _timeline_seconds(settings, out, story)
+
+    manifest = _load_manifest(out)
+    prompt = str(story.get("music_prompt") or
+                 default_music_prompt(story.get("style", ""), story.get("title", "")))
+    manifest.update({
+        "tts_model": tts_model,
+        "music_model": getattr(settings, "music_model", DEFAULT_MUSIC_MODEL),
+        "music_prompt": prompt,
+        "voices": voices_list,
+        "timeline_s": round(timeline, 2),
+        "timeline_source": source,
+    })
+    dump_json(artifacts_sub(out, "audio", "manifest.json"), manifest)
+
+    by_name = {c["name"]: c for c in story.get("characters") or []}
+    for item in voices_list:
+        char = by_name.get(item.get("speaker"))
+        if char:
+            char.setdefault("gender", item.get("gender"))
+            char.setdefault("voice", item.get("voice"))
+    if not story.get("music_prompt"):
+        story["music_prompt"] = prompt
+    dump_json(story_path, story)
+
+    timed = sum(1 for sh in story["shots"] if sh.get("audio_duration") is not None)
+    print(
+        f"对白就绪：{len(voices_list)} 条（{timed} 镜写入 video_frames），"
+        f"计划片长 {manifest['timeline_s']}s（{source}）",
+        flush=True,
+    )
+
+
+def cmd_music_cuda(settings, args) -> None:
+    """CUDA 配乐阶段：按 video_frames 计划片长生成 wav。"""
+    from pipeline.audio import _load_manifest, _estimate_timeline
+    from pipeline.backends import cuda_memory
+    from pipeline.voices import default_music_prompt
+    from pipeline.projects import artifacts_sub
+    from pipeline.util import load_json, resolve
+
+    out = resolve(args.out)
+    story_path = out / "storyboard.json"
+    if not story_path.exists():
+        raise SystemExit(f"还没有分镜：{story_path}")
+    story = load_json(story_path)
+
+    music_dir = artifacts_sub(out, "audio", "music")
+    music_dir.mkdir(parents=True, exist_ok=True)
+    dest = music_dir / "bgm.wav"
+    force = getattr(args, "force", False)
+    if dest.exists() and not force:
+        print(f"已有配乐：{dest}（要重做请加 --force）", flush=True)
+        return
+
+    manifest = _load_manifest(out)
+    prompt = str(story.get("music_prompt") or manifest.get("music_prompt") or
+                 default_music_prompt(story.get("style", ""), story.get("title", "")))
+    timeline = _estimate_timeline(settings, out, story)
+    wanted = min(timeline, float(getattr(settings, "music_max_seconds", 180.0)))
+    print(f"配乐约 {wanted:.0f}s：{prompt}", flush=True)
+
+    with cuda_memory.stage("music", min_free_gib=2.0):
+        model, processor = load_music_model(
+            model=getattr(settings, "music_model", DEFAULT_MUSIC_MODEL)
+        )
+        generate_music(
+            model, processor, prompt=prompt, seconds=wanted,
+            seed=story.get("music_seed"), out_wav=dest,
+        )
+        del model, processor
+
+    print(f"配乐已写入：{dest}", flush=True)

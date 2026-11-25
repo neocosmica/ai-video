@@ -230,6 +230,19 @@ def subtitle_font_name() -> str:
     return "Noto Sans CJK SC"
 
 
+def ass_filter(ass_rel: str) -> str:
+    """构造 ffmpeg 的 ASS 字幕滤镜串。
+
+    **Windows 上不能带 ``fontsdir``**：盘符里的冒号（``C:\``）会被 ffmpeg 的
+    滤镜解析器当分隔符，三种常见转义（原样 / 正斜杠 / ``\:``）实测全部报
+    ``Error parsing a filter description``；去掉 ``fontsdir`` 后 ffmpeg 会从
+    系统字体目录自动加载（实测 rc=0）。macOS/Linux 路径没有冒号，保持原写法。
+    """
+    if IS_WIN:
+        return f"ass={ass_rel}"
+    return f"ass={ass_rel}:fontsdir={font_dir()}"
+
+
 # ---------------------------------------------------------------------------
 # 用户目录
 # ---------------------------------------------------------------------------

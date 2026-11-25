@@ -240,6 +240,14 @@ def _wait_memory_headroom(min_free_pct: float = 25.0, timeout_s: float = 90.0) -
 
 def cmd_videos(args: argparse.Namespace) -> None:
     settings = Settings.load(resolve(args.config) if args.config else None)
+    # ---- 后端分支：CUDA（Windows/Linux + NVIDIA）走 diffusers + GGUF ----
+    from pipeline.backends import resolve_backend
+
+    if resolve_backend(settings.backend).is_cuda:
+        from pipeline.backends.cuda_video import cmd_videos_cuda
+
+        cmd_videos_cuda(settings, args)
+        return
     if not settings.ltx_dir.exists():
         raise SystemExit(f"还没有视频模型代码：{settings.ltx_dir}。请先运行 scripts/setup.sh")
     ensure_runtime_layout(ltx_dir=settings.ltx_dir)
