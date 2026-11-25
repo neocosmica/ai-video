@@ -303,6 +303,29 @@ Mac/Linux 保留原 `fontsdir` 行为。
 
 已重写为官方 LTX2 I2V 步进逻辑；正在最后复测画面质量。**阶段验收以抽帧为真实画面为准，不能只以 rc=0 认定完成。**
 
+## 7.1 网页控制台端到端验收（目标 c，已通过）
+
+在开发机上用网页 API 走完整流程（脚本 `docs/win-cuda/probes/t95_web_two_round.py`）：
+
+```
+round 1: plan(storyboard) -> queue/add -> queue/start   => storyboard.json
+round 2: plan(final)=13 项前置后置 -> queue/add -> start => final.mp4
+```
+
+实测结果：
+- 两轮任务状态均为 **success**
+- 队列 13 项：2 肖像 + 3 静帧 + 3 配音 + 3 片段 + 配乐 + 成片
+- 产出 `final.mp4`：**4.12 秒 / 99 帧 / 384x640@24fps / h264+aac**
+- 抽帧确认画面真实（雨夜便利店、人物、中文字幕正确叠加）
+
+网页侧为 Windows 做的改动（`pipeline/web.py`）：多阶段串跑不再用 `/bin/bash -c`，
+Windows 改由当前解释器顺序启动子进程，仍打印 `== stage ==` 供进度解析器识别；
+POSIX 行为保持不变（实测 `build_pipeline_cmd` / `build_artifact_groups_cmd` 仍返回 bash 命令）。
+
+验收脚本踩过的三个 API 契约坑（已记录在脚本 docstring）：
+`/api/state` 用 `tasks` 字段且需 `?project=`；分镜缺失时 `final` 闭包展不开，须先跑一轮分镜；
+`/api/queue/add` 入参是 `kind/id/posts` 而非 `items`。
+
 ## 8. 下一步
 
 1. 确认最新 I2V 修复的抽帧无网格伪影、首帧与输入静帧一致
