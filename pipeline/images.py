@@ -9,9 +9,15 @@ import sys
 
 from pipeline.config import Settings
 from pipeline.mirrors import apply_mirrors
+from pipeline.motion import (
+    end_edit_prompt,
+    end_frame_path,
+    start_frame_path,
+    wants_end_frame,
+)
 from pipeline.projects import artifacts_sub
 from pipeline.runtime import ensure_runtime_layout, preflight
-from pipeline.util import ROOT, load_json, resolve
+from pipeline.util import ROOT, load_json, resolve, stable_seed
 
 apply_mirrors()
 
@@ -91,7 +97,18 @@ def _use_step_bar(desc: str) -> None:
     _BAR_PATCHED = True
 
 
-def _generate(model, *, prompt: str, seed: int, width: int, height: int, steps: int, desc: str, images=None):
+def _generate(
+    model,
+    *,
+    prompt: str,
+    seed: int,
+    width: int,
+    height: int,
+    steps: int,
+    desc: str,
+    images=None,
+    image_strength: float | None = None,
+):
     kwargs = {
         "seed": seed,
         "prompt": prompt,
@@ -102,15 +119,25 @@ def _generate(model, *, prompt: str, seed: int, width: int, height: int, steps: 
     }
     if images:
         kwargs["image_paths"] = images
+    if image_strength is not None:
+        kwargs["image_strength"] = image_strength
     _use_step_bar(desc)
     try:
         return model.generate_image(**kwargs)
     except TypeError:
         kwargs.pop("guidance", None)
+        if image_strength is not None:
+            kwargs.pop("image_strength", None)
         if images:
             kwargs.pop("image_paths", None)
             kwargs["image_paths"] = images
-        return model.generate_image(**kwargs)
+            if image_strength is not None:
+                kwargs["image_strength"] = image_strength
+        try:
+            return model.generate_image(**kwargs)
+        except TypeError:
+            kwargs.pop("image_strength", None)
+            return model.generate_image(**kwargs)
 
 
 def _portrait_prompt(char: dict, style: str) -> str:
@@ -319,6 +346,69 @@ def run_edit(story: dict, out: Path, settings: Settings, only: str | None, force
         )
 
 
+def _shots_needing_end_frame(story: dict, only: str | None) -> list[dict]:
+    return [s for s in _selected(story["shots"], only) if wants_end_frame(s)]
+
+
+def _end_frame_stale(start: Path, end: Path) -> bool:
+    if not end.exists():
+        return True
+    try:
+        return start.stat().st_mtime > end.stat().st_mtime + 0.01
+    except OSError:
+        return True
+
+
+def run_end_frames(story: dict, out: Path, settings: Settings, only: str | None, force: bool) -> None:
+    """用 Klein Edit 把首帧改成终点姿势，写出 frames/<id>_end.png。"""
+    frames = artifacts_sub(out, "frames")
+    portraits = artifacts_sub(out, "characters")
+    pending = []
+    for shot in _shots_needing_end_frame(story, only):
+        start = start_frame_path(frames, shot)
+        end = end_frame_path(frames, shot)
+        if not start.exists():
+            print(f"跳过尾帧 {shot['id']}：还没有首帧 {start.name}")
+            continue
+        if end.exists() and not force and not _end_frame_stale(start, end):
+            continue
+        cast = _cast_of(shot, story.get("characters") or [])
+        refs: list[Path] = [start]
+        for char in cast:
+            ref = portraits / f"{char['id']}.png"
+            if ref.exists():
+                refs.append(ref)
+        pending.append((shot, start, end, cast, refs))
+    if not pending:
+        print("没有需要生成的尾帧。")
+        return
+    cls, config, weights = _load_class("edit")
+    print(f"加载尾帧编辑模型 {weights}")
+    model = cls(model_config=config, quantize=None, model_path=weights)
+    for shot, start, end, cast, refs in pending:
+        # Flux2KleinEdit：首帧经 image_paths 做参考 token 条件；不要传 image_strength。
+        # Edit 路径 latent 仍是纯噪声，strength 只会抬高 init_time_step、少跑去噪步（曾从 4 步砍成 2 步）。
+        print(
+            f"尾帧 {shot['id']} <- {start.name}（参考 {len(refs)} 张："
+            + "、".join(p.name for p in refs)
+            + "）"
+        )
+        seed = int(shot["seed"]) ^ stable_seed("end", shot["id"], str(shot.get("end_image_prompt") or ""))
+        image = _generate(
+            model,
+            prompt=end_edit_prompt(shot, story, cast),
+            seed=seed & 0x7FFFFFFF,
+            width=settings.image_width,
+            height=settings.image_height,
+            steps=settings.image_steps,
+            desc=f"尾帧 {shot['id']}",
+            images=refs,
+        )
+        _save_image(image, end)
+    del model
+    gc.collect()
+
+
 def cmd_images(args: argparse.Namespace) -> None:
     settings = Settings.load(resolve(args.config) if args.config else None)
     ensure_runtime_layout()
@@ -329,18 +419,34 @@ def cmd_images(args: argparse.Namespace) -> None:
     story = load_json(story_path)
     characters = getattr(args, "characters", None)
     phase = os.environ.get("NOVEL_IMAGE_PHASE", "t2i")
-    if phase != "edit":
-        # 只在第一阶段做硬预检；edit 是同进程 exec 续跑，不必再卡一次
+    if phase == "t2i":
+        # 只在第一阶段做硬预检；edit / end 是同进程 exec 续跑，不必再卡一次
         preflight(timeout_s=120.0, soft=False)
         needs_edit = run_t2i(
             story, out, settings, args.only, args.force, characters=characters
         )
-        if needs_edit:
+        # 仅补肖像时不要顺带跑全片尾帧
+        portrait_only = bool(characters) and not args.only
+        needs_end = (not portrait_only) and bool(_shots_needing_end_frame(story, args.only))
+        if needs_edit or needs_end:
             env = os.environ.copy()
-            env["NOVEL_IMAGE_PHASE"] = "edit"
+            env["NOVEL_IMAGE_PHASE"] = "edit" if needs_edit else "end"
             env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             os.execve(sys.executable, [sys.executable, "-m", "pipeline", *sys.argv[1:]], env)
         print(f"静帧在 {artifacts_sub(out, 'frames')}")
         return
-    run_edit(story, out, settings, args.only, args.force)
-    print(f"静帧在 {artifacts_sub(out, 'frames')}")
+    if phase == "edit":
+        run_edit(story, out, settings, args.only, args.force)
+        # 角色首帧刚生成完，同一次 images 里接着做尾帧（再 exec 一次卸模型）
+        if _shots_needing_end_frame(story, args.only):
+            env = os.environ.copy()
+            env["NOVEL_IMAGE_PHASE"] = "end"
+            env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            os.execve(sys.executable, [sys.executable, "-m", "pipeline", *sys.argv[1:]], env)
+        print(f"静帧在 {artifacts_sub(out, 'frames')}")
+        return
+    if phase == "end":
+        run_end_frames(story, out, settings, args.only, args.force)
+        print(f"静帧在 {artifacts_sub(out, 'frames')}")
+        return
+    raise SystemExit(f"未知 NOVEL_IMAGE_PHASE={phase!r}")

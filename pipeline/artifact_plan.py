@@ -240,6 +240,64 @@ def direct_post(story: dict, kind: str, nid: str = "") -> list[tuple[str, str]]:
     raise ValueError(f"未知产物类型：{kind}")
 
 
+def _clips_covered_for_final(
+    out: str | Path,
+    story: dict,
+    *,
+    target_kind: str,
+    target_id: str,
+    post_nodes: list[tuple[str, str]],
+) -> set[str]:
+    """本次目标 + 默认会跑的 clip 后置 + 磁盘已有视频 → 成片能覆盖到的镜头。"""
+    shots = _shot_map(story)
+    covered = {sid for sid in shots if _exists(out, "clip", sid)}
+    if target_kind == "clip" and target_id:
+        covered.add(target_id)
+    for pk, pid in post_nodes:
+        if pk == "clip" and pid:
+            covered.add(pid)
+    return covered
+
+
+def final_post_suggestion(
+    out: str | Path,
+    story: dict,
+    *,
+    target_kind: str,
+    target_id: str,
+    post_nodes: list[tuple[str, str]],
+) -> tuple[bool, str]:
+    """单镜重跑时，成片是否该默认勾选。
+
+    成片要齐全部镜头视频（有 music_prompt 时还要配乐）。缺别的镜时默认勾上，
+    对话框只显示「视频 s003 + 成片」，看起来能跑、实际会失败或偷偷拉全片重渲。
+    """
+    shots = _shot_map(story)
+    if not shots:
+        return False, "分镜里还没有镜头"
+    covered = _clips_covered_for_final(
+        out,
+        story,
+        target_kind=target_kind,
+        target_id=target_id,
+        post_nodes=post_nodes,
+    )
+    missing = [sid for sid in shots if sid not in covered]
+    if missing:
+        shown = "、".join(missing[:6])
+        more = f" 等 {len(missing)} 镜" if len(missing) > 6 else ""
+        return False, f"成片需要全部镜头视频，还缺 {shown}{more}"
+    if str(story.get("music_prompt") or "").strip():
+        music_coming = (
+            target_kind == "music"
+            or any(pk == "music" for pk, _ in post_nodes)
+            or _exists(out, "music")
+        )
+        if not music_coming:
+            return False, "成片还缺配乐（分镜写了 music_prompt）"
+    return True, ""
+
+
 def _reachable(
     story: dict,
     out: str | Path,
@@ -415,16 +473,37 @@ def plan_rerun(out: str | Path, *, kind: str, id: str = "") -> dict:
             }
         )
 
-    # 从小说生成分镜会牵出整条后置链，默认不勾；其他目标的后置默认全勾
+    # 从小说生成分镜会牵出整条后置链，默认不勾且不可选（须先单独跑分镜）。
+    # 成片：条件不齐时禁用勾选（勾上必然缺镜/缺配乐，或会误拉全片重渲）。
     suggest_posts = kind != "storyboard"
+    final_ok, final_hint = final_post_suggestion(
+        out,
+        story,
+        target_kind=kind,
+        target_id=nid,
+        post_nodes=post_nodes,
+    )
     posts = []
     for pk, pid in post_nodes:
+        suggested = suggest_posts
+        enabled = suggest_posts
+        hint = ""
+        if kind == "storyboard":
+            enabled = False
+            hint = "请先只生成分镜，完成后再单独添加后置产物"
+        elif pk == "final":
+            suggested = suggest_posts and final_ok
+            enabled = suggested
+            if not enabled:
+                hint = final_hint or "成片条件未齐，不能勾选"
         posts.append(
             {
                 "kind": pk,
                 "id": pid,
                 "label": node_label(story, pk, pid),
-                "suggested": suggest_posts,
+                "suggested": suggested,
+                "enabled": enabled,
+                "hint": hint,
                 "path": str(artifact_path(out, pk, pid)),
             }
         )
@@ -719,6 +798,19 @@ def selftest_web_edges() -> None:
         assert ("voice", "s001", "missing") in clip
         assert ("portrait", "lin", "missing") in clip
         assert ("storyboard", "", "ready") in clip
+        # 其它镜还没视频：成片可列后置，但默认不勾
+        clip_plan = plan_rerun(film, kind="clip", id="s001")
+        final_post = next(p for p in clip_plan["posts"] if p["kind"] == "final")
+        assert final_post["suggested"] is False
+        assert final_post.get("enabled") is False
+        assert "还缺" in (final_post.get("hint") or "")
+        blocked = add_from_plan(
+            film,
+            kind="clip",
+            id="s001",
+            posts=[{"kind": "final", "id": ""}],
+        )
+        assert not blocked["ok"] and "还缺" in (blocked.get("error") or ""), blocked
         silent = pre(plan_rerun(film, kind="clip", id="s002"))
         assert ("frame", "s002", "missing") in silent
         assert not any(item[0] == "voice" for item in silent)
@@ -752,11 +844,27 @@ def selftest_web_edges() -> None:
         voice.write_bytes(b"")
         assert ("voice", "s001", "missing") in pre(plan_rerun(film, kind="music"))
 
-        added = add_from_plan(film, kind="clip", id="s002")
+        # 其它镜视频齐了 + 有配乐 → 重跑一镜时成片才默认勾选
+        for sid in ("s001", "s002", "s001_p1"):
+            cpath = artifacts_sub(film, "clips", f"{sid}.mp4")
+            cpath.parent.mkdir(parents=True, exist_ok=True)
+            cpath.write_bytes(b"mp4")
+        bgm = artifacts_sub(film, "audio", "bgm.wav")
+        bgm.parent.mkdir(parents=True, exist_ok=True)
+        bgm.write_bytes(b"wav")
+        ready_final = next(
+            p for p in plan_rerun(film, kind="clip", id="s002")["posts"] if p["kind"] == "final"
+        )
+        assert ready_final["suggested"] is True
+        assert ready_final.get("enabled") is True
+        assert not (ready_final.get("hint") or "")
+
+        added = add_from_plan(film, kind="clip", id="s002", posts=[])
         assert added["ok"], added
         keys = {(it["kind"], it.get("id") or "") for it in added["queue"]["items"]}
         assert ("clip", "s002") in keys
         assert ("frame", "s002") not in keys  # 静帧已有，不入队
+        assert ("final", "") not in keys  # 未勾选成片，不入队
         assert not any(it[0] == "voice" for it in keys)
 
         exclusive = add_from_plan(

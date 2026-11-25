@@ -2063,6 +2063,12 @@ const EMOTION_OPTIONS = [
   "calm", "warm", "sad", "tense", "bitter", "nostalgic", "surprised", "whisper",
 ];
 
+const MOTION_LEVEL_OPTIONS = [
+  { value: "subtle", label: "subtle · 对白微动" },
+  { value: "normal", label: "normal · 轻运镜" },
+  { value: "dynamic", label: "dynamic · 动作/首尾帧" },
+];
+
 const VOICE_OPTIONS = {
   female: ["Serena", "Vivian"],
   male: ["Dylan", "Uncle_Fu", "Eric"],
@@ -2094,8 +2100,15 @@ function shotCharacters(shot) {
 function shotFieldRaw(shot, key) {
   if (!shot) return "";
   if (key === "characters") return shotCharacters(shot).join(",");
-  if (key === "seed") return shot.seed == null || shot.seed === "" ? "" : String(shot.seed);
+  if (key === "seed" || key === "video_frames") {
+    return shot[key] == null || shot[key] === "" ? "" : String(shot[key]);
+  }
   return shot[key] == null ? "" : String(shot[key]);
+}
+
+function motionLevelLabel(value) {
+  const hit = MOTION_LEVEL_OPTIONS.find((o) => o.value === value);
+  return hit ? hit.label : value;
 }
 
 function shotFieldShown(shot, key, placeholder) {
@@ -2109,6 +2122,7 @@ function shotFieldShown(shot, key, placeholder) {
   }
   const raw = shotFieldRaw(shot, key).trim();
   if (!raw) return { text: placeholder || "点击选择", empty: true };
+  if (key === "motion_level") return { text: motionLevelLabel(raw), empty: false };
   return { text: raw, empty: false };
 }
 
@@ -2119,6 +2133,11 @@ function fillSelectOptions(select, key, shot) {
   if (key === "emotion") {
     html += EMOTION_OPTIONS.map((e) =>
       `<option value="${esc(e)}"${e === cur ? " selected" : ""}>${esc(e)}</option>`
+    ).join("");
+  } else if (key === "motion_level") {
+    html = `<option value="">（自动推断）</option>`;
+    html += MOTION_LEVEL_OPTIONS.map((o) =>
+      `<option value="${esc(o.value)}"${o.value === cur ? " selected" : ""}>${esc(o.label)}</option>`
     ).join("");
   } else if (key === "speaker") {
     const names = [...new Set(storyCharacters().map(characterLabel).filter(Boolean))];
@@ -2308,33 +2327,50 @@ async function commitShotField(wrap, card, { cancel = false } = {}) {
       shot.characters = next;
       changed = true;
     }
-  } else if (key === "seed") {
+  } else if (key === "seed" || key === "video_frames") {
     const raw = String(input.value || "").trim();
     const n = raw === "" ? null : parseInt(raw, 10);
     const next = Number.isFinite(n) ? n : null;
-    const prev = shot.seed == null ? null : Number(shot.seed);
+    const prev = shot[key] == null ? null : Number(shot[key]);
     if (next !== prev) {
-      if (next == null) delete shot.seed;
-      else shot.seed = next;
+      if (next == null) delete shot[key];
+      else shot[key] = next;
+      changed = true;
+    }
+  } else if (key === "motion_level") {
+    const nextRaw = String(input.value || "").trim();
+    const prev = String(shot.motion_level || "").trim();
+    if (nextRaw !== prev) {
+      if (!nextRaw) delete shot.motion_level;
+      else shot.motion_level = nextRaw;
       changed = true;
     }
   } else {
     const nextRaw = input.value;
     const normalized = key === "dialogue" || key.endsWith("_prompt") ? nextRaw : nextRaw.trim();
     if ((shot[key] || "") !== normalized) {
-      shot[key] = normalized;
+      if (!normalized && (key === "end_image_prompt" || key === "location" || key === "speaker" || key === "emotion")) {
+        delete shot[key];
+      } else {
+        shot[key] = normalized;
+      }
       changed = true;
     }
   }
 
   const shown = shotFieldShown(shot, key, placeholder);
-  display.textContent = shown.text;
-  display.classList.toggle("empty", shown.empty);
+  if (key === "speaker" || key === "characters") {
+    fillShotInlineField(wrap, shot);
+  } else {
+    display.textContent = shown.text;
+    display.classList.toggle("empty", shown.empty);
+  }
   if (!changed) return;
 
   card.classList.add("dirty");
   markShotSbDirty();
   if (key === "dialogue") syncShotDialogueUi(card, shot);
+  if (key === "video_frames") fillShotDuration(card, shot);
 }
 
 function shotHasDialogue(shot) {
@@ -2420,7 +2456,7 @@ function fillShotCardFields(card, shot) {
   $$(".shot-iedit", card).forEach((wrap) => fillShotInlineField(wrap, shot));
 }
 
-const SHOT_CARD_UI = 9;
+const SHOT_CARD_UI = 10;
 
 function ensureShotCard(id) {
   let card = shotCards.get(id);
@@ -2439,7 +2475,7 @@ function ensureShotCard(id) {
       if (!more) return;
       const open = more.hidden;
       more.hidden = !open;
-      $(".shot-more-toggle", card).textContent = open ? "提示词 ▾" : "提示词 ▸";
+      $(".shot-more-toggle", card).textContent = open ? "全部字段 ▾" : "全部字段 ▸";
     });
     shotCards.set(id, card);
   }
@@ -2807,7 +2843,9 @@ async function addShotOnGrid() {
     characters: [],
     location: "",
     image_prompt: "",
+    end_image_prompt: "",
     motion_prompt: "",
+    motion_level: "normal",
     speaker: "",
     dialogue: "",
     emotion: "calm",
@@ -3772,6 +3810,13 @@ function bindShotPreviewHover(preview) {
   });
 }
 
+function stillCellHtml(entry, tag) {
+  if (!entry) {
+    return `<div class="shot-still-cell is-empty"><span class="shot-still-tag">${esc(tag)}</span><span class="shot-still-missing">未生成</span></div>`;
+  }
+  return `<div class="shot-still-cell"><span class="shot-still-tag">${esc(tag)}</span><img class="shot-still" src="${esc(mediaUrl(entry))}" loading="lazy" alt="${esc(tag)}"></div>`;
+}
+
 function renderShotCard(shot, media, reuseMap, progItems) {
   const card = ensureShotCard(shot.id);
   card._shot = shot;
@@ -3779,45 +3824,64 @@ function renderShotCard(shot, media, reuseMap, progItems) {
   fillShotDuration(card, shot);
   bindShotCardFields(card);
   fillShotCardFields(card, shot);
+  const frameStem = reuseMap[shot.id] || shot.id;
   const clipEntry = (media?.clips || []).find((c) => c.id === shot.id);
-  const frameEntry = (media?.frames || []).find((f) => f.id === (reuseMap[shot.id] || shot.id));
+  const frameEntry = (media?.frames || []).find((f) => f.id === frameStem);
+  const endEntry = (media?.frames || []).find((f) => f.id === `${frameStem}_end`);
   const voiceEntry = (media?.voices || []).find((v) => v.id === shot.id);
   const prog = progItems[shot.id];
   const failed = shot.video_error || (prog && prog.status === "failed");
+  const metaHint = $(".shot-meta-hint", card);
+  if (metaHint) {
+    const bits = [];
+    if (shot.reuse_frame) bits.push(`复用静帧 ${shot.reuse_frame}`);
+    if (shot.video_mode) bits.push(String(shot.video_mode));
+    if (shot.end_frame) bits.push("已记尾帧路径");
+    const text = bits.join(" · ");
+    metaHint.hidden = !text;
+    if (metaHint.textContent !== text) metaHint.textContent = text;
+  }
   const sigs = {
     clip: mediaSig(clipEntry),
     frame: mediaSig(frameEntry),
+    end: mediaSig(endEntry),
     voice: mediaSig(voiceEntry),
   };
   // 媒体文件没变就不动 DOM：这是「视频闪 / 加载圈不停」的修复点
   if (JSON.stringify(sigs) !== JSON.stringify(card._sig || {})) {
     card._sig = sigs;
     card._hasFrame = !!frameEntry;
+    card._hasEnd = !!endEntry;
     const preview = $(".shot-preview", card);
     const audioEl = $(".shot-audio", card);
-    if (clipEntry) {
-      const frameUrl = frameEntry ? mediaUrl(frameEntry) : "";
-      const poster = frameUrl ? ` poster="${esc(frameUrl)}"` : "";
-      const still = frameUrl
-        ? `<img class="shot-still" src="${esc(frameUrl)}" loading="lazy" alt="">`
+    const hasEnd = !!endEntry;
+    const frameUrl = frameEntry ? mediaUrl(frameEntry) : "";
+    const stillsHtml = hasEnd
+      ? `<div class="shot-stills has-end">${stillCellHtml(frameEntry, "首")}${stillCellHtml(endEntry, "尾")}</div>`
+      : frameEntry
+        ? `<div class="shot-stills"><img class="shot-still" src="${esc(frameUrl)}" loading="lazy" alt=""></div>`
         : "";
-      // 框以视频比例为准；默认静帧 cover 铺满，悬停播视频
+    if (clipEntry) {
+      const poster = frameUrl ? ` poster="${esc(frameUrl)}"` : "";
+      // 框以视频比例为准；默认静帧（可含尾帧并排），悬停播视频
       preview.classList.add("has-clip");
-      preview.classList.toggle("no-still", !frameUrl);
+      preview.classList.toggle("has-end", hasEnd);
+      preview.classList.toggle("no-still", !frameEntry && !endEntry);
       preview.classList.remove("is-hover");
       preview.style.removeProperty("aspect-ratio");
-      preview.innerHTML = `${still}<video class="shot-clip" src="${esc(mediaUrl(clipEntry))}"${poster} muted preload="metadata" controls playsinline></video>${
-        frameUrl ? `<span class="play-badge" aria-hidden="true">▶</span>` : ""
+      preview.innerHTML = `${stillsHtml}<video class="shot-clip" src="${esc(mediaUrl(clipEntry))}"${poster} muted preload="metadata" controls playsinline></video>${
+        frameEntry || endEntry ? `<span class="play-badge" aria-hidden="true">▶</span>` : ""
       }`;
       const clipEl = $(".shot-clip", preview);
       syncShotPreviewAspect(preview, clipEl);
       bindShotPreviewHover(preview);
-    } else if (frameEntry) {
+    } else if (frameEntry || endEntry) {
       preview.classList.remove("has-clip", "no-still", "is-hover");
+      preview.classList.toggle("has-end", hasEnd);
       preview.style.removeProperty("aspect-ratio");
-      preview.innerHTML = `<img class="shot-still" src="${esc(mediaUrl(frameEntry))}" loading="lazy" alt="">`;
+      preview.innerHTML = stillsHtml || `<div class="shot-stills has-end">${stillCellHtml(null, "首")}${stillCellHtml(endEntry, "尾")}</div>`;
     } else {
-      preview.classList.remove("has-clip", "no-still", "is-hover");
+      preview.classList.remove("has-clip", "has-end", "no-still", "is-hover");
       preview.style.removeProperty("aspect-ratio");
       preview.innerHTML = "";
     }
@@ -3837,10 +3901,17 @@ function renderShotCard(shot, media, reuseMap, progItems) {
   const statusEl = $(".shot-status", card);
   let statusText, statusCls;
   if (clipEntry) {
-    statusText = failed ? `视频失败：${shot.video_error || ""}` : "视频已生成";
+    statusText = failed ? `视频失败：${shot.video_error || ""}` : (endEntry ? "视频已生成（含尾帧）" : "视频已生成");
     statusCls = "shot-status " + (failed ? "bad" : "ok");
-  } else if (frameEntry) {
-    statusText = failed ? `视频失败：${shot.video_error || "见日志"}` : "静帧已生成" + (shot.dialogue ? "，视频待跑" : "（空镜）");
+  } else if (frameEntry || endEntry) {
+    const stillLabel = frameEntry && endEntry
+      ? "首帧+尾帧已生成"
+      : endEntry
+        ? "尾帧已生成，缺首帧"
+        : "静帧已生成";
+    statusText = failed
+      ? `视频失败：${shot.video_error || "见日志"}`
+      : stillLabel + (shot.dialogue ? "，视频待跑" : "（空镜）");
     statusCls = "shot-status " + (failed ? "bad" : "");
   } else {
     statusText = failed ? `失败：${shot.video_error || "见日志"}` : "静帧未生成";
@@ -3903,11 +3974,14 @@ function closeRerunDialog() {
   rerunPlan = null;
 }
 
-function rerunPostChecks() {
-  return $$("#rerun-posts input[type=checkbox]");
+function rerunPostChecks({ includeLocked = false } = {}) {
+  return $$("#rerun-posts input[type=checkbox]").filter(
+    (el) => includeLocked || !el.disabled
+  );
 }
 
 function syncRerunItemMeta(input) {
+  if (!input || input.disabled) return;
   const meta = input.closest(".rerun-item")?.querySelector(".ri-meta");
   if (!meta) return;
   const on = input.checked;
@@ -3947,18 +4021,35 @@ function setAllRerunPosts(on) {
 
 function renderRerunItem(node, { required = false, target = false, checked = false } = {}) {
   const id = `rerun-${node.kind}-${node.id || "x"}`;
-  const meta = target
-    ? `<div class="ri-meta">将重做</div>`
-    : required
-      ? `<div class="ri-meta ${node.status === "missing" ? "missing" : "ready"}">${
-          node.status === "missing" ? "缺失 · 将生成" : "已有 · 将跳过"
-        }</div>`
-      : `<div class="ri-meta stale">${checked ? "勾选 · 将重做" : "未勾选 · 将过时"}</div>`;
-  const disabled = required || target ? " disabled" : "";
+  const locked = !required && !target && node.enabled === false;
+  let metaHtml;
+  if (target) {
+    metaHtml = `<div class="ri-meta">将重做</div>`;
+  } else if (required) {
+    metaHtml = `<div class="ri-meta ${node.status === "missing" ? "missing" : "ready"}">${
+      node.status === "missing" ? "缺失 · 将生成" : "已有 · 将跳过"
+    }</div>`;
+  } else if (locked) {
+    metaHtml = `<div class="ri-meta stale">不可选 · 条件未齐</div>`;
+  } else if (checked) {
+    metaHtml = `<div class="ri-meta">勾选 · 将重做</div>`;
+  } else {
+    metaHtml = `<div class="ri-meta stale">未勾选 · 将过时</div>`;
+  }
+  const hint = node.hint && !required && !target
+    ? `<div class="ri-hint hint">${esc(node.hint)}</div>`
+    : "";
+  const disabled = required || target || locked ? " disabled" : "";
   const isChecked = required || target || checked ? " checked" : "";
-  return `<label class="rerun-item${required ? " required" : ""}${target ? " target" : ""}" for="${esc(id)}">
+  const cls = [
+    "rerun-item",
+    required ? "required" : "",
+    target ? "target" : "",
+    locked ? "locked" : "",
+  ].filter(Boolean).join(" ");
+  return `<label class="${cls}" for="${esc(id)}">
     <input type="checkbox" id="${esc(id)}" data-kind="${esc(node.kind)}" data-id="${esc(node.id || "")}"${isChecked}${disabled}>
-    <span><div>${esc(node.label || node.kind)}</div>${meta}</span>
+    <span><div>${esc(node.label || node.kind)}</div>${metaHtml}${hint}</span>
   </label>`;
 }
 
@@ -4012,7 +4103,7 @@ async function openRerunDialog(target) {
       postWrap.innerHTML = `<div class="rerun-empty">无后置影响</div>`;
     } else {
       postWrap.innerHTML = plan.posts
-        .map((p) => renderRerunItem(p, { checked: p.suggested !== false }))
+        .map((p) => renderRerunItem(p, { checked: p.suggested === true }))
         .join("");
       postWrap.querySelectorAll("input[type=checkbox]").forEach((input) => {
         input.addEventListener("change", () => {

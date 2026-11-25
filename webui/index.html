@@ -208,7 +208,12 @@
           <select class="shot-iedit-input" hidden></select>
         </div>
       </div>
-      <button type="button" class="ghost shot-more-toggle">提示词 ▸</button>
+      <div class="shot-iedit" data-f="motion_level" data-kind="select" data-placeholder="自动推断">
+        <div class="shot-field-label">运动档位</div>
+        <div class="shot-iedit-display"></div>
+        <select class="shot-iedit-input" hidden></select>
+      </div>
+      <button type="button" class="ghost shot-more-toggle">全部字段 ▸</button>
       <div class="shot-more" hidden>
         <div class="shot-iedit" data-f="location" data-placeholder="点击填写">
           <div class="shot-field-label">地点</div>
@@ -221,14 +226,24 @@
           <div class="shot-iedit-input shot-char-checks" hidden></div>
         </div>
         <div class="shot-iedit" data-f="image_prompt" data-multiline data-placeholder="点击填写">
-          <div class="shot-field-label">画面提示</div>
+          <div class="shot-field-label">画面提示 · 首帧</div>
           <div class="shot-iedit-display"></div>
-          <textarea class="shot-iedit-input" hidden rows="2" placeholder="景别、动作、光线…"></textarea>
+          <textarea class="shot-iedit-input" hidden rows="2" placeholder="景别、动作起点、光线…"></textarea>
+        </div>
+        <div class="shot-iedit" data-f="end_image_prompt" data-multiline data-placeholder="动作镜填写终点姿势">
+          <div class="shot-field-label">尾帧姿势 · 中文</div>
+          <div class="shot-iedit-display"></div>
+          <textarea class="shot-iedit-input" hidden rows="2" placeholder="同一机位，只写终点姿势；对白近景可空"></textarea>
         </div>
         <div class="shot-iedit" data-f="motion_prompt" data-multiline data-placeholder="点击填写（英文）">
           <div class="shot-field-label">运镜 · 英文</div>
           <div class="shot-iedit-display"></div>
           <textarea class="shot-iedit-input" hidden rows="2" placeholder="English camera / motion only"></textarea>
+        </div>
+        <div class="shot-iedit" data-f="video_frames" data-placeholder="空=跟配音/默认">
+          <div class="shot-field-label">视频帧数</div>
+          <div class="shot-iedit-display"></div>
+          <input class="shot-iedit-input" type="number" min="1" step="1" hidden placeholder="由配音写入；可手改">
         </div>
         <div class="shot-iedit" data-f="seed" data-placeholder="可选">
           <div class="seed-row">
@@ -238,6 +253,7 @@
           <div class="shot-iedit-display"></div>
           <input class="shot-iedit-input" type="number" hidden>
         </div>
+        <div class="shot-meta-hint mono hint" hidden></div>
       </div>
       <div class="shot-status"></div>
       <div class="shot-progress"><div class="shot-progress-fill"></div></div>

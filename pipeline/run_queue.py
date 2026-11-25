@@ -235,7 +235,10 @@ def add_from_plan(
         for raw in (posts or [])
     ):
         return {"ok": False, "error": STORYBOARD_EXCLUSIVE, "queue": load_queue(out)}
-    allowed = {(p["kind"], p.get("id") or "") for p in plan.get("posts") or []}
+    post_meta = {
+        (p["kind"], p.get("id") or ""): p for p in (plan.get("posts") or []) if isinstance(p, dict)
+    }
+    allowed = set(post_meta)
     selected_posts: list[dict] = []
     for raw in posts or []:
         if not isinstance(raw, dict):
@@ -244,10 +247,11 @@ def add_from_plan(
         pid = str(raw.get("id") or "").strip()
         if (pk, pid) not in allowed:
             continue
-        label = next(
-            (p["label"] for p in plan["posts"] if p["kind"] == pk and (p.get("id") or "") == pid),
-            pk,
-        )
+        meta = post_meta[(pk, pid)]
+        label = str(meta.get("label") or pk)
+        if meta.get("enabled") is False:
+            why = str(meta.get("hint") or "").strip() or f"{label}：当前不可选"
+            return {"ok": False, "error": why, "queue": load_queue(out)}
         selected_posts.append({"kind": pk, "id": pid, "label": label})
 
     to_add: list[dict] = []

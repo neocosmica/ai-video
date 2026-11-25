@@ -71,6 +71,8 @@ def _build_user_prompt(
 - gender：female/male；voice：女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric
 - emotion：calm/warm/sad/tense/bitter/nostalgic/surprised/whisper
 - image_prompt 中文景别/地点/动作/光线；人脸清晰；有对白时嘴微张
+- motion_level：subtle（对白近景）/ normal（空镜轻运镜）/ dynamic（明确肢体或镜头动作）
+- 动作镜必须写 end_image_prompt（中文终点姿势：同一机位，只写姿势变化）；对白近景可省略
 - 外貌只取原文可见特征；每镜换景别或角度
 {chunk_note}{quote_block}
 结构：
@@ -93,7 +95,9 @@ def _build_user_prompt(
       "characters": ["linwan"],
       "location": "地点",
       "image_prompt": "中景，……",
-      "motion_prompt": "Locked-off camera, subtle natural movement",
+      "motion_prompt": "He turns and walks two steps toward the door",
+      "motion_level": "dynamic",
+      "end_image_prompt": "同一机位，人物已转向门口、迈出一步后的站姿",
       "speaker": "",
       "dialogue": "",
       "emotion": "calm"
@@ -104,6 +108,7 @@ def _build_user_prompt(
       "location": "地点",
       "image_prompt": "中近景，嘴微张，面部清晰",
       "motion_prompt": "Locked-off camera, natural lip motion",
+      "motion_level": "subtle",
       "speaker": "林晚",
       "dialogue": "引号原句",
       "emotion": "surprised"
@@ -378,6 +383,12 @@ def _polish_fields(data: dict, *, title_fallback: str) -> dict:
             "dialogue": str(raw.get("dialogue") or "").strip(),
             "emotion": str(raw.get("emotion") or ("calm" if raw.get("dialogue") else "")).strip(),
         }
+        level = str(raw.get("motion_level") or "").strip().lower()
+        if level in {"subtle", "normal", "dynamic"}:
+            shot["motion_level"] = level
+        end_prompt = str(raw.get("end_image_prompt") or "").strip()
+        if end_prompt:
+            shot["end_image_prompt"] = end_prompt
         if not shot["emotion"]:
             shot.pop("emotion", None)
         shots_out.append(shot)

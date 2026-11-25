@@ -19,6 +19,12 @@ from pipeline.runtime import (
     main_venv_path,
     preflight,
 )
+from pipeline.motion import (
+    end_frame_path,
+    start_frame_path,
+    video_conditioning,
+    video_prompt,
+)
 from pipeline.progress import run_tee
 from pipeline.util import dump_json, load_json, resolve, snap, snap_frames
 
@@ -44,21 +50,6 @@ DEFAULT_GEMMA = "mlx-community/gemma-3-12b-it-4bit"
 # LTX distilled 两段 Denoising 的默认步数（8 步半分辨率 + 3 步精修）。
 # 交给进度条先定死分母，第一段跑完只到 8/11，不会先冲到 100% 再掉回来。
 DENOISE_PLAN = (8, 3)
-
-
-def _prompt(shot: dict, *, with_speech: bool) -> str:
-    motion = shot.get("motion_prompt") or "Slow cinematic push in"
-    if with_speech:
-        return (
-            f"{motion}. The on-screen speaker talks naturally with clear lip sync to the dialogue audio. "
-            "Keep the face, hair and clothes identical to the first frame. "
-            "Stable identity, natural mouth motion, no morphing, no scene change."
-        )
-    return (
-        f"{motion}. Keep the face, hair and clothes identical to the first frame. "
-        "Stable identity, natural motion, no morphing, no scene change. "
-        "Ambient room tone only, no spoken words."
-    )
 
 
 def _ensure_ltx_patches(settings: Settings) -> None:
@@ -134,9 +125,30 @@ def _command(
     model: str,
     gemma: str,
     audio: Path | None,
+    end_image: Path | None = None,
+    start_strength: float = 1.0,
+    start_binding: str = "replace",
+    end_strength: float | None = None,
+    end_binding: str | None = None,
+    denoise_plan: tuple[int, int] = DENOISE_PLAN,
 ) -> list[str]:
     # 直接跑 venv 里的入口，禁止每镜 `uv run`
     cli = str(ltx_cli(settings.ltx_dir))
+    image_args = [
+        "--image",
+        str(image),
+        "0",
+        f"{float(start_strength):.4g}",
+        start_binding,
+    ]
+    if end_image is not None and end_strength is not None and end_binding:
+        image_args += [
+            "--image",
+            str(end_image),
+            "last",
+            f"{float(end_strength):.4g}",
+            end_binding,
+        ]
     common_tail = [
         "--model",
         model,
@@ -144,11 +156,7 @@ def _command(
         gemma,
         "--prompt",
         prompt,
-        "--image",
-        str(image),
-        "0",
-        "1.0",
-        "replace",
+        *image_args,
         "-f",
         str(frames),
         "--frame-rate",
@@ -166,8 +174,8 @@ def _command(
         cmd = [cli, "a2v", "--distilled", "--audio", str(audio), *common_tail]
     else:
         cmd = [cli, "generate", "--distilled", *common_tail, "--no-audio"]
-    # 固定两段步数，让终端进度条的分母（8 + 3）与实际一致
-    cmd += ["--stage1-steps", str(DENOISE_PLAN[0]), "--stage2-steps", str(DENOISE_PLAN[1])]
+    # 步数与进度条分母一致（dynamic 可能是 12+4）
+    cmd += ["--stage1-steps", str(denoise_plan[0]), "--stage2-steps", str(denoise_plan[1])]
     if settings.video_low_ram:
         cmd.append("--low-ram")
     return cmd
@@ -250,11 +258,15 @@ def _run_once(
     gemma: str,
     offline: bool,
     audio: Path | None,
+    end_image: Path | None = None,
+    cond=None,
 ) -> int:
+    plan = cond or video_conditioning(shot, has_end_frame=bool(end_image and end_image.exists()))
+    use_end = bool(plan.use_end_frame and end_image is not None and end_image.exists())
     env = _video_env(settings, offline=offline)
     cmd = _command(
         settings,
-        prompt=_prompt(shot, with_speech=audio is not None),
+        prompt=video_prompt(shot, with_speech=audio is not None, cond=plan),
         image=image,
         output=output,
         seed=int(shot["seed"]),
@@ -264,15 +276,24 @@ def _run_once(
         model=model,
         gemma=gemma,
         audio=audio,
+        end_image=end_image if use_end else None,
+        start_strength=plan.start_strength,
+        start_binding=plan.start_binding,
+        end_strength=plan.end_strength if use_end else None,
+        end_binding=plan.end_binding if use_end else None,
+        denoise_plan=plan.denoise_plan,
     )
     mode = "a2v" if audio is not None else "i2v"
     shot_id = str(shot.get("id") or "shot")
+    tag = f"{shot_id} {mode} {plan.motion_level}"
+    if use_end:
+        tag += "+end"
     return run_tee(
         cmd,
         log=log,
         env=env,
-        progress=f"{shot_id} {mode}",
-        plan=DENOISE_PLAN,
+        progress=tag,
+        plan=plan.denoise_plan,
         desc="Denoising",
     )
 
@@ -334,15 +355,15 @@ def cmd_videos(args: argparse.Namespace) -> None:
     model = _resolve_model_arg(settings.video_model, label="LTX 权重")
     gemma = _resolve_model_arg(DEFAULT_GEMMA, label="Gemma")
     offline = Path(model).exists() and Path(gemma).exists()
+    frames_dir = artifacts_sub(out, "frames")
     for shot in story["shots"]:
         if wanted and shot["id"] not in wanted:
             continue
-        image = artifacts_sub(out, "frames", f"{shot['id']}.png")
-        if not image.exists():
-            # 台词被自动拆分出的子镜头没有自己的静帧，复用父镜头那张
-            reuse = str(shot.get("reuse_frame") or "").strip()
-            if reuse:
-                image = artifacts_sub(out, "frames", f"{reuse}.png")
+        image = start_frame_path(frames_dir, shot)
+        end_image = end_frame_path(frames_dir, shot)
+        if not end_image.exists():
+            end_image = None
+        cond = video_conditioning(shot, has_end_frame=bool(end_image))
         dest = clips / f"{shot['id']}.mp4"
         if dest.exists() and not args.force:
             print(f"已有镜头 {shot['id']}，跳过")
@@ -363,6 +384,18 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 print(f"跳过 {shot['id']}：有对白但没有配音 {voice}")
                 continue
             audio_for_ltx = _prepare_a2v_audio(out, shot, voice, frames, settings.video_fps)
+        if cond.use_end_frame and end_image:
+            print(
+                f"{shot['id']} {cond.motion_level}：首帧锁 {cond.start_strength:g}/{cond.start_binding}，"
+                f"尾帧 {end_image.name} {cond.end_strength:g}/{cond.end_binding}，"
+                f"步数 {cond.denoise_plan[0]}+{cond.denoise_plan[1]}"
+            )
+        else:
+            print(
+                f"{shot['id']} {cond.motion_level}：首帧锁 {cond.start_strength:g}/{cond.start_binding}，"
+                f"步数 {cond.denoise_plan[0]}+{cond.denoise_plan[1]}"
+            )
+
         def _fail_shot(log_path: Path, exit_code: int) -> None:
             nonlocal failures
             reason, is_env = _classify_video_failure(log_path, exit_code)
@@ -376,6 +409,14 @@ def cmd_videos(args: argparse.Namespace) -> None:
 
         _wait_memory_headroom()
         log_path = artifacts_sub(out, "logs", f"{shot['id']}.log")
+        run_kw = dict(
+            model=model,
+            gemma=gemma,
+            offline=offline,
+            audio=audio_for_ltx,
+            end_image=end_image,
+            cond=cond,
+        )
         code = _run_once(
             settings,
             shot,
@@ -385,10 +426,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
             width,
             height,
             frames,
-            model=model,
-            gemma=gemma,
-            offline=offline,
-            audio=audio_for_ltx,
+            **run_kw,
         )
         if code != 0 or not dest.exists():
             reason, is_env = _classify_video_failure(log_path, code)
@@ -412,10 +450,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 width,
                 height,
                 frames,
-                model=model,
-                gemma=gemma,
-                offline=offline,
-                audio=audio_for_ltx,
+                **run_kw,
             )
             if code != 0 or not dest.exists():
                 reason, is_env = _classify_video_failure(log_path, code)
@@ -430,6 +465,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 dest.unlink()
             if audio_for_ltx is not None and voice.exists():
                 audio_for_ltx = _prepare_a2v_audio(out, shot, voice, frames, settings.video_fps)
+                run_kw["audio"] = audio_for_ltx
             log_path = artifacts_sub(out, "logs", f"{shot['id']}-small.log")
             code = _run_once(
                 settings,
@@ -440,10 +476,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 width,
                 height,
                 frames,
-                model=model,
-                gemma=gemma,
-                offline=offline,
-                audio=audio_for_ltx,
+                **run_kw,
             )
         if code != 0 or not dest.exists():
             _fail_shot(log_path, code)
@@ -452,6 +485,9 @@ def cmd_videos(args: argparse.Namespace) -> None:
         shot["video"] = str(dest)
         shot["video_frames"] = frames
         shot["video_mode"] = "a2v" if audio_for_ltx is not None else "i2v"
+        shot["motion_level"] = cond.motion_level
+        if end_image is not None:
+            shot["end_frame"] = str(end_image)
     dump_json(story_path, story)
     if failures:
         raise SystemExit(f"有 {failures} 个镜头没有生成。成功的镜头仍会在合成阶段用上。")

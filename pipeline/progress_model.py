@@ -48,6 +48,7 @@ _DESC_MAP = (
     (re.compile(r"^(?P<id>\S+)\s+(?:a2v|i2v)$"), "videos:{id}"),
     (re.compile(r"^静帧\s+(?P<id>\S+)"), "images:{id}"),
     (re.compile(r"^空镜\s+(?P<id>\S+)"), "images:{id}"),
+    (re.compile(r"^尾帧\s+(?P<id>\S+)"), "images:{id}:end"),
     (re.compile(r"^肖像\s+(?P<name>.+)$"), "portrait:{name}"),
     (re.compile(r"^(?:配乐|MusicGen)$"), "music:bgm"),
     (re.compile(r"^Denoising$"), "videos:_denoise"),  # 原始段，靠 current 镜合并
@@ -57,6 +58,7 @@ _ITEM_START = (
     (re.compile(r"^角色参考图\s+(.+?)\s*->"), "portrait"),
     (re.compile(r"^空镜\s+(\S+)\s*->"), "images"),
     (re.compile(r"^分镜静帧\s+(\S+)"), "images"),
+    (re.compile(r"^尾帧\s+(\S+)\s*<-"), "images_end"),
     (re.compile(r"^对白\s+(\S+)\s*·"), "audio"),
     (re.compile(r"^整理\s+(\S+)"), "assemble"),
 )
@@ -176,11 +178,17 @@ def build_plan(
         by_stage["screenplay"].append(("screenplay:validate", "校验分镜"))
 
     if "images" in by_stage:
+        from pipeline.motion import wants_end_frame
+
+        shot_by_id = {str(s.get("id") or "").strip(): s for s in shots}
         for cid in portrait_ids:
             name = char_names.get(cid, cid)
             by_stage["images"].append((f"images:portrait:{cid}", f"肖像 {name}"))
         for sid in shot_ids:
             by_stage["images"].append((f"images:{sid}", f"静帧 {sid}"))
+            # 需要首尾帧时拆成两步：每步各自 4 去噪，避免「静帧 4/4」被误当成整镜完成
+            if wants_end_frame(shot_by_id.get(sid) or {}):
+                by_stage["images"].append((f"images:{sid}:end", f"尾帧 {sid}"))
         if not by_stage["images"]:
             by_stage["images"].append(("images:_phase", "静帧生成"))
 
@@ -673,6 +681,8 @@ class ProgressEngine:
                     step_id = self._resolve_portrait(name)
                 elif kind == "images":
                     step_id = f"images:{name}"
+                elif kind == "images_end":
+                    step_id = f"images:{name}:end"
                 elif kind == "audio":
                     step_id = f"audio:{name}"
                 elif kind == "assemble":
@@ -761,6 +771,10 @@ class ProgressEngine:
             elif sid.startswith("images:portrait:"):
                 cid = sid.split(":", 2)[-1]
                 done = cid in portraits
+            elif sid.startswith("images:") and sid.endswith(":end"):
+                # images:s001:end → frames/s001_end.png
+                shot_id = sid[len("images:") : -len(":end")]
+                done = f"{shot_id}_end" in frames
             elif sid.startswith("images:") and sid != "images:_phase":
                 done = sid.split(":", 1)[-1] in frames
             elif sid.startswith("audio:") and sid != "audio:_skip":

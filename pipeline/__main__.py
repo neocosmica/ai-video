@@ -192,6 +192,10 @@ def cmd_budget(args: argparse.Namespace) -> None:
 def cmd_selftest(_: argparse.Namespace) -> None:
     import tempfile
 
+    from pipeline.motion import selftest_motion
+
+    selftest_motion()
+
     parts = chunk_novel("第一段。\n\n第二段。")
     assert parts == ["第一段。\n\n第二段。"], parts
     long = "甲" * 1000 + "\n\n" + "乙" * 1000
@@ -718,6 +722,37 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     s002 = next(s for s in snap2["steps"] if s["id"] == "images:s002")
     assert s002["status"] == "running" and s002["pct"] >= 50.0
     assert snap2["overall_pct"] >= o_mid
+
+    # 双帧：首帧 + 尾帧各占一步，tqdm 4/4 只表示当前那张图的去噪
+    dual_story = {
+        "characters": [{"id": "c1", "name": "甲"}],
+        "shots": [
+            {
+                "id": "s001",
+                "dialogue": "",
+                "motion_level": "dynamic",
+                "end_image_prompt": "wide shot, character turned away",
+                "image_prompt": "close-up facing camera",
+            }
+        ],
+    }
+    dual_dir = Path(tempfile.mkdtemp(prefix="nv-dual-"))
+    (dual_dir / "storyboard.json").write_text(
+        json.dumps(dual_story, ensure_ascii=False), encoding="utf-8"
+    )
+    dual_plan = build_plan(dual_dir, stages=["images"])
+    dual_ids = [s["id"] for s in dual_plan]
+    assert "images:s001" in dual_ids and "images:s001:end" in dual_ids, dual_ids
+    eng_d = ProgressEngine(str(dual_dir), task_id="selftest-dual", stages=["images"])
+    eng_d.feed_line("分镜静帧 s001")
+    eng_d.feed_line("静帧 s001: 100%|████| 4/4 [00:40<00:00, 10s/it]")
+    eng_d.feed_line("尾帧 s001 <- s001.png（参考 1 张：首帧）")
+    eng_d.feed_line("尾帧 s001:  50%|████| 2/4 [00:20<00:20, 10s/it]")
+    snap_d = eng_d.snapshot()
+    end_step = next(s for s in snap_d["steps"] if s["id"] == "images:s001:end")
+    assert end_step["status"] == "running" and end_step["pct"] == 50.0, end_step
+    start_step = next(s for s in snap_d["steps"] if s["id"] == "images:s001")
+    assert start_step["status"] == "done" and start_step["pct"] == 100.0, start_step
 
     # 混音成片：整理切走后须激活 mux；成功收尾不得留下 pending 步却 overall 100%
     eng.feed_line("整理 s001")
