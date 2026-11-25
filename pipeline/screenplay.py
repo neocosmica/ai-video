@@ -51,7 +51,7 @@ SCHEMA_HINT = """分镜可由本机 LLM 从小说生成，也可手写/Agent 写
       "image_prompt": "中文画面：景别、地点、动作、光线，不要写对白字",
       "motion_prompt": "English camera/motion only",
       "motion_level": "subtle|normal|dynamic（可省略，会按对白/动作推断）",
-      "end_image_prompt": "动作镜终点姿势（中文，可省略；dynamic 时 images 会从首帧 edit 出尾帧）",
+      "end_image_prompt": "动作镜终点姿势（中文；同机位写手脚/门位移，勿写换景走进室内；可省略）",
       "speaker": "说话人中文名，没有就空",
       "dialogue": "对白，没有就空",
       "emotion": "calm|warm|sad|tense|bitter|nostalgic|surprised|whisper 或中文情绪"

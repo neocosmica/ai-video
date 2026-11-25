@@ -421,6 +421,17 @@ function projectFromQuery() {
   }
 }
 
+/** 切项目时同步地址栏，避免刷新仍按旧 ?project= 进错片 */
+function syncProjectQuery(name) {
+  try {
+    const url = new URL(location.href);
+    const next = String(name || "").trim();
+    if (next) url.searchParams.set("project", next);
+    else url.searchParams.delete("project");
+    history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  } catch {}
+}
+
 function findRunningProject() {
   return (state.projects || []).find((p) => (p.tasks || {}).running > 0) || null;
 }
@@ -580,6 +591,7 @@ async function openProject(name, path, { autoSelectRunning = true } = {}) {
   liveItemsSig = "";
   tasksSig = "";
   try { localStorage.setItem("nv_last_project", name); } catch {}
+  syncProjectQuery(name);
   $("#log").textContent = "";
   $("#project-picker").hidden = true;
   $("#shots-card").hidden = false;
@@ -637,6 +649,7 @@ function backToProjects() {
   state.shotSbMtime = null;
   clearShotSbDirty();
   try { localStorage.removeItem("nv_last_project"); } catch {}
+  syncProjectQuery("");
   if (state.polling) { clearInterval(state.polling); state.polling = null; }
   if (shotsTimer) { clearInterval(shotsTimer); shotsTimer = null; }
   $("#shots-card").hidden = true;
@@ -2371,6 +2384,11 @@ async function commitShotField(wrap, card, { cancel = false } = {}) {
   markShotSbDirty();
   if (key === "dialogue") syncShotDialogueUi(card, shot);
   if (key === "video_frames") fillShotDuration(card, shot);
+  if (key === "motion_level") {
+    syncShotEndFrameUi(card, shot);
+    // 立刻重建预览：dynamic 要出尾帧空占位，切回非 dynamic 则收掉
+    rebuildShotPreview(card, shot);
+  }
 }
 
 function shotHasDialogue(shot) {
@@ -3846,6 +3864,7 @@ function renderShotCard(shot, media, reuseMap, progItems) {
     frame: mediaSig(frameEntry),
     end: mediaSig(endEntry),
     voice: mediaSig(voiceEntry),
+    wantEnd: shotWantsEndFrame(shot),
   };
   // 媒体文件没变就不动 DOM：这是「视频闪 / 加载圈不停」的修复点
   if (JSON.stringify(sigs) !== JSON.stringify(card._sig || {})) {
@@ -3856,16 +3875,17 @@ function renderShotCard(shot, media, reuseMap, progItems) {
     const audioEl = $(".shot-audio", card);
     const hasEnd = !!endEntry;
     const frameUrl = frameEntry ? mediaUrl(frameEntry) : "";
-    const stillsHtml = hasEnd
+    const wantEndSlot = hasEnd || shotWantsEndFrame(shot);
+    const stillsHtml = wantEndSlot
       ? `<div class="shot-stills has-end">${stillCellHtml(frameEntry, "首")}${stillCellHtml(endEntry, "尾")}</div>`
       : frameEntry
         ? `<div class="shot-stills"><img class="shot-still" src="${esc(frameUrl)}" loading="lazy" alt=""></div>`
-        : "";
+        : `<div class="shot-stills"><div class="shot-still-cell is-empty"><span class="shot-still-missing">暂无静帧</span></div></div>`;
     if (clipEntry) {
       const poster = frameUrl ? ` poster="${esc(frameUrl)}"` : "";
       // 框以视频比例为准；默认静帧（可含尾帧并排），悬停播视频
       preview.classList.add("has-clip");
-      preview.classList.toggle("has-end", hasEnd);
+      preview.classList.toggle("has-end", wantEndSlot);
       preview.classList.toggle("no-still", !frameEntry && !endEntry);
       preview.classList.remove("is-hover");
       preview.style.removeProperty("aspect-ratio");
@@ -3877,13 +3897,16 @@ function renderShotCard(shot, media, reuseMap, progItems) {
       bindShotPreviewHover(preview);
     } else if (frameEntry || endEntry) {
       preview.classList.remove("has-clip", "no-still", "is-hover");
-      preview.classList.toggle("has-end", hasEnd);
+      preview.classList.toggle("has-end", wantEndSlot);
       preview.style.removeProperty("aspect-ratio");
-      preview.innerHTML = stillsHtml || `<div class="shot-stills has-end">${stillCellHtml(null, "首")}${stillCellHtml(endEntry, "尾")}</div>`;
+      preview.innerHTML = stillsHtml;
     } else {
-      preview.classList.remove("has-clip", "has-end", "no-still", "is-hover");
+      // 无媒体时也保留 9:16 灰底占位，避免卡片顶栏塌掉
+      preview.classList.remove("has-clip", "is-hover");
+      preview.classList.add("no-still");
+      preview.classList.toggle("has-end", wantEndSlot);
       preview.style.removeProperty("aspect-ratio");
-      preview.innerHTML = "";
+      preview.innerHTML = stillsHtml;
     }
     if (voiceEntry) {
       audioEl.innerHTML = `<div class="shot-audio-bar">
@@ -3947,8 +3970,12 @@ function renderShotCard(shot, media, reuseMap, progItems) {
     const actions = $(".shot-actions", card);
     const btnFrame = document.createElement("button");
     btnFrame.textContent = "↻ 静帧";
-    btnFrame.title = "单跑本镜静帧（先确认前置/后置）";
+    btnFrame.title = "单跑本镜首帧（先确认前置/后置；不含尾帧）";
     btnFrame.onclick = () => openRerunDialog({ kind: "frame", id: card._shot.id });
+    const btnEnd = document.createElement("button");
+    btnEnd.textContent = "↻ 尾帧";
+    btnEnd.title = "单跑本镜尾帧（先确认前置/后置；依赖首帧）";
+    btnEnd.onclick = () => openRerunDialog({ kind: "end_frame", id: card._shot.id });
     const btnVideo = document.createElement("button");
     btnVideo.textContent = "↻ 视频";
     btnVideo.title = "单跑本镜视频（先确认前置/后置）";
@@ -3957,13 +3984,50 @@ function renderShotCard(shot, media, reuseMap, progItems) {
     btnAudio.textContent = "↻ 配音";
     btnAudio.title = "单跑本镜对白（先确认前置/后置）";
     btnAudio.onclick = () => openRerunDialog({ kind: "voice", id: card._shot.id });
+    card._btnEnd = btnEnd;
     card._btnAudio = btnAudio;
     actions.appendChild(btnFrame);
+    actions.appendChild(btnEnd);
     actions.appendChild(btnVideo);
     actions.appendChild(btnAudio);
     $(".shot-del", card)?.addEventListener("click", () => deleteShotOnGrid(card._shot.id));
   }
+  syncShotEndFrameUi(card, shot);
   syncShotDialogueUi(card, shot);
+}
+
+/** 与 pipeline.motion.wants_end_frame 对齐：仅 dynamic 才显示尾帧字段/按钮 */
+function shotWantsEndFrame(shot) {
+  if (!shot || String(shot.reuse_frame || "").trim()) return false;
+  return String(shot.motion_level || "").trim().toLowerCase() === "dynamic";
+}
+
+function syncShotEndFrameUi(card, shot) {
+  const want = shotWantsEndFrame(shot);
+  if (card._btnEnd) card._btnEnd.hidden = !want;
+  const endWrap = $(".shot-iedit[data-f=end_image_prompt]", card);
+  if (endWrap) endWrap.hidden = !want;
+}
+
+/** 媒体未变但 motion_level 变了：清 _sig 强制重画首/尾格（含「尾 · 未生成」占位） */
+function rebuildShotPreview(card, shot) {
+  if (!card || !shot || !mediaCache) return;
+  card._sig = null;
+  const reuseMap = {};
+  for (const s of state.shotSb?.shots || []) {
+    if (s?.reuse_frame) reuseMap[s.id] = s.reuse_frame;
+  }
+  const job = state.tasks.find((t) => t.id === state.selectedTaskId);
+  const progItems = {};
+  if (job?.progress?.items) {
+    for (const it of job.progress.items) {
+      const raw = it.id || "";
+      if (!raw.startsWith("shot:")) continue;
+      const sid = raw.slice(5).split(/\s+/)[0];
+      if (sid) progItems[sid] = it;
+    }
+  }
+  renderShotCard(shot, mediaCache, reuseMap, progItems);
 }
 
 let rerunPlan = null;

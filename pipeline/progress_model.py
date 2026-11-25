@@ -136,14 +136,28 @@ def build_plan(
     *,
     only: str | None = None,
     characters: str | None = None,
+    image_parts: str | None = None,
 ) -> list[dict]:
     """按分镜生成完整步骤表；阶段权重均分到该阶段各原子步。
 
     ``only``：镜头级重跑时只列这些镜头。
     ``characters``：显式要跑的肖像 id；队列里有肖像时传入，避免被 only 滤掉。
     未传 ``characters`` 且带了 ``only`` 时不列肖像（单跑静帧复用已有头像）。
+    ``image_parts``：``start`` / ``end`` / ``both``（默认）。只跑尾帧时不要列首帧进度。
     """
-    selected = [s for s in (stages or STAGES) if s in STAGE_WEIGHTS]
+    parts = str(image_parts or "both").strip().lower()
+    if parts not in {"start", "end", "both"}:
+        parts = "both"
+    want_start = parts in {"start", "both"}
+    want_end = parts in {"end", "both"}
+
+    # 队列里首帧/尾帧会拆成两次 images 命令，stage_keys 可能重复；步骤表只建一份
+    selected: list[str] = []
+    seen_stages: set[str] = set()
+    for s in stages or STAGES:
+        if s in STAGE_WEIGHTS and s not in seen_stages:
+            selected.append(s)
+            seen_stages.add(s)
     if not selected:
         selected = list(STAGES)
     only_ids = _parse_only_ids(only)
@@ -185,9 +199,10 @@ def build_plan(
             name = char_names.get(cid, cid)
             by_stage["images"].append((f"images:portrait:{cid}", f"肖像 {name}"))
         for sid in shot_ids:
-            by_stage["images"].append((f"images:{sid}", f"静帧 {sid}"))
-            # 需要首尾帧时拆成两步：每步各自 4 去噪，避免「静帧 4/4」被误当成整镜完成
-            if wants_end_frame(shot_by_id.get(sid) or {}):
+            if want_start:
+                by_stage["images"].append((f"images:{sid}", f"静帧 {sid}"))
+            # 需要首尾帧时拆成两步；单跑尾帧只列尾帧，避免空着的首帧进度条
+            if want_end and wants_end_frame(shot_by_id.get(sid) or {}):
                 by_stage["images"].append((f"images:{sid}:end", f"尾帧 {sid}"))
         if not by_stage["images"]:
             by_stage["images"].append(("images:_phase", "静帧生成"))
@@ -254,13 +269,22 @@ class ProgressEngine:
         task_id: str = "",
         only: str | None = None,
         characters: str | None = None,
+        image_parts: str | None = None,
         on_update: Callable[[dict], None] | None = None,
     ) -> None:
         self.out = out
         self.task_id = task_id
         self.only = only
         self.characters = characters
-        self.stages = [s for s in (stages or list(STAGES)) if s in STAGE_WEIGHTS] or list(STAGES)
+        self.image_parts = str(image_parts or "both").strip().lower() or "both"
+        self.stages = []
+        seen_stages: set[str] = set()
+        for s in stages or list(STAGES):
+            if s in STAGE_WEIGHTS and s not in seen_stages:
+                self.stages.append(s)
+                seen_stages.add(s)
+        if not self.stages:
+            self.stages = list(STAGES)
         self.on_update = on_update
         self.lock = threading.Lock()
         self.seq = 0
@@ -284,7 +308,11 @@ class ProgressEngine:
     # -- plan --------------------------------------------------------------
     def _rebuild_plan(self) -> None:
         planned = build_plan(
-            self.out, self.stages, only=self.only, characters=self.characters
+            self.out,
+            self.stages,
+            only=self.only,
+            characters=self.characters,
+            image_parts=self.image_parts,
         )
         old = dict(self.steps)
         self.steps = {}

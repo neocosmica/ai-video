@@ -38,6 +38,7 @@ webui/server.pid
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.playwright-mcp/
 .cache/
 
 # Hugging Face / 模型权重（绝不入库；setup 仍走镜像下载到本机缓存）

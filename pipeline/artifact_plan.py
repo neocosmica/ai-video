@@ -13,11 +13,12 @@ from typing import Iterable
 from pipeline.projects import artifacts_sub
 from pipeline.util import resolve
 
-KINDS = ("storyboard", "portrait", "frame", "voice", "clip", "music", "final")
+KINDS = ("storyboard", "portrait", "frame", "end_frame", "voice", "clip", "music", "final")
 KIND_LABELS = {
     "storyboard": "分镜",
     "portrait": "肖像",
     "frame": "静帧",
+    "end_frame": "尾帧",
     "voice": "配音",
     "clip": "视频",
     "music": "配乐",
@@ -124,6 +125,21 @@ def _cast_ids(shot: dict | None) -> list[str]:
     return [str(x).strip() for x in ((shot or {}).get("characters") or []) if str(x).strip()]
 
 
+def _frame_owner_id(shot: dict | None, nid: str) -> str:
+    """静帧/尾帧文件 id：子镜头复用父镜。"""
+    return str((shot or {}).get("reuse_frame") or "").strip() or nid
+
+
+def _shot_wants_end(story: dict, nid: str) -> bool:
+    from pipeline.motion import wants_end_frame
+
+    shots = _shot_map(story)
+    shot = shots.get(nid)
+    owner_id = _frame_owner_id(shot, nid)
+    owner = shots.get(owner_id) or shot or {}
+    return wants_end_frame(owner)
+
+
 def artifact_path(out: str | Path, kind: str, nid: str = "") -> Path:
     base = resolve(out)
     if kind == "storyboard":
@@ -132,6 +148,8 @@ def artifact_path(out: str | Path, kind: str, nid: str = "") -> Path:
         return artifacts_sub(base, "characters", f"{nid}.png")
     if kind == "frame":
         return artifacts_sub(base, "frames", f"{nid}.png")
+    if kind == "end_frame":
+        return artifacts_sub(base, "frames", f"{nid}_end.png")
     if kind == "voice":
         return artifacts_sub(base, "audio", "voice", f"{nid}.wav")
     if kind == "clip":
@@ -151,7 +169,7 @@ def node_label(story: dict, kind: str, nid: str = "") -> str:
         ch = _char_map(story).get(nid) or {}
         name = str(ch.get("name") or nid).strip() or nid
         return f"{prefix} {name}"
-    if kind in {"frame", "voice", "clip"}:
+    if kind in {"frame", "end_frame", "voice", "clip"}:
         return f"{prefix} {nid}"
     return prefix
 
@@ -175,13 +193,22 @@ def direct_pre(story: dict, out: str | Path, kind: str, nid: str = "") -> list[t
         if not shot:
             return sb
         return sb + [("portrait", cid) for cid in _cast_ids(shot)]
+    if kind == "end_frame":
+        shot = shots.get(nid)
+        if not shot:
+            return sb
+        # 尾帧只依赖本镜首帧（文件 id）；肖像已由首帧链路保证
+        frame_id = _frame_owner_id(shot, nid)
+        return sb + [("frame", frame_id)]
     if kind == "voice":
         return sb
     if kind == "clip":
         shot = shots.get(nid)
         # 自动拆出来的子镜头没有自己的静帧，依赖父镜头那张
-        frame_id = str((shot or {}).get("reuse_frame") or "").strip() or nid
+        frame_id = _frame_owner_id(shot, nid)
         pre: list[tuple[str, str]] = sb + [("frame", frame_id)]
+        if _shot_wants_end(story, nid):
+            pre.append(("end_frame", frame_id))
         if _has_dialogue(shot):
             pre.append(("voice", nid))
         return pre
@@ -206,7 +233,15 @@ def direct_post(story: dict, kind: str, nid: str = "") -> list[tuple[str, str]]:
         for cid in _char_map(story):
             posts.append(("portrait", cid))
         for sid, shot in shots.items():
+            if str(shot.get("reuse_frame") or "").strip():
+                # 子镜头没有独立静帧/尾帧文件
+                if _has_dialogue(shot):
+                    posts.append(("voice", sid))
+                posts.append(("clip", sid))
+                continue
             posts.append(("frame", sid))
+            if _shot_wants_end(story, sid):
+                posts.append(("end_frame", sid))
             if _has_dialogue(shot):
                 posts.append(("voice", sid))
             posts.append(("clip", sid))
@@ -219,11 +254,25 @@ def direct_post(story: dict, kind: str, nid: str = "") -> list[tuple[str, str]]:
         return [
             ("frame", sid)
             for sid, shot in shots.items()
-            if nid in _cast_ids(shot)
+            if nid in _cast_ids(shot) and not str(shot.get("reuse_frame") or "").strip()
         ]
     if kind == "frame":
-        # 换静帧不影响计划片长 → 不牵动 music
-        return [("clip", nid)]
+        # 换首帧 → 建议重做尾帧（若需要）和视频；不影响计划片长 → 不牵动 music
+        posts = []
+        if _shot_wants_end(story, nid):
+            posts.append(("end_frame", nid))
+        posts.append(("clip", nid))
+        # 复用该静帧的子镜头视频也过时
+        for sid, shot in shots.items():
+            if str(shot.get("reuse_frame") or "").strip() == nid:
+                posts.append(("clip", sid))
+        return posts
+    if kind == "end_frame":
+        posts = [("clip", nid)]
+        for sid, shot in shots.items():
+            if str(shot.get("reuse_frame") or "").strip() == nid:
+                posts.append(("clip", sid))
+        return posts
     if kind == "voice":
         shot = shots.get(nid)
         if not _has_dialogue(shot):
@@ -374,13 +423,21 @@ def validate_target(story: dict, kind: str, nid: str = "", *, out: str | Path | 
                 return _need_storyboard_first(kind, nid)
             return f"分镜里没有角色 id「{nid}」"
         return None
-    if kind in {"frame", "voice", "clip"}:
+    if kind in {"frame", "end_frame", "voice", "clip"}:
         if not nid or nid not in shots:
             if out is not None and not on_disk:
                 return _need_storyboard_first(kind, nid)
             return f"分镜里没有镜头「{nid}」"
         if kind == "voice" and not _has_dialogue(shots.get(nid)):
             return f"镜头 {nid} 无对白，不能重跑配音"
+        if kind == "end_frame":
+            shot = shots.get(nid) or {}
+            if str(shot.get("reuse_frame") or "").strip():
+                return f"镜头 {nid} 复用静帧，不能单独生成尾帧"
+            if not _shot_wants_end(story, nid):
+                return f"镜头 {nid} 不需要尾帧（运动档位不是 dynamic）"
+        if kind == "frame" and str((shots.get(nid) or {}).get("reuse_frame") or "").strip():
+            return f"镜头 {nid} 复用静帧，请重跑父镜静帧"
         return None
     if kind in {"music", "final"}:
         # 镜头列表还未知时，不能把「生成分镜」和配乐/成片排进同一次：
@@ -590,9 +647,14 @@ def execution_groups(
     for p in posts:
         run_nodes.append({**p, "force": True})
 
-    # 按 kind 聚合
+    return _groups_from_kind_nodes(run_nodes)
+
+
+def _groups_from_kind_nodes(nodes: Iterable[dict]) -> list[dict]:
+    """把产物节点收成 CLI 阶段组；首帧与尾帧拆成两次 images。"""
     portraits: list[str] = []
     frames: list[str] = []
+    end_frames: list[str] = []
     voices: list[str] = []
     clips: list[str] = []
     want_storyboard = False
@@ -600,10 +662,11 @@ def execution_groups(
     want_final = False
     force_portraits = False
     force_frames = False
+    force_ends = False
     force_voices = False
     force_clips = False
 
-    for n in run_nodes:
+    for n in nodes:
         kind = n["kind"]
         nid = n.get("id") or ""
         force = bool(n.get("force"))
@@ -615,6 +678,9 @@ def execution_groups(
         elif kind == "frame":
             frames.append(nid)
             force_frames = force_frames or force
+        elif kind == "end_frame":
+            end_frames.append(nid)
+            force_ends = force_ends or force
         elif kind == "voice":
             voices.append(nid)
             force_voices = force_voices or force
@@ -636,10 +702,9 @@ def execution_groups(
         return out
 
     groups: list[dict] = []
-    portraits = uniq(portraits)
-    frames = uniq(frames)
-    voices = uniq(voices)
-    clips = uniq(clips)
+    portraits, frames, end_frames, voices, clips = map(
+        uniq, (portraits, frames, end_frames, voices, clips)
+    )
 
     if want_storyboard:
         groups.append({"stage": "storyboard", "force": True})
@@ -653,6 +718,17 @@ def execution_groups(
                 "force": force_portraits or force_frames,
                 "force_characters": force_portraits,
                 "force_frames": force_frames,
+                # 队列里首帧与尾帧分开；整包 produce 不走这里，仍会自动衔尾帧
+                "skip_end": True,
+            }
+        )
+    if end_frames:
+        groups.append(
+            {
+                "stage": "images",
+                "only": ",".join(end_frames),
+                "force": force_ends,
+                "end_only": True,
             }
         )
     if voices:
@@ -713,6 +789,7 @@ def selftest_web_edges() -> None:
                 "characters": ["lin"],
                 "image_prompt": "近景",
                 "motion_prompt": "Slow push in",
+                "motion_level": "subtle",
                 "dialogue": "你好",
                 "speaker": "林",
             },
@@ -721,6 +798,7 @@ def selftest_web_edges() -> None:
                 "characters": [],
                 "image_prompt": "空镜",
                 "motion_prompt": "Locked off",
+                "motion_level": "normal",
                 "dialogue": "",
             },
             {
@@ -729,8 +807,18 @@ def selftest_web_edges() -> None:
                 "reuse_frame": "s001",
                 "image_prompt": "近景",
                 "motion_prompt": "Locked off",
+                "motion_level": "subtle",
                 "dialogue": "后半",
                 "speaker": "林",
+            },
+            {
+                "id": "s003",
+                "characters": ["lin"],
+                "image_prompt": "中景推门",
+                "motion_prompt": "She pushes the door open",
+                "motion_level": "dynamic",
+                "end_image_prompt": "同一机位，门已推开半扇",
+                "dialogue": "",
             },
         ],
     }
@@ -814,15 +902,28 @@ def selftest_web_edges() -> None:
         silent = pre(plan_rerun(film, kind="clip", id="s002"))
         assert ("frame", "s002", "missing") in silent
         assert not any(item[0] == "voice" for item in silent)
+        assert not any(item[0] == "end_frame" for item in silent)
         child = pre(plan_rerun(film, kind="clip", id="s001_p1"))
         assert ("frame", "s001", "missing") in child
         assert ("voice", "s001_p1", "missing") in child
         assert not any(item[1] == "s001_p1" and item[0] == "frame" for item in child)
+        dyn = pre(plan_rerun(film, kind="clip", id="s003"))
+        assert ("frame", "s003", "missing") in dyn
+        assert ("end_frame", "s003", "missing") in dyn
+        end_plan = plan_rerun(film, kind="end_frame", id="s003")
+        assert end_plan["ok"], end_plan
+        assert ("frame", "s003", "missing") in pre(end_plan)
+        assert "不需要尾帧" in plan_rerun(film, kind="end_frame", id="s002")["error"]
+        assert "复用静帧" in plan_rerun(film, kind="end_frame", id="s001_p1")["error"]
+        frame_posts = {
+            (p["kind"], p.get("id") or "") for p in plan_rerun(film, kind="frame", id="s003")["posts"]
+        }
+        assert ("end_frame", "s003") in frame_posts and ("clip", "s003") in frame_posts
         assert "无对白" in plan_rerun(film, kind="voice", id="s002")["error"]
         assert "没有镜头" in plan_rerun(film, kind="clip", id="s999")["error"]
         assert "未知产物" in plan_rerun(film, kind="bogus")["error"]
         whole = pre(plan_rerun(film, kind="final"))
-        for sid in ("s001", "s002", "s001_p1"):
+        for sid in ("s001", "s002", "s001_p1", "s003"):
             assert ("clip", sid, "missing") in whole
         assert ("music", "", "missing") in whole
         assert ("voice", "s002", "missing") not in whole
@@ -845,7 +946,7 @@ def selftest_web_edges() -> None:
         assert ("voice", "s001", "missing") in pre(plan_rerun(film, kind="music"))
 
         # 其它镜视频齐了 + 有配乐 → 重跑一镜时成片才默认勾选
-        for sid in ("s001", "s002", "s001_p1"):
+        for sid in ("s001", "s002", "s001_p1", "s003"):
             cpath = artifacts_sub(film, "clips", f"{sid}.mp4")
             cpath.parent.mkdir(parents=True, exist_ok=True)
             cpath.write_bytes(b"mp4")

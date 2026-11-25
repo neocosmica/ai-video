@@ -142,14 +142,15 @@ class Job:
         status: str = "running",
         queue_clear: list[dict] | None = None,
         characters: str | None = None,
+        image_parts: str | None = None,
     ) -> None:
         self.id = task_id
         self.name = name
         self.novel = novel
         self.out = out
-        self.stages = stages
         self.only = only
         self.characters = characters
+        self.image_parts = str(image_parts or "both").strip().lower() or "both"
         self.cmd = list(cmd or [])
         self.log_path = log_path
         self.detail = detail
@@ -158,7 +159,14 @@ class Job:
         self.lock = threading.Lock()
         self.log: list[str] = []
         self.subscribers: list[queue.Queue] = []
-        self.stages = list(stages) or list(STAGES)
+        # 首帧+尾帧会排两次 images 命令；进度游标/步骤表只保留一个 images
+        uniq_stages: list[str] = []
+        seen_stages: set[str] = set()
+        for s in list(stages or []) or list(STAGES):
+            if s and s not in seen_stages:
+                uniq_stages.append(s)
+                seen_stages.add(s)
+        self.stages = uniq_stages or list(STAGES)
         self.stage_status: dict[str, str] = {s: "pending" for s in self.stages}
         if self.status == "running" and self.stages:
             self.stage_status[self.stages[0]] = "running"
@@ -170,6 +178,7 @@ class Job:
             task_id=task_id,
             only=only,
             characters=characters,
+            image_parts=self.image_parts,
         )
         self.tracker = _EngineTracker(self.engine)
         self.returncode: int | None = None
@@ -199,6 +208,7 @@ class Job:
             stages=stage_keys,
             only=snap.get("only"),
             characters=snap.get("characters"),
+            image_parts=snap.get("image_parts"),
             cmd=[str(x) for x in cmd],
             log_path=Path(snap.get("log_path") or ROOT / "output"),
             detail=str(snap.get("detail") or ""),
@@ -257,6 +267,7 @@ class Job:
                 "out": self.out,
                 "only": self.only,
                 "characters": getattr(self, "characters", None),
+                "image_parts": getattr(self, "image_parts", "both"),
                 "detail": self.detail,
                 "status": self.status,
                 "stages": stages,
@@ -462,7 +473,12 @@ class Job:
         try:
             # 新进度引擎，避免沿用已 finalize 的旧状态
             self.engine = ProgressEngine(
-                self.out, stages=list(self.stages), task_id=self.id, only=self.only
+                self.out,
+                stages=list(self.stages),
+                task_id=self.id,
+                only=self.only,
+                characters=getattr(self, "characters", None),
+                image_parts=getattr(self, "image_parts", "both"),
             )
             self.tracker = _EngineTracker(self.engine)
         except Exception:
@@ -1227,20 +1243,27 @@ class _AttachedJob(Job):
         stages = [s["key"] if isinstance(s, dict) else s for s in (snap.get("stages") or self.stages)]
         self.stages = [s for s in stages if s in STAGE_LABELS] or list(STAGES)
         characters = getattr(self, "characters", None)
-        if not characters:
+        image_parts = getattr(self, "image_parts", None) or "both"
+        if not characters or image_parts == "both":
             try:
-                from pipeline.run_queue import load_queue, queue_portrait_ids
+                from pipeline.run_queue import load_queue, queue_image_parts, queue_portrait_ids
 
-                characters = queue_portrait_ids(load_queue(self.out))
-                self.characters = characters
+                q = load_queue(self.out)
+                if not characters:
+                    characters = queue_portrait_ids(q)
+                    self.characters = characters
+                if image_parts == "both" and (q.get("items") or []):
+                    image_parts = queue_image_parts(q)
+                    self.image_parts = image_parts
             except Exception:
-                characters = None
+                pass
         self.engine = ProgressEngine(
             self.out,
             stages=list(self.stages),
             task_id=self.id,
             only=self.only,
             characters=characters,
+            image_parts=image_parts,
         )
         self.tracker = _EngineTracker(self.engine)
         self.refresh_from_disk()
@@ -1360,6 +1383,8 @@ def _single_stage_cmd(
     only: str | None = None,
     force: bool = False,
     characters: str | None = None,
+    end_only: bool = False,
+    skip_end: bool = False,
 ) -> list[str]:
     """单阶段命令；CLI 子命令一次只能一个，多阶段靠 run / bash && 串。"""
     cmd = [sys.executable, "-m", "pipeline", stage, "--out", str(out)]
@@ -1373,6 +1398,10 @@ def _single_stage_cmd(
         cmd += ["--only", str(only)]
     if characters and stage == "images":
         cmd += ["--characters", str(characters)]
+    if stage == "images" and end_only:
+        cmd.append("--end-only")
+    elif stage == "images" and skip_end:
+        cmd.append("--skip-end")
     if force:
         cmd.append("--force")
     return cmd
@@ -1401,6 +1430,8 @@ def build_artifact_groups_cmd(
                     only=g.get("only"),
                     force=bool(g.get("force")),
                     characters=",".join(chars) if chars else None,
+                    end_only=bool(g.get("end_only")),
+                    skip_end=bool(g.get("skip_end")),
                 )
             )
         )
@@ -2501,6 +2532,7 @@ class _Handler(BaseHTTPRequestHandler):
             build_groups_from_queue,
             expand_missing_prereqs,
             load_queue,
+            queue_image_parts,
             queue_only_shots,
             queue_portrait_ids,
             reset_statuses,
@@ -2553,6 +2585,7 @@ class _Handler(BaseHTTPRequestHandler):
         )
         only = queue_only_shots(queue)
         characters = queue_portrait_ids(queue)
+        image_parts = queue_image_parts(queue)
         n = len(queue["items"])
         labels = "、".join(it.get("label") or it["key"] for it in queue["items"][:4])
         if n > 4:
@@ -2565,6 +2598,7 @@ class _Handler(BaseHTTPRequestHandler):
             stages=stage_keys,
             only=only,
             characters=characters,
+            image_parts=image_parts,
             cmd=cmd,
             log_path=log_path,
             detail=labels,

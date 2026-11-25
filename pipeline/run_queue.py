@@ -173,6 +173,9 @@ def queue_key_for_step(step_id: str) -> str | None:
         return "storyboard:"
     if sid.startswith("images:portrait:"):
         return f"portrait:{sid.split(':', 2)[-1]}"
+    if sid.startswith("images:") and sid.endswith(":end"):
+        shot_id = sid[len("images:") : -len(":end")]
+        return f"end_frame:{shot_id}"
     if sid.startswith("images:") and not sid.startswith("images:_"):
         return f"frame:{sid.split(':', 1)[1]}"
     if sid.startswith("audio:") and not sid.startswith("audio:_"):
@@ -355,70 +358,9 @@ def annotate_removable(out: str | Path, queue: dict) -> dict:
 
 
 def _groups_from_nodes(nodes: Iterable[dict]) -> list[dict]:
-    portraits: list[str] = []
-    frames: list[str] = []
-    voices: list[str] = []
-    clips: list[str] = []
-    want_storyboard = False
-    want_music = False
-    want_final = False
-    force_portraits = force_frames = force_voices = force_clips = False
+    from pipeline.artifact_plan import _groups_from_kind_nodes
 
-    for n in nodes:
-        kind = n["kind"]
-        nid = n.get("id") or ""
-        force = bool(n.get("force"))
-        if kind == "storyboard":
-            want_storyboard = True
-        elif kind == "portrait":
-            portraits.append(nid)
-            force_portraits = force_portraits or force
-        elif kind == "frame":
-            frames.append(nid)
-            force_frames = force_frames or force
-        elif kind == "voice":
-            voices.append(nid)
-            force_voices = force_voices or force
-        elif kind == "clip":
-            clips.append(nid)
-            force_clips = force_clips or force
-        elif kind == "music":
-            want_music = True
-        elif kind == "final":
-            want_final = True
-
-    def uniq(xs: list[str]) -> list[str]:
-        seen: set[str] = set()
-        out: list[str] = []
-        for x in xs:
-            if x and x not in seen:
-                seen.add(x)
-                out.append(x)
-        return out
-
-    groups: list[dict] = []
-    portraits, frames, voices, clips = map(uniq, (portraits, frames, voices, clips))
-    if want_storyboard:
-        groups.append({"stage": "storyboard", "force": True})
-        groups.append({"stage": "screenplay", "force": True})
-    if portraits or frames:
-        groups.append(
-            {
-                "stage": "images",
-                "characters": portraits,
-                "only": ",".join(frames) if frames else None,
-                "force": force_portraits or force_frames,
-            }
-        )
-    if voices:
-        groups.append({"stage": "audio", "only": ",".join(voices), "force": force_voices})
-    if clips:
-        groups.append({"stage": "videos", "only": ",".join(clips), "force": force_clips})
-    if want_music:
-        groups.append({"stage": "music", "force": True})
-    if want_final:
-        groups.append({"stage": "assemble", "force": True})
-    return groups
+    return _groups_from_kind_nodes(nodes)
 
 
 def build_groups_from_queue(out: str | Path, queue: dict | None = None) -> list[dict]:
@@ -449,7 +391,7 @@ def queue_only_shots(queue: dict) -> str | None:
     """
     seen: list[str] = []
     for it in queue.get("items") or []:
-        if it.get("kind") in {"frame", "voice", "clip"} and it.get("id"):
+        if it.get("kind") in {"frame", "end_frame", "voice", "clip"} and it.get("id"):
             if it["id"] not in seen:
                 seen.append(it["id"])
     return ",".join(seen) if seen else None
@@ -463,3 +405,15 @@ def queue_portrait_ids(queue: dict) -> str | None:
             if it["id"] not in seen:
                 seen.append(it["id"])
     return ",".join(seen) if seen else None
+
+
+def queue_image_parts(queue: dict) -> str:
+    """进度步骤表：只跑尾帧时不要列首帧，只跑静帧时不要列尾帧。"""
+    kinds = {str(it.get("kind") or "") for it in queue.get("items") or []}
+    has_frame = "frame" in kinds
+    has_end = "end_frame" in kinds
+    if has_end and not has_frame:
+        return "end"
+    if has_frame and not has_end:
+        return "start"
+    return "both"

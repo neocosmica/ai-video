@@ -97,12 +97,13 @@ def infer_motion_level(shot: dict) -> str:
 
 
 def wants_end_frame(shot: dict) -> bool:
-    """是否应生成/使用尾帧（真尾帧，不是把首帧再贴一次）。"""
+    """是否应生成/使用尾帧（真尾帧，不是把首帧再贴一次）。
+
+    只认运动档位 dynamic；normal/subtle 即便写了 end_image_prompt 也不做尾帧。
+    """
     if str(shot.get("reuse_frame") or "").strip():
         # 子镜头复用父镜文件；尾帧也跟父 id，不单独生成
         return False
-    if str(shot.get("end_image_prompt") or "").strip():
-        return True
     return infer_motion_level(shot) == "dynamic"
 
 
@@ -113,31 +114,59 @@ def fallback_end_image_prompt(shot: dict) -> str:
         return explicit
     image = str(shot.get("image_prompt") or "").strip()
     motion = str(shot.get("motion_prompt") or "").strip()
-    if image and looks_dynamic(image):
-        return f"同一机位与光线，人物完成动作后的瞬间：{image}"
     if motion:
         return (
-            f"同一机位、同一光线与背景，仅人物姿势变为动作完成态。"
-            f"动作依据：{motion}"
+            f"同一机位、景别与光线，人物已完成该动作后的瞬间："
+            f"{motion}。手臂/躯干/道具位置必须与动作开始时明显不同"
         )
-    return "同一机位与光线，人物完成一个清晰可见的动作后的姿势，面部与服装不变"
+    if image and looks_dynamic(image):
+        return (
+            f"同一机位与光线，人物完成动作后的瞬间（姿势已变，不是动作开始态）：{image}"
+        )
+    return (
+        "同一机位与光线，人物完成一个清晰可见的动作后的姿势；"
+        "手臂或躯干相对动作开始时有明显位移，面部与服装不变"
+    )
 
 
-def end_edit_prompt(shot: dict, story: dict, cast: list[dict]) -> str:
+def end_edit_prompt(shot: dict, story: dict, cast: list[dict], *, stronger: bool = False) -> str:
+    """Klein Edit：以首帧为参考改出终点姿势。stronger=近复制重试时加强姿势差。"""
     end_desc = fallback_end_image_prompt(shot)
     style = story.get("style") or ""
     who = "；".join(f"{c['name']}：{c['appearance']}" for c in cast)
     parts = [
-        "第1张参考图是本镜首帧：必须保持同一构图、机位、景别、光线、背景和色调。",
-        "只改变人物姿势与肢体位置，完成下面的终点瞬间；不要换脸、换发型、换衣服、换场景。",
+        "第1张参考图是本镜首帧。",
+        "保持同一机位、景别、背景、光线、色调、脸、发型与服装。",
+        "必须改出终点姿势：手臂、躯干或道具相对参考图要有肉眼可辨的位移；禁止几乎原样复制参考姿势。",
         f"终点画面：{end_desc}。",
     ]
+    if stronger:
+        parts.append(
+            "上一版几乎没动姿势，这次加大动作幅度："
+            "门/手/身体至少有一项明显挪位，仍留在同一取景里，不要切到室内全景。"
+        )
     if cast:
-        parts.append(f"人物外观必须保持：{who}。若还有肖像参考，脸与发以肖像为准。")
+        parts.append(f"人物外观必须保持：{who}。")
     if style:
         parts.append(f"风格：{style}。")
     parts.append("不要文字，不要字幕，不要水印。")
     return "".join(parts)
+
+
+def frame_mae(a: Path, b: Path) -> float:
+    """两张 RGB 图的平均绝对差（0–255）。用于判断尾帧是否近复制首帧。"""
+    from PIL import Image, ImageChops, ImageStat
+
+    ia = Image.open(a).convert("RGB")
+    ib = Image.open(b).convert("RGB")
+    if ia.size != ib.size:
+        ib = ib.resize(ia.size, Image.Resampling.LANCZOS)
+    st = ImageStat.Stat(ImageChops.difference(ia, ib))
+    return float(sum(st.mean) / 3.0)
+
+
+# Klein Edit 4 步时常只改雨丝/噪点；低于此值视为姿势没拉开
+END_FRAME_MIN_MAE = 22.0
 
 
 @dataclass(frozen=True)
@@ -253,7 +282,8 @@ def selftest_motion() -> None:
 
     tagged = {"motion_level": "normal", "end_image_prompt": "手已举起", "dialogue": ""}
     assert infer_motion_level(tagged) == "normal"
-    assert wants_end_frame(tagged)
+    assert not wants_end_frame(tagged)
+    assert wants_end_frame({"motion_level": "dynamic", "end_image_prompt": "手已举起"})
 
     child = {**dyn, "id": "s003_p1", "reuse_frame": "s003"}
     assert not wants_end_frame(child)

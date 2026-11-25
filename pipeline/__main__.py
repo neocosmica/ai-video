@@ -946,6 +946,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(images)
     images.add_argument("--only", default=None, help="只做这些镜头，例如 s001,s002")
     images.add_argument(
+        "--end-only",
+        action="store_true",
+        help="只生成尾帧（frames/<id>_end.png），不跑首帧/肖像",
+    )
+    images.add_argument(
+        "--skip-end",
+        action="store_true",
+        help="只跑肖像/首帧，不自动衔尾帧（队列单跑静帧用）",
+    )
+    images.add_argument(
         "--characters",
         default=None,
         help="只（重）做这些角色肖像，例如 linwan,zhouyu；可与 --only 组合",

@@ -72,7 +72,7 @@ def _build_user_prompt(
 - emotion：calm/warm/sad/tense/bitter/nostalgic/surprised/whisper
 - image_prompt 中文景别/地点/动作/光线；人脸清晰；有对白时嘴微张
 - motion_level：subtle（对白近景）/ normal（空镜轻运镜）/ dynamic（明确肢体或镜头动作）
-- 动作镜必须写 end_image_prompt（中文终点姿势：同一机位，只写姿势变化）；对白近景可省略
+- 动作镜必须写 end_image_prompt：同一机位/景别，只写终点姿势差（门开到哪、手脚挪到哪）；禁止「已走进室内换景」；对白近景可省略
 - 外貌只取原文可见特征；每镜换景别或角度
 {chunk_note}{quote_block}
 结构：
@@ -97,7 +97,7 @@ def _build_user_prompt(
       "image_prompt": "中景，……",
       "motion_prompt": "He turns and walks two steps toward the door",
       "motion_level": "dynamic",
-      "end_image_prompt": "同一机位，人物已转向门口、迈出一步后的站姿",
+      "end_image_prompt": "同一机位，门已推开半扇，人物身体侧入门内半步，一手仍扶门框",
       "speaker": "",
       "dialogue": "",
       "emotion": "calm"

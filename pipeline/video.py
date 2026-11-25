@@ -385,10 +385,18 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 continue
             audio_for_ltx = _prepare_a2v_audio(out, shot, voice, frames, settings.video_fps)
         if cond.use_end_frame and end_image:
+            from pipeline.motion import END_FRAME_MIN_MAE, frame_mae
+
+            mae = frame_mae(image, end_image)
+            if mae < END_FRAME_MIN_MAE:
+                print(
+                    f"警告：{shot['id']} 首尾帧过近（mae={mae:.1f}<{END_FRAME_MIN_MAE:g}），"
+                    "双帧引导几乎拉不开动作；建议重跑尾帧或改 end_image_prompt"
+                )
             print(
                 f"{shot['id']} {cond.motion_level}：首帧锁 {cond.start_strength:g}/{cond.start_binding}，"
                 f"尾帧 {end_image.name} {cond.end_strength:g}/{cond.end_binding}，"
-                f"步数 {cond.denoise_plan[0]}+{cond.denoise_plan[1]}"
+                f"mae={mae:.1f}，步数 {cond.denoise_plan[0]}+{cond.denoise_plan[1]}"
             )
         else:
             print(

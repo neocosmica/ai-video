@@ -362,7 +362,6 @@ def _end_frame_stale(start: Path, end: Path) -> bool:
 def run_end_frames(story: dict, out: Path, settings: Settings, only: str | None, force: bool) -> None:
     """用 Klein Edit 把首帧改成终点姿势，写出 frames/<id>_end.png。"""
     frames = artifacts_sub(out, "frames")
-    portraits = artifacts_sub(out, "characters")
     pending = []
     for shot in _shots_needing_end_frame(story, only):
         start = start_frame_path(frames, shot)
@@ -373,25 +372,22 @@ def run_end_frames(story: dict, out: Path, settings: Settings, only: str | None,
         if end.exists() and not force and not _end_frame_stale(start, end):
             continue
         cast = _cast_of(shot, story.get("characters") or [])
-        refs: list[Path] = [start]
-        for char in cast:
-            ref = portraits / f"{char['id']}.png"
-            if ref.exists():
-                refs.append(ref)
-        pending.append((shot, start, end, cast, refs))
+        # 只拿首帧做 Edit；叠肖像容易把姿势一起锁死
+        pending.append((shot, start, end, cast, [start]))
     if not pending:
         print("没有需要生成的尾帧。")
         return
     cls, config, weights = _load_class("edit")
     print(f"加载尾帧编辑模型 {weights}")
     model = cls(model_config=config, quantize=None, model_path=weights)
+    # 尾帧要比首帧多几步去噪，否则 Edit 常只改雨丝/噪点、姿势几乎不动
+    end_steps = max(int(settings.image_steps), 8)
     for shot, start, end, cast, refs in pending:
         # Flux2KleinEdit：首帧经 image_paths 做参考 token 条件；不要传 image_strength。
-        # Edit 路径 latent 仍是纯噪声，strength 只会抬高 init_time_step、少跑去噪步（曾从 4 步砍成 2 步）。
         print(
             f"尾帧 {shot['id']} <- {start.name}（参考 {len(refs)} 张："
             + "、".join(p.name for p in refs)
-            + "）"
+            + f"；{end_steps} 步）"
         )
         seed = int(shot["seed"]) ^ stable_seed("end", shot["id"], str(shot.get("end_image_prompt") or ""))
         image = _generate(
@@ -400,7 +396,7 @@ def run_end_frames(story: dict, out: Path, settings: Settings, only: str | None,
             seed=seed & 0x7FFFFFFF,
             width=settings.image_width,
             height=settings.image_height,
-            steps=settings.image_steps,
+            steps=end_steps,
             desc=f"尾帧 {shot['id']}",
             images=refs,
         )
@@ -418,16 +414,27 @@ def cmd_images(args: argparse.Namespace) -> None:
         raise SystemExit(f"还没有分镜：{story_path}")
     story = load_json(story_path)
     characters = getattr(args, "characters", None)
+    end_only = bool(getattr(args, "end_only", False))
+    skip_end = bool(getattr(args, "skip_end", False))
+    if end_only and skip_end:
+        raise SystemExit("--end-only 与 --skip-end 不能同时用")
     phase = os.environ.get("NOVEL_IMAGE_PHASE", "t2i")
+    if end_only:
+        # 队列单跑尾帧：直接进 end，不跑肖像/首帧
+        phase = "end"
     if phase == "t2i":
         # 只在第一阶段做硬预检；edit / end 是同进程 exec 续跑，不必再卡一次
         preflight(timeout_s=120.0, soft=False)
         needs_edit = run_t2i(
             story, out, settings, args.only, args.force, characters=characters
         )
-        # 仅补肖像时不要顺带跑全片尾帧
+        # 仅补肖像时不要顺带跑全片尾帧；--skip-end 时留给独立尾帧任务
         portrait_only = bool(characters) and not args.only
-        needs_end = (not portrait_only) and bool(_shots_needing_end_frame(story, args.only))
+        needs_end = (
+            (not portrait_only)
+            and (not skip_end)
+            and bool(_shots_needing_end_frame(story, args.only))
+        )
         if needs_edit or needs_end:
             env = os.environ.copy()
             env["NOVEL_IMAGE_PHASE"] = "edit" if needs_edit else "end"
@@ -438,7 +445,7 @@ def cmd_images(args: argparse.Namespace) -> None:
     if phase == "edit":
         run_edit(story, out, settings, args.only, args.force)
         # 角色首帧刚生成完，同一次 images 里接着做尾帧（再 exec 一次卸模型）
-        if _shots_needing_end_frame(story, args.only):
+        if (not skip_end) and _shots_needing_end_frame(story, args.only):
             env = os.environ.copy()
             env["NOVEL_IMAGE_PHASE"] = "end"
             env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
@@ -446,6 +453,8 @@ def cmd_images(args: argparse.Namespace) -> None:
         print(f"静帧在 {artifacts_sub(out, 'frames')}")
         return
     if phase == "end":
+        if end_only:
+            preflight(timeout_s=120.0, soft=False)
         run_end_frames(story, out, settings, args.only, args.force)
         print(f"静帧在 {artifacts_sub(out, 'frames')}")
         return

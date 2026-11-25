@@ -1262,6 +1262,15 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   min-height: 120px;
   color: var(--muted);
   font-size: 11px;
+  flex-direction: column;
+  gap: 6px;
+  background: #12151c;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+.shot-stills.has-end .shot-still-cell.is-empty {
+  /* 并排时也撑满格，避免「缺尾帧」看起来像单图 */
+  min-height: 0;
+  height: 100%;
 }
 .shot-still-tag {
   position: absolute;
@@ -1277,9 +1286,16 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   pointer-events: none;
 }
 .shot-still-missing { opacity: 0.7; }
-/* 仅静帧：跟图片比例 */
+/* 仅静帧：有图跟图片比例；无图保持 9:16 灰底占位 */
 .shot-preview:not(.has-clip) {
   aspect-ratio: auto;
+}
+.shot-preview:not(.has-clip).no-still {
+  aspect-ratio: 9 / 16;
+}
+.shot-preview:not(.has-clip).no-still .shot-stills,
+.shot-preview:not(.has-clip).no-still .shot-still-cell {
+  height: 100%;
 }
 .shot-preview:not(.has-clip) .shot-still {
   width: 100%;
@@ -1289,6 +1305,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   vertical-align: top;
 }
 .shot-preview:not(.has-clip).has-end {
+  aspect-ratio: 9 / 8;
+}
+.shot-preview:not(.has-clip).has-end.no-still {
   aspect-ratio: 9 / 8;
 }
 .shot-preview:not(.has-clip).has-end .shot-still {
