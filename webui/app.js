@@ -163,6 +163,7 @@ async function refreshState() {
     const q = state.project ? `?project=${encodeURIComponent(state.project)}` : "";
     const data = await api(`/api/state${q}`);
     state.projects = data.projects || [];
+    state.activeRun = data.active_run || null;
     state.novels = data.novels || [];
     state.storyboards = data.storyboards || [];
     if (state.project) {
@@ -1045,13 +1046,16 @@ async function webDraftForPipeline() {
   }
   if (!state.shotSb) await loadShotSb(state.currentOut);
   const draft = { novel_text: novelValue() };
-  // 无分镜 / 空壳不传 storyboard_data，避免 materialize 写出假 storyboard.json
-  // 把「成片」依赖算成无前置
-  const missing = !!(state.shotSb?._missing || state.shotSbExists === false);
-  if (!missing && state.shotSb) {
+  if (state.shotSb) {
     const snap = snapshotShotSbFromUi();
     const shots = Array.isArray(snap.shots) ? snap.shots : [];
-    if (shots.some((s) => s && s.id) || state.shotSbDirty) {
+    const chars = Array.isArray(snap.characters) ? snap.characters : [];
+    const hasShot = shots.some((s) => s && String(s.id || "").trim());
+    const hasChar = chars.some((c) => c && String(c.id || "").trim());
+    const fileBacked = !state.shotSb._missing && state.shotSbExists !== false && !state.shotSb._corrupt;
+    // 纯空壳不传，避免写出假 storyboard.json，把成片依赖算成「没有镜头」。
+    // 手写了镜头/角色，或正在改已经落盘的分镜时要传，即使文件还没保存。
+    if (hasShot || hasChar || (fileBacked && state.shotSbDirty)) {
       draft.storyboard_data = snap;
     }
   }
@@ -1070,31 +1074,54 @@ function runningTask() {
   return (state.tasks || []).find((t) => t.status === "running") || null;
 }
 
+/** 停止请求已发出、旧进程还没退净：这期间不许再点启动，否则会和旧进程重叠。 */
+let stopInFlight = false;
+
+/** 有任务在跑，或停止还没落地：启动入口一律禁用。 */
+function startBlockedReason() {
+  if (stopInFlight) return "正在停止上一个任务，等它退净再启动";
+  // 全局唯一：别的项目在跑也算忙（后端同样跨项目拒绝）
+  if (state.activeRun?.running) {
+    const name = state.activeRun.project || state.activeRun.out || "另一个项目";
+    return `「${name}」正在生成，同时只允许一个任务`;
+  }
+  const running = runningTask();
+  if (running) return "有任务在跑，先停止";
+  return "";
+}
+
 function syncRunControls() {
   const n = queuedCount();
   const running = runningTask();
+  // 真没运行中的任务了，解锁（停止流程自己不清，避免刷新回来之前提前放行）
+  if (!running) stopInFlight = false;
+  const blocked = startBlockedReason();
   const countEl = $("#queue-count");
   if (countEl) countEl.textContent = n ? `（${n}）` : "";
   const btn = $("#start-btn");
   if (btn) {
-    btn.disabled = !!running || n === 0;
-    btn.title = running
-      ? "有任务在跑，先停止"
-      : n === 0
-        ? "先点上方 ↻ 加入待跑队列"
-        : `启动队列里 ${n} 项`;
+    btn.disabled = !!blocked || n === 0;
+    btn.title = blocked || (n === 0 ? "先点上方 ↻ 加入待跑队列" : `启动队列里 ${n} 项`);
   }
   const stopBtn = $("#task-stop");
   if (stopBtn) {
-    stopBtn.disabled = !running;
-    stopBtn.title = running ? "停止后台进程；待跑队列保留" : "当前没有在跑任务";
+    stopBtn.disabled = !(running || state.activeRun?.running);
+    stopBtn.title = running
+      ? "停止后台进程；待跑队列保留"
+      : state.activeRun?.running
+        ? "别的项目在跑：先停止那个任务"
+        : stopInFlight
+          ? "已在停止，等进程退净"
+          : "当前没有在跑任务";
   }
   const clearBtn = $("#queue-clear");
   if (clearBtn) clearBtn.disabled = n === 0 || !!running;
   const hint = $("#run-hint") || $(".run-hint");
   if (hint) {
     if (running) {
-      hint.textContent = `正在跑：${running.name || "管线"} · 可随时停止；停止后队列保留，进度归零`;
+      hint.textContent = stopInFlight
+        ? `正在停止：${running.name || "管线"} · 进程退净后即可再启动`
+        : `正在跑：${running.name || "管线"} · 可随时停止；停止后队列保留，进度归零`;
     } else if (n > 0) {
       hint.textContent = `待跑 ${n} 项 · 点启动开跑；上方 ↻ 可继续添加`;
     } else {
@@ -1207,8 +1234,10 @@ async function startTask() {
     toast("请先打开项目", true);
     return;
   }
-  if (runningTask()) {
-    toast("已有任务在跑，请先停止", true);
+  const blocked = startBlockedReason();
+  if (blocked) {
+    toast(blocked, true);
+    syncRunControls();
     return;
   }
   if (!queuedCount()) {
@@ -1785,25 +1814,16 @@ async function stopTask() {
     toast("请先打开项目", true);
     return;
   }
-  // 本地立刻：历史标中断；队列保持，状态改回待跑；进度清零
-  for (const job of state.tasks || []) {
-    if (job.status === "running") {
-      job.status = "interrupted";
-      job.error = "用户停止";
-      (job.stages || []).forEach((s) => {
-        if (s.status === "running") s.status = "failed";
-      });
-    }
-  }
+  // 后端会让任务保持「运行中」直到子进程真正退出（防止新旧进程重叠）；
+  // 这里不要乐观改成 interrupted，只锁住启动钮，等刷新回来的真实状态。
+  stopInFlight = true;
   if (state.queue?.items) {
     state.queue.items = state.queue.items.map((it) => ({ ...it, status: "pending" }));
   }
   runQueueSig = "";
-  showTaskDetailIdle();
   mediaCache = null;
   tasksSig = "";
   renderRunQueue();
-  renderTasks();
   syncRunControls();
   try {
     const res = await api("/api/task/stop", {
@@ -1826,6 +1846,9 @@ async function stopTask() {
     toast(`停止失败：${err.message}`, true);
     await refreshState();
     showTaskDetailIdle();
+    syncRunControls();
+  } finally {
+    stopInFlight = !runningTask();
     syncRunControls();
   }
 }
@@ -1957,7 +1980,13 @@ function scheduleAutoValidate() {
 
 function markShotSbDirty() {
   state.shotSbDirty = true;
-  if (state.shotSb) delete state.shotSb._missing;
+  if (state.shotSb) {
+    delete state.shotSb._missing;
+    const hasShot = (state.shotSb.shots || []).some((s) => s && s.id);
+    const hasChar = (state.shotSb.characters || []).some((c) => c && c.id);
+    // 用户开始手写镜头或角色后，界面不再当成「损坏文件的空壳」
+    if (hasShot || hasChar) delete state.shotSb._corrupt;
+  }
   const el = $("#shots-dirty");
   if (el) el.hidden = false;
   scheduleAutoValidate();
@@ -2115,9 +2144,24 @@ function miniAvatarHtml(ch) {
   const url = castAvatarUrl(person, { portraits: state.portraits || {} });
   const initial = esc(castInitial(person));
   if (url) {
-    return `<span class="shot-mini-avatar" aria-hidden="true"><img class="shot-mini-avatar-img" src="${esc(url)}" alt="" loading="lazy" onerror="const p=this.parentElement;const fb=p&&p.querySelector('.shot-mini-avatar-fb');this.remove();if(fb)fb.hidden=false"><span class="shot-mini-avatar-fb" hidden>${initial}</span></span>`;
+    // 不用 lazy：Safari 会在节点被换掉时卸掉图，几秒一刷新就闪一下
+    return `<span class="shot-mini-avatar" aria-hidden="true"><img class="shot-mini-avatar-img" src="${esc(url)}" alt="" decoding="sync" onerror="const p=this.parentElement;const fb=p&&p.querySelector('.shot-mini-avatar-fb');this.remove();if(fb)fb.hidden=false"><span class="shot-mini-avatar-fb" hidden>${initial}</span></span>`;
   }
   return `<span class="shot-mini-avatar" aria-hidden="true"><span class="shot-mini-avatar-fb">${initial}</span></span>`;
+}
+
+function shotPeopleSig(shot, key) {
+  const portraits = { portraits: state.portraits || {} };
+  if (key === "speaker") {
+    const name = shotFieldRaw(shot, "speaker").trim();
+    const ch = characterBySpeakerName(name) || { name };
+    return `s\0${name}\0${castAvatarUrl(ch, portraits)}`;
+  }
+  return shotCharacters(shot).map((id) => {
+    const ch = storyCharacters().find((c) => c.id === id) || { id, name: id };
+    const label = characterNameById(id) || id;
+    return `${id}\0${label}\0${castAvatarUrl(ch, portraits)}`;
+  }).join("\n");
 }
 
 function fillCharChecks(box, shot) {
@@ -2125,21 +2169,29 @@ function fillCharChecks(box, shot) {
   const selected = new Set(shotCharacters(shot));
   const chars = storyCharacters();
   if (!chars.length) {
+    if (box.dataset.sig === "empty") return;
+    box.dataset.sig = "empty";
     box.innerHTML = `<div class="hint">暂无角色，先在演职人员里添加</div>`;
     return;
   }
   const known = new Set();
+  const sigParts = [];
   let html = chars.map((ch) => {
     const id = ch.id || "";
     if (!id) return "";
     known.add(id);
     const label = characterLabel(ch) || id;
+    sigParts.push(`${id}:${selected.has(id) ? 1 : 0}:${label}:${castAvatarUrl(ch, { portraits: state.portraits || {} })}`);
     return `<label class="shot-char-check"><input type="checkbox" value="${esc(id)}"${selected.has(id) ? " checked" : ""}>${miniAvatarHtml(ch)}<span>${esc(label)}</span></label>`;
   }).join("");
   for (const id of selected) {
     if (known.has(id)) continue;
+    sigParts.push(`${id}:1:${id}:`);
     html += `<label class="shot-char-check"><input type="checkbox" value="${esc(id)}" checked>${miniAvatarHtml({ id, name: id })}<span>${esc(id)}</span></label>`;
   }
+  const sig = sigParts.join("|");
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
   box.innerHTML = html;
 }
 
@@ -2165,21 +2217,27 @@ function fillShotInlineField(wrap, shot) {
   else input.value = shotFieldRaw(shot, key);
   const shown = shotFieldShown(shot, key, placeholder);
   display.classList.toggle("empty", shown.empty);
-  if (!shown.empty && key === "speaker") {
-    const ch = characterBySpeakerName(shown.text) || { name: shown.text };
-    display.innerHTML = `${miniAvatarHtml(ch)}<span class="shot-mini-name">${esc(shown.text)}</span>`;
+  if (!shown.empty && (key === "speaker" || key === "characters")) {
+    const sig = shotPeopleSig(shot, key);
+    // 名单和头像地址没变就留着原来的 img，避免每 5 秒重载闪一下
+    if (display.dataset.people === sig && display.classList.contains("with-avatars")) return;
+    display.dataset.people = sig;
+    if (key === "speaker") {
+      const ch = characterBySpeakerName(shown.text) || { name: shown.text };
+      display.innerHTML = `${miniAvatarHtml(ch)}<span class="shot-mini-name">${esc(shown.text)}</span>`;
+    } else {
+      display.innerHTML = shotCharacters(shot).map((id) => {
+        const ch = storyCharacters().find((c) => c.id === id) || { id, name: id };
+        const label = characterNameById(id) || id;
+        return `<span class="shot-char-chip">${miniAvatarHtml(ch)}<span class="shot-mini-name">${esc(label)}</span></span>`;
+      }).join("");
+    }
     display.classList.add("with-avatars");
-  } else if (!shown.empty && key === "characters") {
-    display.innerHTML = shotCharacters(shot).map((id) => {
-      const ch = storyCharacters().find((c) => c.id === id) || { id, name: id };
-      const label = characterNameById(id) || id;
-      return `<span class="shot-char-chip">${miniAvatarHtml(ch)}<span class="shot-mini-name">${esc(label)}</span></span>`;
-    }).join("");
-    display.classList.add("with-avatars");
-  } else {
-    display.textContent = shown.text;
-    display.classList.remove("with-avatars");
+    return;
   }
+  if (display.dataset.people) delete display.dataset.people;
+  display.textContent = shown.text;
+  display.classList.remove("with-avatars");
 }
 
 function closeShotFieldOutside(wrap) {
@@ -2399,6 +2457,10 @@ function emptyStoryboardShell() {
   };
 }
 
+function corruptStoryboardHtml(message) {
+  return `<div class="shots-msg-title">分镜文件无法读取</div><p class="shots-msg-tip">${esc(message)}</p>`;
+}
+
 async function loadShotSb(out, { force = false } = {}) {
   const path = `${out}/storyboard.json`;
   // 未脏时默认跟文件走；force / 路径变了才跳过「同路径缓存」
@@ -2412,15 +2474,42 @@ async function loadShotSb(out, { force = false } = {}) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     });
-  } catch {
+  } catch (err) {
+    // 网络闪断：已打开的分镜留在界面上，不要清成空项目
+    if (state.shotSb && state.shotSbPath === path) return state.shotSb;
     data = { exists: false, storyboard: null, mtime: null };
+  }
+  if (data.error) {
+    const keep = !force && state.shotSb && state.shotSbPath === path && (
+      state.shotSbDirty || (state.shotSb.shots || []).some((s) => s && s.id)
+    );
+    if (keep) {
+      state.shotSb._corrupt = String(data.error);
+      setShotsMsg(corruptStoryboardHtml(data.error), { bad: true });
+      return state.shotSb;
+    }
+    state.shotSbPath = path;
+    state.currentStoryboard = path;
+    state.shotSbExists = false;
+    state.shotSbMtime = data.mtime == null ? null : Number(data.mtime);
+    state.shotSb = emptyStoryboardShell();
+    state.shotSb._corrupt = String(data.error);
+    clearShotSbDirty();
+    setShotsMsg(corruptStoryboardHtml(data.error), { bad: true });
+    if (!isTitleEditing()) setTitleDisplay(state.project || "");
+    if (!isStyleEditing()) setStyleDisplay("");
+    if (!isMusicEditing()) setMusicDisplay("");
+    setMusicSeedDisplay(null);
+    return state.shotSb;
   }
   const exists = !!data.exists && !!data.storyboard;
   const mtime = data.mtime == null ? null : Number(data.mtime);
   // 磁盘上从无到有：即使本地因粘贴小说标了脏，也要吃进新分镜（否则控件不刷新）
   const appeared = exists && state.shotSbExists === false;
-  // 有未保存编辑：不拿磁盘盖掉（「从无到有」除外）
-  if (!force && !appeared && state.shotSbDirty && state.shotSb && state.shotSbPath === path) {
+  const samePath = !!(state.shotSb && state.shotSbPath === path);
+  // 读盘期间用户可能已经改完，或输入框还开着。force 只表示调用时想跟磁盘走，
+  // 返回后不能盖掉这段时间里的编辑，也不能 clearShotSbDirty 把脏标记清掉。
+  if (!appeared && samePath && (state.shotSbDirty || storyboardEditorsOpen())) {
     return state.shotSb;
   }
   // 未脏且文件没变：复用内存（保留本地补过的 seed 显示）
@@ -2660,15 +2749,23 @@ async function validateShotSbFromGrid({ auto = false } = {}) {
     try { await loadShotSb(out); } catch { return; }
   }
   if (!state.shotSb) return;
-  // 无分镜文件 / 无镜头：不算失败，清掉「硬校验未通过」
-  if (state.shotSb._missing || state.shotSbExists === false) {
-    clearShotsMsg();
-    return;
-  }
+  // 损坏文件且界面上还没有可替代的镜头：保留「无法读取」，不要清成校验通过
+  const liveShots = (state.shotSb.shots || []).some((s) => s && s.id);
+  if (state.shotSb._corrupt && !liveShots) return;
   const sb = snapshotShotSbFromUi();
   state.shotSb = sb;
   const shots = Array.isArray(sb.shots) ? sb.shots : [];
   if (!shots.length) {
+    clearShotsMsg();
+    return;
+  }
+  // 刚点 ＋ 的空镜头还没写画面和对白，不算校验失败
+  const meaningful = shots.some((s) =>
+    String(s?.image_prompt || "").trim()
+    || String(s?.dialogue || "").trim()
+    || String(s?.motion_prompt || "").trim()
+  );
+  if (!meaningful) {
     clearShotsMsg();
     return;
   }
@@ -2896,6 +2993,13 @@ function isCastEditing() {
   return !!(ae && ae.closest && ae.closest("#final-cast .cast-iedit"));
 }
 
+/** 分镜相关输入框还开着（含未失焦、尚未标脏的这次编辑） */
+function storyboardEditorsOpen() {
+  return !!document.querySelector(
+    "#final-cast .cast-iedit-input:not([hidden]), #shots-grid .shot-iedit-input:not([hidden]), #title:not([hidden]), #novel-text:not([hidden]), #style-text:not([hidden]), #music-text:not([hidden]), #music-seed-input:not([hidden])",
+  );
+}
+
 function castListSig(chars) {
   return (chars || []).map((c) => `${c.id || ""}:${c.name || ""}`).join("|");
 }
@@ -2968,6 +3072,19 @@ function castFieldShown(ch, field) {
   return { text: "", empty: true };
 }
 
+/** 卡片上的角色对象可能已被自动刷新换成磁盘副本而脱节；编辑必须写回当前分镜里的那一个 */
+function liveCastCharacter(card) {
+  const ch = card?._ch;
+  if (!ch) return null;
+  const list = state.shotSb?.characters;
+  if (!Array.isArray(list) || list.includes(ch)) return ch;
+  const id = String(ch.id || card.dataset.id || "");
+  const live = id ? list.find((c) => c && c.id === id) : null;
+  if (!live) return ch;
+  card._ch = live;
+  return live;
+}
+
 function syncCastDisplays(card) {
   const ch = card?._ch;
   if (!ch) return;
@@ -3028,7 +3145,7 @@ async function persistCastChange(_key) {
 async function commitCastField(wrap, card, { cancel = false } = {}) {
   const display = $(".cast-iedit-display", wrap);
   const input = $(".cast-iedit-input", wrap);
-  const ch = card?._ch;
+  const ch = liveCastCharacter(card);
   if (!display || !input || !ch || !isCastFieldEditing(wrap)) return;
   const key = wrap.dataset.f;
   const prev = key === "seed"
@@ -3098,7 +3215,7 @@ async function commitCastField(wrap, card, { cancel = false } = {}) {
 }
 
 function rerollCastSeed(card) {
-  const ch = card?._ch;
+  const ch = liveCastCharacter(card);
   if (!ch) return;
   const wrap = $(".cast-iedit[data-f=seed]", card);
   if (wrap && isCastFieldEditing(wrap)) {
@@ -3321,10 +3438,9 @@ function renderFinalMeta(info = {}) {
 
   const chars = liveCharacters(info);
   if (castEl) {
-    if (isCastEditing()) {
-      // 编辑中不重建，避免打断输入
-    } else if (castEl.dataset.sig === castListSig(chars) && castEl.querySelector(".cast-add-card")) {
-      // 名单未变：同步文案；头像按产物清单增删/换 mtime 刷新
+    const sameList = castEl.dataset.sig === castListSig(chars) && !!castEl.querySelector(".cast-add-card");
+    if (sameList) {
+      // 名单未变：把卡片指回当前分镜里的角色再同步。编辑中的那一格由 sync 跳过，避免打断输入。
       $$(".cast-card:not(.cast-add-card)", castEl).forEach((card, i) => {
         if (chars[i]) {
           card._ch = chars[i];
@@ -3332,7 +3448,7 @@ function renderFinalMeta(info = {}) {
         }
       });
       placeCastAddCard(castEl);
-    } else {
+    } else if (!isCastEditing()) {
       rebuildCastCards(chars, info);
     }
   }
@@ -3444,7 +3560,6 @@ function syncFinalPlayerLayout(player) {
 
 function renderFinalVideo(final, info = {}) {
   const wrap = $("#final-wrap");
-  const badge = $("#final-badge");
   const player = $("#final-player");
   const link = $("#final-download");
   const meta = $("#final-meta");
@@ -3452,7 +3567,6 @@ function renderFinalVideo(final, info = {}) {
   if (!wrap || !player) return;
   wrap.hidden = false;
   const has = !!(final && final.url);
-  if (badge) badge.hidden = !has;
   if (empty) empty.hidden = has;
   player.hidden = !has;
   renderFinalMeta(info);
@@ -3536,8 +3650,10 @@ async function renderShots() {
   }
   if (seq !== renderShotsSeq) return;
   if (!media && shotCards.size) return; // 产物清单暂时拿不到：保持现状，别清空预览
-  // 2) 分镜：未脏时跟磁盘走（含「文件被删 → 列表清空」）
-  const sb = await loadShotSb(out, { force: !state.shotSbDirty });
+  // 2) 分镜：按 mtime 跟磁盘走（含「文件被删 → 列表清空」）。
+  // 不要在未脏时 force：那会每 5 秒换一套角色对象。编辑中的卡片仍指着旧对象，
+  // 失焦写进被丢掉的那份，下一轮刷新就把外貌等字段刷回磁盘原文。
+  const sb = await loadShotSb(out);
   if (seq !== renderShotsSeq) return;
   // 正文跟 novel.txt（编辑中不覆盖）
   if (!isNovelEditing() && !state.shotSbDirty) {
@@ -3615,9 +3731,11 @@ async function renderShots() {
   if (!desired.length) {
     const tip = document.createElement("div");
     tip.className = "empty";
-    tip.textContent = sbMeta.missing
-      ? "还没有分镜文件。可用上方「从小说生成分镜」，或点 ＋ 手写。"
-      : "分镜里还没有镜头。点 ＋ 添加。";
+    tip.textContent = sb._corrupt
+      ? "分镜文件无法读取。可改文件后点还原，或点 ＋ 手写新镜头覆盖。"
+      : sbMeta.missing
+        ? "还没有分镜文件。可用上方「从小说生成分镜」，或点 ＋ 手写。"
+        : "分镜里还没有镜头。点 ＋ 添加。";
     grid.insertBefore(tip, grid.firstChild);
   }
   placeShotAddCard(grid);
@@ -3952,6 +4070,11 @@ async function confirmRerunFromDialog() {
     renderRunQueue();
     syncRunControls();
   } catch (err) {
+    const errEl = $("#rerun-error");
+    if (errEl) {
+      errEl.hidden = false;
+      errEl.textContent = err.message || String(err);
+    }
     toast(`添加失败：${err.message}`, true);
   }
 }

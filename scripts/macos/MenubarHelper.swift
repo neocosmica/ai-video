@@ -67,6 +67,7 @@ struct MenubarStatus: Decodable {
     var project: String?
     var current: String?
     var detail: String?
+    var version: String?
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -81,7 +82,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var idleImage: NSImage?
     var lastTitle: String = "\u{0}" // sentinel ≠ ""
     var lastProject: String?
+    var shownVersion: String = ""
     var openMenuItem: NSMenuItem?
+    var versionMenuItem: NSMenuItem?
 
     init(url: URL, statusURL: URL, title: String, parentPid: pid_t, iconPath: String?) {
         self.baseURL = url
@@ -121,6 +124,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(copyItem)
 
         menu.addItem(NSMenuItem.separator())
+
+        let versionItem = NSMenuItem(title: "版本", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
+        versionMenuItem = versionItem
 
         let quitItem = NSMenuItem(
             title: "退出",
@@ -193,6 +201,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyStatus(_ status: MenubarStatus?) {
+        if let raw = status?.version?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            shownVersion = raw.hasPrefix("v") ? raw : "v\(raw)"
+        }
         let running = status?.running == true
         let project = (status?.project ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         lastProject = project.isEmpty ? nil : project
@@ -212,6 +223,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             tip += " · \(shown)%"
         } else {
             titleText = ""
+        }
+        if let versionItem = versionMenuItem {
+            versionItem.title = shownVersion.isEmpty ? "版本" : "版本 \(shownVersion)"
         }
 
         if titleText != lastTitle, let button = statusItem?.button {

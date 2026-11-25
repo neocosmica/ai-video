@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from pathlib import Path
 from typing import Iterable
 
 from pipeline.projects import artifacts_sub
-from pipeline.util import load_json, resolve
+from pipeline.util import resolve
 
 KINDS = ("storyboard", "portrait", "frame", "voice", "clip", "music", "final")
 KIND_LABELS = {
@@ -25,6 +26,12 @@ KIND_LABELS = {
 # 拓扑序：祖先靠前
 KIND_ORDER = {k: i for i, k in enumerate(KINDS)}
 
+# 分镜阶段会整份重写镜头表。和静帧/配音/视频/配乐/成片放在同一次启动里，
+# 后面的步骤仍按「旧镜头 id」排队，生成完对不上。
+STORYBOARD_EXCLUSIVE = (
+    "从小说生成分镜会重写镜头列表。请先只跑分镜，完成后再添加静帧、配音、视频、配乐或成片。"
+)
+
 
 def _node_key(kind: str, nid: str = "") -> str:
     return f"{kind}:{nid or ''}"
@@ -35,19 +42,47 @@ def _parse_key(key: str) -> tuple[str, str]:
     return kind, nid
 
 
+def _shape_error(data: object) -> str | None:
+    """分镜顶层结构不对时返回给人看的原因。"""
+    if not isinstance(data, dict):
+        return "分镜文件损坏：顶层必须是 JSON 对象"
+    if "shots" in data and data.get("shots") is not None and not isinstance(data.get("shots"), list):
+        return "分镜格式不对：shots 必须是数组"
+    if (
+        "characters" in data
+        and data.get("characters") is not None
+        and not isinstance(data.get("characters"), list)
+    ):
+        return "分镜格式不对：characters 必须是数组"
+    return None
+
+
 def _load_story(out: str | Path, *, optional: bool = False) -> dict:
     path = resolve(out) / "storyboard.json"
     if not path.is_file():
         if optional:
             return {}
         raise FileNotFoundError(f"还没有分镜：{path}")
-    return load_json(path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"分镜文件损坏，不是合法 JSON（{exc.msg}）") from exc
+    err = _shape_error(data)
+    if err:
+        raise ValueError(err)
+    return data
+
+
+def _storyboard_on_disk(out: str | Path | None) -> bool:
+    return out is not None and (resolve(out) / "storyboard.json").is_file()
 
 
 def _novel_ready(out: str | Path) -> bool:
-    """项目 novel.txt 或网页暂存 run_novel.txt 有正文即可。"""
+    """项目 novel.txt 或网页暂存正文有内容即可。兼容旧版固定文件名。"""
     base = resolve(out)
-    for path in (base / "novel.txt", artifacts_sub(base, "webui", "run_novel.txt")):
+    webui = artifacts_sub(base, "webui")
+    candidates = [base / "novel.txt", webui / "run_novel.txt"]
+    for path in candidates:
         if path.is_file() and path.read_text(encoding="utf-8").strip():
             return True
     return False
@@ -55,7 +90,12 @@ def _novel_ready(out: str | Path) -> bool:
 
 def _shot_map(story: dict) -> dict[str, dict]:
     out: dict[str, dict] = {}
-    for s in story.get("shots") or []:
+    raw = story.get("shots") if isinstance(story, dict) else None
+    if not isinstance(raw, list):
+        return out
+    for s in raw:
+        if not isinstance(s, dict):
+            continue
         sid = str(s.get("id") or "").strip()
         if sid:
             out[sid] = s
@@ -64,7 +104,12 @@ def _shot_map(story: dict) -> dict[str, dict]:
 
 def _char_map(story: dict) -> dict[str, dict]:
     out: dict[str, dict] = {}
-    for c in story.get("characters") or []:
+    raw = story.get("characters") if isinstance(story, dict) else None
+    if not isinstance(raw, list):
+        return out
+    for c in raw:
+        if not isinstance(c, dict):
+            continue
         cid = str(c.get("id") or "").strip()
         if cid:
             out[cid] = c
@@ -228,37 +273,113 @@ def _topo_sort(nodes: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
     return sorted(nodes, key=lambda n: (KIND_ORDER.get(n[0], 99), n[1] or ""))
 
 
+def _need_storyboard_first(kind: str, nid: str = "") -> str:
+    """分镜文件还不存在时，镜头级产物无法靠「先生成分镜」补齐（镜头 id 未知）。"""
+    label = KIND_LABELS.get(kind, kind)
+    who = f"{label} {nid}".strip() if nid else label
+    if kind in {"music", "final"}:
+        return (
+            f"还没有分镜，不能生成{label}。"
+            "请先点「从小说生成分镜」，或点 ＋ 手写镜头。"
+            "镜头确定之后再生成这一项，缺失的静帧、配音和视频会自动补上。"
+        )
+    return (
+        f"还没有分镜，不能生成{who}。"
+        "请先从小说生成分镜，或点 ＋ 手写镜头。"
+    )
+
+
+def _need_shots(kind: str) -> str:
+    label = KIND_LABELS.get(kind, kind)
+    return (
+        f"分镜里还没有镜头，不能生成{label}。"
+        "请先添加镜头，或从小说重新生成分镜。"
+    )
+
+
 def validate_target(story: dict, kind: str, nid: str = "", *, out: str | Path | None = None) -> str | None:
     """非法目标返回错误文案，合法返回 None。"""
     if kind not in KINDS:
         return f"未知产物类型：{kind}"
+    if not isinstance(story, dict):
+        return "分镜文件损坏：顶层必须是 JSON 对象"
     if kind == "storyboard":
         if out is not None and not _novel_ready(out):
-            return "还没有小说正文：请先在上方填写并保存，或确保 ~/AI短视频项目/<片>/novel.txt 有内容"
+            return "还没有小说正文。请先在上方填写小说，再生成分镜。"
         return None
+    on_disk = _storyboard_on_disk(out)
     shots = _shot_map(story)
     chars = _char_map(story)
     if kind == "portrait":
         if not nid or nid not in chars:
+            if out is not None and not on_disk:
+                return _need_storyboard_first(kind, nid)
             return f"分镜里没有角色 id「{nid}」"
         return None
     if kind in {"frame", "voice", "clip"}:
         if not nid or nid not in shots:
+            if out is not None and not on_disk:
+                return _need_storyboard_first(kind, nid)
             return f"分镜里没有镜头「{nid}」"
         if kind == "voice" and not _has_dialogue(shots.get(nid)):
             return f"镜头 {nid} 无对白，不能重跑配音"
         return None
     if kind in {"music", "final"}:
+        # 镜头列表还未知时，不能把「生成分镜」和配乐/成片排进同一次：
+        # 静帧、配音、视频都要等分镜写出镜头 id 才能补。
+        if not shots:
+            if out is not None and not on_disk:
+                if not _novel_ready(out):
+                    label = KIND_LABELS.get(kind, kind)
+                    return (
+                        f"还没有小说，也没有分镜，不能生成{label}。"
+                        "请先在上方填写小说并生成分镜，或点 ＋ 手写镜头。"
+                    )
+                return _need_storyboard_first(kind)
+            return _need_shots(kind)
         return None
     return f"未知产物类型：{kind}"
+
+
+def queue_block_reason(out: str | Path, items: list[dict]) -> str | None:
+    """启动前再查一遍当前文件：坏分镜、镜头对不上、或分镜与后置步骤绑在同一次。"""
+    try:
+        story = _load_story(out, optional=True)
+    except ValueError as exc:
+        return str(exc)
+    kinds = [str((it or {}).get("kind") or "") for it in items or []]
+    if "storyboard" in kinds and any(k and k != "storyboard" for k in kinds):
+        return STORYBOARD_EXCLUSIVE
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        err = validate_target(
+            story,
+            str(it.get("kind") or ""),
+            str(it.get("id") or ""),
+            out=out,
+        )
+        if err:
+            label = str(it.get("label") or "").strip()
+            return f"{label}：{err}" if label else err
+    return None
 
 
 def plan_rerun(out: str | Path, *, kind: str, id: str = "") -> dict:
     """计算单跑计划：前向闭包 + 目标 + 后向闭包。"""
     kind = str(kind or "").strip()
     nid = str(id or "").strip()
-    # optional：缺 storyboard.json 时仍可规划，前置里出现「从小说生成分镜」
-    story = _load_story(out, optional=True)
+    # optional：缺 storyboard.json 时仍可规划；文件在但不是合法分镜则直接拒绝
+    try:
+        story = _load_story(out, optional=True)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "prereqs": [],
+            "target": None,
+            "posts": [],
+        }
     err = validate_target(story, kind, nid, out=out)
     if err:
         return {
@@ -328,7 +449,9 @@ def _summary(target: dict, prereqs: list[dict], posts: list[dict]) -> str:
         parts.append("已有前置将跳过：" + "、".join(ready))
     if posts:
         chosen = [p["label"] for p in posts if p.get("suggested")]
-        if len(chosen) == len(posts):
+        if target.get("kind") == "storyboard":
+            parts.append("请先只生成分镜。分镜写完后，再单独添加静帧、配音、视频、配乐或成片")
+        elif len(chosen) == len(posts):
             parts.append("后置默认全选（可取消）：" + "、".join(chosen))
         elif not chosen:
             parts.append("后置默认全不选（可勾选）：" + "、".join(p["label"] for p in posts))
@@ -474,3 +597,244 @@ def execution_groups(
     if want_final:
         groups.append({"stage": "assemble", "force": True})
     return groups
+
+
+def selftest_web_edges() -> None:
+    """缺文件、空项目、坏分镜、不按顺序单跑：规划必须拒绝或把缺失前置补全。"""
+    import shutil
+
+    from pipeline.projects import artifacts_sub
+    from pipeline.run_queue import add_from_plan
+    from pipeline.util import ROOT, cite_path
+    from pipeline.web import (
+        materialize_web_draft,
+        read_storyboard,
+        read_text,
+        validate_storyboard,
+        write_storyboard,
+    )
+
+    root = ROOT / "output" / "_web_edge_selftest"
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    def pre(plan: dict) -> set[tuple[str, str, str]]:
+        assert plan.get("ok"), plan
+        return {(p["kind"], p.get("id") or "", p.get("status")) for p in plan["prereqs"]}
+
+    story = {
+        "title": "边角",
+        "style": "写实",
+        "music_prompt": "soft piano, no vocals",
+        "characters": [{"id": "lin", "name": "林", "gender": "female"}],
+        "shots": [
+            {
+                "id": "s001",
+                "characters": ["lin"],
+                "image_prompt": "近景",
+                "motion_prompt": "Slow push in",
+                "dialogue": "你好",
+                "speaker": "林",
+            },
+            {
+                "id": "s002",
+                "characters": [],
+                "image_prompt": "空镜",
+                "motion_prompt": "Locked off",
+                "dialogue": "",
+            },
+            {
+                "id": "s001_p1",
+                "characters": ["lin"],
+                "reuse_frame": "s001",
+                "image_prompt": "近景",
+                "motion_prompt": "Locked off",
+                "dialogue": "后半",
+                "speaker": "林",
+            },
+        ],
+    }
+
+    try:
+        empty = root / "empty"
+        empty.mkdir()
+        music = plan_rerun(empty, kind="music")
+        assert not music["ok"] and "没有小说" in music["error"] and "没有分镜" in music["error"], music
+        final = plan_rerun(empty, kind="final")
+        assert not final["ok"] and "没有小说" in final["error"], final
+        assert not plan_rerun(empty, kind="frame", id="s001")["ok"]
+        assert "还没有分镜" in plan_rerun(empty, kind="clip", id="s001")["error"]
+        assert "还没有分镜" in plan_rerun(empty, kind="portrait", id="lin")["error"]
+        assert not plan_rerun(empty, kind="storyboard")["ok"]
+        (empty / "novel.txt").write_text("  \n\t", encoding="utf-8")
+        assert not plan_rerun(empty, kind="storyboard")["ok"]
+        (empty / "novel.txt").write_text("她说：「你好」。\n", encoding="utf-8")
+        assert plan_rerun(empty, kind="storyboard")["ok"]
+        still = plan_rerun(empty, kind="final")
+        assert not still["ok"] and "还没有分镜" in still["error"], still
+        assert "缺失前置" not in (still.get("summary") or "")
+
+        blank = root / "blank"
+        blank.mkdir()
+        sb_rel, _novel_rel = materialize_web_draft(
+            str(blank),
+            storyboard_data={"title": "空", "shots": [], "characters": [], "_missing": True},
+            novel_text="  ",
+        )
+        assert sb_rel is None and not (blank / "storyboard.json").exists()
+        assert not (blank / "work" / "webui" / "run_novel.txt").read_text(encoding="utf-8").strip()
+        refused = add_from_plan(blank, kind="final")
+        assert not refused["ok"] and not (refused.get("queue") or {}).get("items"), refused
+
+        hand = root / "hand"
+        hand.mkdir()
+        materialize_web_draft(
+            str(hand),
+            storyboard_data={
+                "title": "手写",
+                "characters": [{"id": "lin", "name": "林"}],
+                "shots": [{
+                    "id": "s001",
+                    "characters": ["lin"],
+                    "dialogue": "你好",
+                    "image_prompt": "近景",
+                }],
+            },
+            novel_text="",
+        )
+        assert (hand / "storyboard.json").is_file()
+        handed = pre(plan_rerun(hand, kind="clip", id="s001"))
+        assert ("storyboard", "", "ready") in handed
+        assert ("frame", "s001", "missing") in handed
+        assert ("voice", "s001", "missing") in handed
+        assert ("portrait", "lin", "missing") in handed
+
+        film = root / "film"
+        film.mkdir()
+        (film / "novel.txt").write_text("她说：「你好」。\n", encoding="utf-8")
+        (film / "storyboard.json").write_text(json.dumps(story, ensure_ascii=False), encoding="utf-8")
+        clip = pre(plan_rerun(film, kind="clip", id="s001"))
+        assert ("frame", "s001", "missing") in clip
+        assert ("voice", "s001", "missing") in clip
+        assert ("portrait", "lin", "missing") in clip
+        assert ("storyboard", "", "ready") in clip
+        silent = pre(plan_rerun(film, kind="clip", id="s002"))
+        assert ("frame", "s002", "missing") in silent
+        assert not any(item[0] == "voice" for item in silent)
+        child = pre(plan_rerun(film, kind="clip", id="s001_p1"))
+        assert ("frame", "s001", "missing") in child
+        assert ("voice", "s001_p1", "missing") in child
+        assert not any(item[1] == "s001_p1" and item[0] == "frame" for item in child)
+        assert "无对白" in plan_rerun(film, kind="voice", id="s002")["error"]
+        assert "没有镜头" in plan_rerun(film, kind="clip", id="s999")["error"]
+        assert "未知产物" in plan_rerun(film, kind="bogus")["error"]
+        whole = pre(plan_rerun(film, kind="final"))
+        for sid in ("s001", "s002", "s001_p1"):
+            assert ("clip", sid, "missing") in whole
+        assert ("music", "", "missing") in whole
+        assert ("voice", "s002", "missing") not in whole
+        bare = dict(story)
+        bare["music_prompt"] = ""
+        (film / "storyboard.json").write_text(json.dumps(bare, ensure_ascii=False), encoding="utf-8")
+        no_bgm = pre(plan_rerun(film, kind="final"))
+        assert not any(item[0] == "music" for item in no_bgm)
+        (film / "storyboard.json").write_text(json.dumps(story, ensure_ascii=False), encoding="utf-8")
+
+        frame = artifacts_sub(film, "frames", "s002.png")
+        frame.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_bytes(b"")
+        assert ("frame", "s002", "missing") in pre(plan_rerun(film, kind="clip", id="s002"))
+        frame.write_bytes(b"png")
+        assert ("frame", "s002", "ready") in pre(plan_rerun(film, kind="clip", id="s002"))
+        voice = artifacts_sub(film, "audio", "voice", "s001.wav")
+        voice.parent.mkdir(parents=True, exist_ok=True)
+        voice.write_bytes(b"")
+        assert ("voice", "s001", "missing") in pre(plan_rerun(film, kind="music"))
+
+        added = add_from_plan(film, kind="clip", id="s002")
+        assert added["ok"], added
+        keys = {(it["kind"], it.get("id") or "") for it in added["queue"]["items"]}
+        assert ("clip", "s002") in keys
+        assert ("frame", "s002") not in keys  # 静帧已有，不入队
+        assert not any(it[0] == "voice" for it in keys)
+
+        exclusive = add_from_plan(
+            film,
+            kind="storyboard",
+            posts=[{"kind": "frame", "id": "s002"}],
+        )
+        assert not exclusive["ok"] and "只跑分镜" in exclusive["error"], exclusive
+        # 拒绝入队时不要把后置写进队列
+        assert ("frame", "s002") not in {
+            (it["kind"], it.get("id") or "") for it in exclusive["queue"]["items"]
+        }
+        regen = plan_rerun(film, kind="storyboard")
+        assert regen["ok"] and "请先只生成分镜" in regen["summary"], regen
+
+        assert queue_block_reason(film, [
+            {"kind": "storyboard", "id": "", "label": "分镜"},
+            {"kind": "final", "id": "", "label": "成片"},
+        ]) == STORYBOARD_EXCLUSIVE
+        assert queue_block_reason(film, [{"kind": "clip", "id": "s001", "label": "视频 s001"}]) is None
+        assert "没有镜头" in (queue_block_reason(
+            film, [{"kind": "clip", "id": "s404", "label": "视频 s404"}]
+        ) or "")
+        (film / "storyboard.json").unlink()
+        gone = queue_block_reason(film, [{"kind": "final", "id": "", "label": "成片"}]) or ""
+        assert "还没有分镜" in gone, gone
+        (film / "novel.txt").unlink()
+        neither = queue_block_reason(film, [{"kind": "music", "id": "", "label": "配乐"}]) or ""
+        assert "没有小说" in neither and "没有分镜" in neither, neither
+
+        bad = root / "bad"
+        bad.mkdir()
+        (bad / "novel.txt").write_text("正文\n", encoding="utf-8")
+        (bad / "storyboard.json").write_text("{", encoding="utf-8")
+        broken = plan_rerun(bad, kind="final")
+        assert not broken["ok"] and "损坏" in broken["error"], broken
+        assert "损坏" in (queue_block_reason(bad, [{"kind": "final", "id": ""}]) or "")
+        (bad / "storyboard.json").write_text("[]", encoding="utf-8")
+        assert "顶层" in plan_rerun(bad, kind="music")["error"]
+        (bad / "storyboard.json").write_text('{"shots": "x"}', encoding="utf-8")
+        assert "shots" in plan_rerun(bad, kind="frame", id="s001")["error"]
+        (bad / "storyboard.json").write_bytes(b"")
+        assert "损坏" in plan_rerun(bad, kind="final")["error"]
+
+        rel = cite_path(bad / "storyboard.json")
+        info = read_storyboard(rel)
+        assert info.get("error") and "损坏" in info["error"], info
+        missing = read_storyboard(cite_path(bad / "nope.json"))
+        assert missing["exists"] is False and "error" not in missing
+        (bad / "storyboard.json").write_text("[]", encoding="utf-8")
+        assert "顶层" in read_storyboard(cite_path(bad / "storyboard.json"))["error"]
+        checked = validate_storyboard(cite_path(bad / "storyboard.json"), strict=True)
+        assert checked["ok"] is False and "顶层" in (checked.get("strict_error") or ""), checked
+        write_storyboard(cite_path(bad / "storyboard.json"), {
+            "title": "写回",
+            "shots": [],
+            "characters": [],
+            "_missing": True,
+            "_corrupt": "x",
+        })
+        saved = json.loads((bad / "storyboard.json").read_text(encoding="utf-8"))
+        assert "_missing" not in saved and "_corrupt" not in saved and saved["title"] == "写回"
+        try:
+            read_text(cite_path(bad / "missing.txt"))
+            raise AssertionError("缺文件应报错")
+        except FileNotFoundError as exc:
+            assert "找不到文件" in str(exc)
+        (bad / "novel.txt").write_bytes(b"\xff\xfe")
+        try:
+            read_text(cite_path(bad / "novel.txt"))
+            raise AssertionError("非 UTF-8 应报错")
+        except ValueError as exc:
+            assert "UTF-8" in str(exc)
+
+        shell = root / "shell"
+        shell.mkdir()
+        (shell / "storyboard.json").write_text("{}\n", encoding="utf-8")
+        assert "还没有镜头" in plan_rerun(shell, kind="final")["error"]
+        assert "还没有镜头" in plan_rerun(shell, kind="music")["error"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

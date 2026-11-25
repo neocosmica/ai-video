@@ -12,6 +12,18 @@ if [[ ! -d "$APP/Contents" ]]; then
   exit 1
 fi
 
+if [[ -x "$ROOT/scripts/macos/build-menubar-helper.sh" ]] && command -v swiftc >/dev/null 2>&1; then
+  "$ROOT/scripts/macos/build-menubar-helper.sh"
+fi
+
+VER="$(PYTHONPATH="$ROOT" python3 -c 'from pipeline.version import bump_version_file; print(bump_version_file())')"
+echo "版本号：$VER"
+PLIST="$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" "$PLIST" \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VER" "$PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VER" "$PLIST" \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $VER" "$PLIST"
+
 echo "同步运行依赖 → $RUNTIME"
 mkdir -p "$RUNTIME"
 
@@ -37,7 +49,7 @@ rsync -a --delete \
   "$RUNTIME/"
 
 # 顶层配置与锁文件
-for f in config.json pyproject.toml uv.lock; do
+for f in config.json pyproject.toml uv.lock VERSION; do
   if [[ -f "$ROOT/$f" ]]; then
     cp -f "$ROOT/$f" "$RUNTIME/$f"
   fi
@@ -80,3 +92,8 @@ echo "已校验 tools/ffmpeg、ffprobe：$host_arch（含 -version）"
 # 体积提示
 du -sh "$RUNTIME" | awk '{print "runtime 体积：" $1}'
 echo "完成。双击 App 将优先使用包内 runtime。"
+
+if [[ "${SKIP_DMG:-}" != "1" ]]; then
+  echo "接着打安装镜像…"
+  SKIP_PACK=1 "$ROOT/scripts/macos/make-dmg.sh"
+fi

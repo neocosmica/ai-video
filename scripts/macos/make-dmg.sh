@@ -19,7 +19,8 @@ fi
 
 if [[ "${SKIP_PACK:-}" != "1" ]]; then
   echo "先同步 App 内 runtime…"
-  "$ROOT/scripts/macos/pack-app.sh"
+  # 由本脚本负责打镜像，避免 pack-app 再回调一次
+  SKIP_DMG=1 "$ROOT/scripts/macos/pack-app.sh"
 fi
 
 if [[ ! -x "$APP/Contents/Resources/runtime/scripts/run.sh" ]]; then

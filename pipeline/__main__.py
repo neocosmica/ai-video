@@ -79,6 +79,9 @@ def cmd_doctor(_: argparse.Namespace) -> None:
     print("提示词编码器：LTX 内置 Gemma 3 12B 4-bit（视频阶段用，不是分镜聊天）")
     print(f"对白 TTS：{settings.tts_model}（先于视频，供 A2V 条件）")
     print(f"配乐：{settings.music_model}")
+    from pipeline.version import read_version
+
+    print(f"版本：{read_version() or '未写入'}")
     print(f"HF 镜像：{os.environ.get('HF_ENDPOINT')}")
     print(f"PyPI 镜像：{os.environ.get('UV_INDEX_URL')}")
     print(f"禁用 XET：{os.environ.get('HF_HUB_DISABLE_XET')}")
@@ -263,6 +266,14 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     assert max(spoken_chars(p) for p in pieces) <= 17, pieces  # 允许在小句边界略微超出
     measured = plan_by_measured_rate(long_line, 4.94, 4.0)
     assert len(measured) > 1 and spoken_chars("".join(measured)) == spoken_chars(long_line)
+    from pipeline.version import bump_version_text
+
+    assert bump_version_text("1.0.0") == "1.0.1"
+    assert bump_version_text("1.0.9") == "1.0.10"
+    assert bump_version_text("") == "1.0.1"
+    assert bump_version_text("2") == "3"
+    assert bump_version_text("build-") == "build-.1"
+
     assert plan_by_measured_rate("短句。", 1.0, 4.0) == ["短句。"]
     assert len(halve(long_line)) == 2
     assert spoken_chars("".join(halve(long_line))) == spoken_chars(long_line)
@@ -789,10 +800,43 @@ def cmd_selftest(_: argparse.Namespace) -> None:
             novel_text="她说：「你好」。",
         )
         assert novel_rel and Path(novel_rel).is_absolute(), novel_rel
-        assert resolve(novel_rel) == (proj / "work" / "webui" / "run_novel.txt").resolve()
+        assert resolve(novel_rel).name == "run_novel.txt"
         assert "你好" in resolve(novel_rel).read_text(encoding="utf-8")
+        from pipeline.artifact_plan import plan_rerun
+
+        assert plan_rerun(proj, kind="storyboard")["ok"]
         assert sb_rel and resolve(sb_rel) == (proj / "storyboard.json").resolve()
         assert (proj / "storyboard.json").is_file()
+        _, other_novel = materialize_web_draft(str(proj), novel_text="另一版正文")
+        assert other_novel and resolve(other_novel) == resolve(novel_rel)
+        assert "另一版" in resolve(novel_rel).read_text(encoding="utf-8")
+
+    from pipeline.web import Job, _JOBS, _LOCK, register_job
+
+    with _LOCK:
+        original_jobs = dict(_JOBS)
+        _JOBS.clear()
+    try:
+        def make_job(task_id: str, out: str) -> Job:
+            return Job(
+                task_id, name=task_id, novel="", out=out, stages=["storyboard"],
+                only=None, cmd=["true"], log_path=Path(out) / "run.log",
+            )
+
+        register_job(make_job("first", "/tmp/storyboard-first"))
+        try:
+            register_job(make_job("second", "/tmp/storyboard-second"))
+            raise AssertionError("parallel task registration should be rejected")
+        except ValueError as exc:
+            assert "已有任务" in str(exc), exc
+    finally:
+        with _LOCK:
+            _JOBS.clear()
+            _JOBS.update(original_jobs)
+
+    from pipeline.artifact_plan import selftest_web_edges
+
+    selftest_web_edges()
     for label, path in (
         ("main", main_venv_path()),
         ("ltx", ltx_venv_path()),

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterable
 
 from pipeline.artifact_plan import (
+    STORYBOARD_EXCLUSIVE,
     _exists,
     _node_key,
     _parse_key,
@@ -84,9 +85,10 @@ def _story(out: str | Path) -> dict:
     if not path.is_file():
         return {}
     try:
-        return load_json(path)
+        data = load_json(path)
     except Exception:
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def expand_missing_prereqs(out: str | Path, items: list[dict]) -> list[dict]:
@@ -228,6 +230,11 @@ def add_from_plan(
         return {"ok": False, "error": plan.get("error") or "无法规划", "queue": load_queue(out)}
 
     target = plan["target"]
+    if target["kind"] == "storyboard" and any(
+        isinstance(raw, dict) and str(raw.get("kind") or "").strip() not in {"", "storyboard"}
+        for raw in (posts or [])
+    ):
+        return {"ok": False, "error": STORYBOARD_EXCLUSIVE, "queue": load_queue(out)}
     allowed = {(p["kind"], p.get("id") or "") for p in plan.get("posts") or []}
     selected_posts: list[dict] = []
     for raw in posts or []:

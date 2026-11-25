@@ -361,6 +361,11 @@ class Job:
         sep = ";" if sys.platform == "win32" else ":"
         env["PYTHONPATH"] = str(ROOT) + sep + env.get("PYTHONPATH", "")
         try:
+            if self.stop_requested:
+                self.status = "interrupted"
+                self.finished_at = time.time()
+                self.engine.finalize(success=False)
+                return
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             self.started_at = time.time()
             self.append_log(f"$ {shlex.join(self.cmd)}")
@@ -466,7 +471,10 @@ class Job:
         return True
 
     def stop(self) -> None:
-        """向进程组发 SIGTERM；立刻离开 running，好让启动区/停止按钮马上复位。"""
+        """请求停止：状态保持 running 到工作线程真正退出，避免新旧进程重叠。
+
+        进程组先 SIGTERM；若 10 秒后仍未退出，再 SIGKILL，防止互斥被卡死。
+        """
         import os
         import signal
 
@@ -474,12 +482,10 @@ class Job:
             if self.status != "running":
                 return
             self.stop_requested = True
-            self.status = "interrupted"
             self.error = "用户停止"
             for s, st in self.stage_status.items():
                 if st == "running":
                     self.stage_status[s] = "failed"
-            self.finished_at = self.finished_at or time.time()
         disarm_queue(self.out)
         try:
             if self.engine is not None:
@@ -488,22 +494,47 @@ class Job:
             pass
         pid = self.pid
         if not pid:
-            self.append_log("[webui] 已标记停止（进程尚未拉起）")
+            self.append_log("[webui] 已请求停止（进程尚未拉起，启动后立即退出）")
             notify_change()
             _persist()
             return
-        try:
-            if sys.platform == "win32":
-                subprocess.call(["taskkill", "/F", "/T", "/PID", str(pid)])
-            else:
-                os.killpg(os.getpgid(pid), signal.SIGTERM)
-            self.append_log("[webui] 已请求停止…")
-        except ProcessLookupError:
-            self.append_log("[webui] 进程已结束")
-        except Exception as exc:
-            self.append_log(f"[webui] 停止失败：{exc}")
+
+        def _terminate() -> None:
+            try:
+                if sys.platform == "win32":
+                    subprocess.call(["taskkill", "/F", "/T", "/PID", str(pid)])
+                else:
+                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                self.append_log("[webui] 已请求停止…")
+            except ProcessLookupError:
+                self.append_log("[webui] 进程已结束")
+            except Exception as exc:
+                self.append_log(f"[webui] 停止失败：{exc}")
+
+        _terminate()
         notify_change()
         _persist()
+
+        def _force_kill() -> None:
+            from pipeline.live import pid_alive
+
+            for _ in range(20):
+                time.sleep(0.5)
+                with self.lock:
+                    gone = self.status != "running" or self.pid != pid
+                if gone or not pid_alive(pid):
+                    return
+            try:
+                if sys.platform == "win32":
+                    subprocess.call(["taskkill", "/F", "/T", "/PID", str(pid)])
+                else:
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                self.append_log("[webui] 进程未响应 SIGTERM，已强制结束")
+                notify_change()
+            except Exception as exc:
+                self.append_log(f"[webui] 强制结束失败：{exc}")
+
+        threading.Thread(target=_force_kill, daemon=True).start()
 
 
 _JOBS: dict[str, Job] = {}
@@ -514,6 +545,24 @@ CURRENT_PROJECT_JOB_IDS: set[str] = set()
 # 用户点过「启动任务」的 out：只有 armed 才会在上一项成功后自动续跑待跑队列。
 # 绝不能仅因「列表里有 queued」或「别的任务碰巧跑完」就开跑。
 _QUEUE_ARMED: set[str] = set()
+_START_LOCK = threading.Lock()
+
+
+def _running_jobs_locked() -> list[Job]:
+    # 停止时不再提前把状态改成 interrupted：工作线程真正退出后才离开 running，
+    # 这样新任务不会和还没退净的旧进程重叠。不能用 pid 存活兜底——PID 会被复用。
+    return [j for j in _JOBS.values() if j.status == "running"]
+
+
+def _ensure_no_running_job() -> None:
+    try:
+        attach_external_jobs(None)
+    except Exception:
+        pass
+    with _LOCK:
+        running = _running_jobs_locked()
+    if running:
+        raise ValueError("已有任务在跑，请先停止")
 
 
 def _norm_out(out: str) -> str:
@@ -551,6 +600,13 @@ def notify_change() -> None:
 _ACTIVE_ATTACH_AT = 0.0
 
 
+def _with_version(payload: dict) -> dict:
+    from pipeline.version import read_version
+
+    payload["version"] = read_version()
+    return payload
+
+
 def active_run_info() -> dict:
     """菜单栏 / 打开网页用：当前是否有生成任务、总进度%、所属项目。
 
@@ -568,7 +624,7 @@ def active_run_info() -> dict:
     with _LOCK:
         running = [j for j in _JOBS.values() if j.status == "running"]
     if not running:
-        return {
+        return _with_version({
             "running": False,
             "pct": None,
             "project": None,
@@ -576,7 +632,7 @@ def active_run_info() -> dict:
             "task_id": None,
             "current": None,
             "detail": None,
-        }
+        })
     running.sort(key=lambda j: float(getattr(j, "started_at", None) or getattr(j, "created_at", 0) or 0), reverse=True)
     job = running[0]
     snap = job.snapshot()
@@ -586,7 +642,7 @@ def active_run_info() -> dict:
     except (TypeError, ValueError):
         pct = 0.0
     pct = max(0.0, min(100.0, pct))
-    return {
+    return _with_version({
         "running": True,
         "pct": round(pct, 1),
         "project": project_of_job(job) or None,
@@ -594,7 +650,7 @@ def active_run_info() -> dict:
         "task_id": snap.get("id"),
         "current": prog.get("current") or snap.get("current_stage"),
         "detail": snap.get("detail") or snap.get("name"),
-    }
+    })
 
 
 def state_path_for(out: str) -> Path:
@@ -678,6 +734,8 @@ def clear_finished_tasks() -> dict:
 
 def register_job(job: Job) -> None:
     with _LOCK:
+        if job.status == "running" and _running_jobs_locked():
+            raise ValueError("已有任务在跑，请先停止")
         _JOBS[job.id] = job
         CURRENT_PROJECT_JOB_IDS.add(job.id)
     _persist()
@@ -702,11 +760,7 @@ def pump_queued_jobs(out: str) -> Job | None:
     if not queue_is_armed(out_n):
         return None
     with _LOCK:
-        busy = any(
-            j.status == "running" and _norm_out(job_out(j)) == out_n
-            for j in _JOBS.values()
-        )
-        if busy:
+        if _running_jobs_locked():
             return None
         queued = sorted(
             [
@@ -741,29 +795,22 @@ def pump_queued_jobs(out: str) -> Job | None:
 
 
 def start_queued_tasks(out: str) -> dict:
-    """启动指定 out 任务列表里的待跑项；同项目已有运行中则等它结束后自动续跑。"""
+    """启动指定 out 的待跑任务；全局已有任务时拒绝启动。"""
     out_n = _norm_out(out)
     if not out_n:
         raise ValueError("请指定项目 out")
+    _ensure_no_running_job()
     queued = queued_jobs_for_out(out_n)
     if not queued:
         raise ValueError("任务列表里没有待跑项；请先通过单跑对话框添加")
     # 显式点启动才 armed；之后同 out 上一项成功才会续跑
-    arm_queue(out_n)
-    with _LOCK:
-        running = [
-            j for j in _JOBS.values()
-            if j.status == "running" and _norm_out(job_out(j)) == out_n
-        ]
-    if running:
-        return {
-            "ok": True,
-            "started": None,
-            "queued": len(queued),
-            "message": f"已有任务在跑，排队中还有 {len(queued)} 项，结束后自动续跑",
-            "running": running[0].snapshot(),
-        }
-    started = pump_queued_jobs(out_n)
+    with _START_LOCK:
+        with _LOCK:
+            running = _running_jobs_locked()
+        if running:
+            raise ValueError("已有任务在跑，请先停止")
+        arm_queue(out_n)
+        started = pump_queued_jobs(out_n)
     return {
         "ok": True,
         "started": started.snapshot() if started else None,
@@ -1002,6 +1049,10 @@ def attach_external_jobs(name: str | None = None) -> list[Job]:
         ]
         if existing:
             continue
+        with _LOCK:
+            # 不挂载第二个外部进程，以便其他任务入口能一致拒绝启动。
+            if _running_jobs_locked():
+                continue
         task_id = stable_cli_task_id(out)
         if get_job(task_id) and get_job(task_id).status == "running":
             continue
@@ -1087,7 +1138,8 @@ def _persist() -> None:
                 )[:HISTORY]
                 merged = dict(keep)
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
+            # 唯一临时名：并发 _persist（启动/停止/进度）共用 state.tmp 会互相踩丢文件
+            tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
             tmp.write_text(json.dumps({"tasks": merged}, ensure_ascii=False, indent=1), encoding="utf-8")
             tmp.replace(path)
     except Exception as exc:
@@ -1581,7 +1633,13 @@ def safe_path(rel: str) -> Path:
 
 
 def read_text(rel: str) -> str:
-    return safe_path(rel).read_text(encoding="utf-8")
+    path = safe_path(rel)
+    if not path.is_file():
+        raise FileNotFoundError(f"找不到文件：{path.name}")
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"文件不是 UTF-8 文本：{path.name}") from exc
 
 
 def write_text(rel: str, content: str) -> None:
@@ -1590,8 +1648,18 @@ def write_text(rel: str, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _storyboard_read_error(data: object) -> str | None:
+    from pipeline.artifact_plan import _shape_error
+
+    return _shape_error(data)
+
+
 def read_storyboard(rel: str) -> dict:
-    """读分镜；文件不存在时 ``exists=False``，不抛错（网页据此清空角色/镜头列表）。"""
+    """读分镜。
+
+    文件不存在时 ``exists=False``，不抛错（网页据此显示空列表）。
+    文件在但不是合法分镜时带 ``error``，网页要显示损坏原因，不要当成「还没有分镜」。
+    """
     path = safe_path(rel)
     if not path.is_file():
         return {"path": rel, "exists": False, "storyboard": None, "mtime": None}
@@ -1599,17 +1667,34 @@ def read_storyboard(rel: str) -> dict:
         mtime = path.stat().st_mtime
     except OSError:
         mtime = None
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError("storyboard.json 必须是 JSON 对象")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {
+            "path": rel,
+            "exists": True,
+            "storyboard": None,
+            "mtime": mtime,
+            "error": f"分镜文件损坏，不是合法 JSON（{exc.msg}）",
+        }
+    err = _storyboard_read_error(data)
+    if err:
+        return {"path": rel, "exists": True, "storyboard": None, "mtime": mtime, "error": err}
     return {"path": rel, "exists": True, "storyboard": data, "mtime": mtime}
 
 
 def write_storyboard(rel: str, data: dict) -> None:
+    if not isinstance(data, dict):
+        raise ValueError("分镜必须是 JSON 对象")
+    # 去掉网页内部标记（_missing / _corrupt），避免写进源文件
+    payload = {k: v for k, v in data.items() if not str(k).startswith("_")}
+    err = _storyboard_read_error(payload)
+    if err:
+        raise ValueError(err)
     path = safe_path(rel)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
 
 
@@ -1630,6 +1715,14 @@ def materialize_web_draft(
     base = resolve(out)
     webui = artifacts_sub(base, "webui")
     webui.mkdir(parents=True, exist_ok=True)
+    def atomic_write(path: Path, content: str) -> None:
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
     sb_rel: str | None = None
     novel_rel: str | None = None
     if isinstance(storyboard_data, dict):
@@ -1638,23 +1731,27 @@ def materialize_web_draft(
             k: v for k, v in storyboard_data.items() if not str(k).startswith("_")
         }
         shots = payload.get("shots") or []
-        has_shot = any(
+        has_shot = isinstance(shots, list) and any(
             isinstance(s, dict) and str(s.get("id") or "").strip() for s in shots
         )
-        run_sb = webui / "run_storyboard.json"
-        run_sb.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        chars = payload.get("characters") or []
+        has_char = isinstance(chars, list) and any(
+            isinstance(c, dict) and str(c.get("id") or "").strip() for c in chars
         )
-        if has_shot:
+        run_sb = webui / "run_storyboard.json"
+        atomic_write(run_sb, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        dest = base / "storyboard.json"
+        # 有镜头、有角色，或项目里已经有分镜（正在改标题/配乐）才装进运行态。
+        # 纯空壳不落盘，避免「还没有分镜」被写成假文件，成片依赖被算空。
+        if has_shot or has_char or dest.is_file():
             draft_rel = cite_path(run_sb)
             install_storyboard(out, draft_rel, force=True)
-            sb_rel = cite_path(base / "storyboard.json")
+            sb_rel = cite_path(dest)
         else:
             sb_rel = None
     if novel_text is not None:
         run_novel = webui / "run_novel.txt"
-        run_novel.write_text(str(novel_text).rstrip() + "\n", encoding="utf-8")
+        atomic_write(run_novel, str(novel_text).rstrip() + "\n")
         novel_rel = cite_path(run_novel)
     return sb_rel, novel_rel
 
@@ -1679,7 +1776,7 @@ def validate_storyboard(
         dialogue_char_limit,
         normalize_storyboard,
     )
-    from pipeline.util import load_json, snap_frames
+    from pipeline.util import snap_frames
 
     settings = Settings.load()
     src: Path | None = None
@@ -1695,9 +1792,18 @@ def validate_storyboard(
                 novel_source="none",
                 reason="missing",
             )
-        raw = load_json(src)
+        try:
+            raw = json.loads(src.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return _validate_fail(
+                settings,
+                f"分镜文件损坏，不是合法 JSON（{exc.msg}）",
+            )
+    shape = _storyboard_read_error(raw)
+    if shape:
+        return _validate_fail(settings, shape)
 
-    shots_in = raw.get("shots") if isinstance(raw, dict) else None
+    shots_in = raw.get("shots") or []
     if not isinstance(shots_in, list) or not shots_in:
         # 空壳分镜（无镜头）不跑硬校验
         return _validate_skip_empty(
@@ -1752,26 +1858,15 @@ def validate_storyboard(
     except SystemExit as exc:
         # screenplay 用 SystemExit 报错；网页转成 JSON，别把 HTTP 线程干死
         msg = str(exc).strip() or "校验未通过"
-        return {
-            "ok": False,
-            "strict_error": msg,
-            "violations": [],
-            "shots": len(shots_in),
-            "characters": len(raw.get("characters") or []),
-            "dialogue_lines": 0,
-            "limit_chars": limit,
-            "max_seconds": round(max_seconds, 1),
-            "max_frames": max_frames,
-            "fps": fps,
-            "chars_per_second": CHARS_PER_SECOND,
-            "resolution": f"{settings.video_width}x{settings.video_height}",
-            "total_gib": detail.get("total_gib"),
-            "tier_gib": detail.get("tier_gib"),
-            "novel": str(novel_path) if novel_path else "",
-            "report": msg,
-            "source": "memory" if isinstance(storyboard, dict) else "disk",
-            "novel_source": "memory" if novel_text is not None else ("disk" if novel_path else "none"),
-        }
+        return _validate_fail(
+            settings,
+            msg,
+            shots=len(shots_in),
+            characters=len(raw.get("characters") or []),
+            novel=str(novel_path) if novel_path else "",
+            source="memory" if isinstance(storyboard, dict) else "disk",
+            novel_source="memory" if novel_text is not None else ("disk" if novel_path else "none"),
+        )
 
     rows, violations = dialogue_budget_violations(
         shots, limit, max_seconds, strict=strict
@@ -1812,6 +1907,48 @@ def validate_storyboard(
         "novel_source": "memory" if novel_text is not None else ("disk" if novel_path else "none"),
     }
     return result
+
+
+def _validate_fail(
+    settings,
+    message: str,
+    *,
+    shots: int = 0,
+    characters: int = 0,
+    novel: str = "",
+    source: str = "disk",
+    novel_source: str = "none",
+) -> dict:
+    """分镜读不出来或覆盖检查失败：返回 ok=False，别把异常抛出 HTTP 线程。"""
+    from pipeline.screenplay import CHARS_PER_SECOND, dialogue_char_limit
+    from pipeline.util import snap_frames
+
+    fps = max(1, settings.video_fps)
+    max_frames = snap_frames(settings.video_frames_max)
+    max_seconds = max_frames / fps
+    limit = dialogue_char_limit(settings.video_frames_max, fps)
+    detail = settings.budget_detail or {}
+    msg = str(message or "").strip() or "校验未通过"
+    return {
+        "ok": False,
+        "strict_error": msg,
+        "violations": [],
+        "shots": shots,
+        "characters": characters,
+        "dialogue_lines": 0,
+        "limit_chars": limit,
+        "max_seconds": round(max_seconds, 1),
+        "max_frames": max_frames,
+        "fps": fps,
+        "chars_per_second": CHARS_PER_SECOND,
+        "resolution": f"{settings.video_width}x{settings.video_height}",
+        "total_gib": detail.get("total_gib"),
+        "tier_gib": detail.get("tier_gib"),
+        "novel": novel,
+        "report": msg,
+        "source": source,
+        "novel_source": novel_source,
+    }
 
 
 def _validate_skip_empty(
@@ -1905,7 +2042,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status)
 
     def _json_error(self, exc: Exception, status: int = 500) -> None:
-        self._json({"error": f"{type(exc).__name__}: {exc}"}, status)
+        # ValueError / FileNotFoundError 的文案已经是给用户看的，不再套异常类名
+        if isinstance(exc, (ValueError, FileNotFoundError)):
+            msg = str(exc).strip() or "请求无效"
+        else:
+            msg = f"{type(exc).__name__}: {exc}"
+        self._json({"error": msg}, status)
 
     def _body_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
@@ -2110,7 +2252,8 @@ class _Handler(BaseHTTPRequestHandler):
             pass
         except FileNotFoundError as exc:
             self._json_error(exc, 404)
-        except json.JSONDecodeError as exc:
+        except ValueError as exc:
+            # 含 JSONDecodeError：参数/分镜不合法，用 400 而不是 500
             self._json_error(exc, 400)
         except Exception as exc:
             self._json_error(exc)
@@ -2163,6 +2306,11 @@ class _Handler(BaseHTTPRequestHandler):
         return {"ok": True, "project": name}
 
     def create_task(self, data: dict) -> dict:
+        with _START_LOCK:
+            return self._create_task_locked(data)
+
+    def _create_task_locked(self, data: dict) -> dict:
+        _ensure_no_running_job()
         title = str(data.get("title") or "").strip()
         name = str(data.get("name") or "").strip() or _slugify(title)
         # 新任务一律落在用户项目根下的项目文件夹
@@ -2231,6 +2379,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def rerun_shots(self, data: dict) -> dict:
         """对指定镜头重跑所选阶段（前端传什么阶段就跑什么）。"""
+        with _START_LOCK:
+            return self._rerun_shots_locked(data)
+
+    def _rerun_shots_locked(self, data: dict) -> dict:
+        _ensure_no_running_job()
         shots_raw = data.get("shots") or []
         shots = ",".join(sorted({str(s).strip() for s in shots_raw if str(s).strip()}))
         if not shots:
@@ -2337,7 +2490,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def queue_start(self, data: dict) -> dict:
         """点启动：按待跑队列拉起一条历史任务。"""
-        from pipeline.artifact_plan import clear_nodes
+        with _START_LOCK:
+            return self._queue_start_locked(data)
+
+    def _queue_start_locked(self, data: dict) -> dict:
+        _ensure_no_running_job()
+        from pipeline.artifact_plan import clear_nodes, queue_block_reason
         from pipeline.run_queue import (
             annotate_removable,
             build_groups_from_queue,
@@ -2352,6 +2510,7 @@ class _Handler(BaseHTTPRequestHandler):
         out = str(data.get("out") or "").strip()
         if not out:
             raise ValueError("没给输出目录")
+        _ensure_no_running_job()
         sb_data = data.get("storyboard_data")
         has_novel_text = "novel_text" in data
         novel_rel = None
@@ -2364,14 +2523,9 @@ class _Handler(BaseHTTPRequestHandler):
         queue = load_queue(out)
         if not (queue.get("items") or []):
             raise ValueError("待跑队列为空；请先通过 ↻ 添加")
-        out_n = _norm_out(out)
-        with _LOCK:
-            busy = any(
-                j.status == "running" and _norm_out(job_out(j)) == out_n
-                for j in _JOBS.values()
-            )
-        if busy:
-            raise ValueError("已有任务在跑，请先停止")
+        blocked = queue_block_reason(out, list(queue.get("items") or []))
+        if blocked:
+            raise ValueError(blocked)
         expanded = expand_missing_prereqs(out, list(queue.get("items") or []))
         if [it.get("key") for it in expanded] != [it.get("key") for it in queue.get("items") or []]:
             queue["items"] = expanded
