@@ -589,6 +589,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .overall-fill.done { background: linear-gradient(90deg, #2c8f55, var(--ok)); }
 .overall-fill.failed { background: linear-gradient(90deg, #a03a35, var(--bad)); }
 #overall-pct { min-width: 52px; text-align: right; font-size: 13px; }
+#overall-eta { min-width: 72px; font-size: 12px; white-space: nowrap; }
 
 /* 完整步骤列表 */
 .live-items {
@@ -1245,10 +1246,28 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   width: 100%;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
 }
+/* 首尾帧：单格全幅，轨道横滑轮播 */
 .shot-stills.has-end {
-  grid-template-columns: 1fr 1fr;
-  gap: 2px;
+  display: block;
+  position: relative;
+}
+.shot-stills-track {
+  display: flex;
+  width: 200%;
+  height: 100%;
+  transition: transform 0.55s cubic-bezier(0.33, 0.9, 0.32, 1);
+  will-change: transform;
+}
+.shot-stills.has-end.show-end .shot-stills-track {
+  transform: translateX(-50%);
+}
+.shot-stills.has-end .shot-still-cell {
+  flex: 0 0 50%;
+  width: 50%;
+  height: 100%;
+  min-height: 0;
 }
 .shot-still-cell {
   position: relative;
@@ -1257,6 +1276,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
 }
 .shot-still-cell.is-empty {
   min-height: 120px;
@@ -1268,9 +1288,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
 }
 .shot-stills.has-end .shot-still-cell.is-empty {
-  /* 并排时也撑满格，避免「缺尾帧」看起来像单图 */
   min-height: 0;
-  height: 100%;
 }
 .shot-still-tag {
   position: absolute;
@@ -1286,15 +1304,18 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   pointer-events: none;
 }
 .shot-still-missing { opacity: 0.7; }
-/* 仅静帧：有图跟图片比例；无图保持 9:16 灰底占位 */
+/* 仅静帧：有图跟图片比例；无图 / 首尾轮播保持 9:16 */
 .shot-preview:not(.has-clip) {
   aspect-ratio: auto;
 }
-.shot-preview:not(.has-clip).no-still {
+.shot-preview:not(.has-clip).no-still,
+.shot-preview:not(.has-clip).has-end {
   aspect-ratio: 9 / 16;
 }
 .shot-preview:not(.has-clip).no-still .shot-stills,
-.shot-preview:not(.has-clip).no-still .shot-still-cell {
+.shot-preview:not(.has-clip).no-still .shot-still-cell,
+.shot-preview:not(.has-clip).has-end .shot-stills,
+.shot-preview:not(.has-clip).has-end .shot-stills-track {
   height: 100%;
 }
 .shot-preview:not(.has-clip) .shot-still {
@@ -1304,20 +1325,10 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   display: block;
   vertical-align: top;
 }
-.shot-preview:not(.has-clip).has-end {
-  aspect-ratio: 9 / 8;
-}
-.shot-preview:not(.has-clip).has-end.no-still {
-  aspect-ratio: 9 / 8;
-}
 .shot-preview:not(.has-clip).has-end .shot-still {
   width: 100%;
   height: 100%;
   object-fit: cover;
-}
-.shot-preview:not(.has-clip).has-end .shot-still-cell {
-  aspect-ratio: 9 / 16;
-  overflow: hidden;
 }
 /* 有视频：框以视频比例为准；静帧 cover 铺满，悬停换 video */
 .shot-preview.has-clip {
@@ -1339,15 +1350,6 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   height: 100%;
   object-fit: cover;
   display: block;
-}
-.shot-preview.has-clip .shot-stills.has-end {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 2px;
-}
-.shot-preview.has-clip .shot-still-cell {
-  height: 100%;
-  overflow: hidden;
 }
 .shot-preview.has-clip .shot-still-cell .shot-still {
   width: 100%;

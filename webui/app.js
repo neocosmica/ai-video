@@ -1357,6 +1357,9 @@ function showTaskDetailIdle() {
   }
   const pctEl = $("#overall-pct");
   if (pctEl) pctEl.textContent = "0%";
+  const overallEtaEl = $("#overall-eta");
+  if (overallEtaEl) overallEtaEl.textContent = "";
+  clearOverallEtaAnchor();
   const stageEl = $("#overall-stage");
   if (stageEl) stageEl.textContent = "未在跑 · 队列非空时可点启动";
   const track = $("#stage-track");
@@ -1520,6 +1523,7 @@ function renderStages(job) {
 function renderOverall(job) {
   const fill = $("#overall-fill");
   const pctEl = $("#overall-pct");
+  const etaEl = $("#overall-eta");
   const stageEl = $("#overall-stage");
   const prog = job.progress || {};
   let pct = typeof prog.overall_pct === "number" ? prog.overall_pct : 0;
@@ -1541,6 +1545,15 @@ function renderOverall(job) {
   if (fill.style.width !== width) fill.style.width = width;
   if (fill.className !== fillCls) fill.className = fillCls;
   if (pctEl.textContent !== pctText) pctEl.textContent = pctText;
+  if (job.status === "running" && prog.overall_eta_s != null && Number.isFinite(Number(prog.overall_eta_s))) {
+    syncOverallEtaAnchor(Number(prog.overall_eta_s));
+    const rem = overallEtaRemaining();
+    const etaText = rem == null ? "" : fmtEta(rem);
+    if (etaEl && etaEl.textContent !== etaText) etaEl.textContent = etaText;
+  } else {
+    clearOverallEtaAnchor();
+    if (etaEl && etaEl.textContent !== "") etaEl.textContent = "";
+  }
   if (stageEl.textContent !== currentLabel) stageEl.textContent = currentLabel;
 }
 
@@ -1555,6 +1568,8 @@ function fmtEta(sec) {
 let liveItemsSig = "";
 /** stepId → { eta_s, at }：服务端 ETA 锚点；本地按墙钟递减，新进度到来则整锚重置 */
 const etaAnchors = new Map();
+/** 总 ETA 锚点：{ eta_s, server_eta, at } */
+let overallEtaAnchor = null;
 let etaTickTimer = null;
 
 function stopEtaTick() {
@@ -1564,9 +1579,30 @@ function stopEtaTick() {
   }
 }
 
+function clearOverallEtaAnchor() {
+  overallEtaAnchor = null;
+}
+
 function clearEtaAnchors() {
   etaAnchors.clear();
+  clearOverallEtaAnchor();
   stopEtaTick();
+}
+
+function syncOverallEtaAnchor(eta) {
+  const n = Number(eta);
+  if (!Number.isFinite(n)) return;
+  const now = Date.now();
+  // 总 ETA 变化超过 2s 才重锚，避免每秒微抖
+  if (!overallEtaAnchor || Math.abs(overallEtaAnchor.server_eta - n) >= 2) {
+    overallEtaAnchor = { eta_s: n, server_eta: n, at: now };
+  }
+  ensureEtaTick();
+}
+
+function overallEtaRemaining() {
+  if (!overallEtaAnchor) return null;
+  return Math.max(0, overallEtaAnchor.eta_s - (Date.now() - overallEtaAnchor.at) / 1000);
 }
 
 function syncEtaAnchors(list) {
@@ -1588,7 +1624,7 @@ function syncEtaAnchors(list) {
   for (const id of [...etaAnchors.keys()]) {
     if (!seen.has(id)) etaAnchors.delete(id);
   }
-  if (etaAnchors.size) ensureEtaTick();
+  if (etaAnchors.size || overallEtaAnchor) ensureEtaTick();
   else stopEtaTick();
 }
 
@@ -1606,12 +1642,18 @@ function paintLiveEtas() {
     const text = rem == null ? "" : fmtEta(rem);
     if (etaEl.textContent !== text) etaEl.textContent = text;
   }
+  const overallEl = $("#overall-eta");
+  if (overallEl) {
+    const rem = overallEtaRemaining();
+    const text = rem == null ? "" : fmtEta(rem);
+    if (overallEl.textContent !== text) overallEl.textContent = text;
+  }
 }
 
 function ensureEtaTick() {
   if (etaTickTimer) return;
   etaTickTimer = setInterval(() => {
-    if (!etaAnchors.size) {
+    if (!etaAnchors.size && !overallEtaAnchor) {
       stopEtaTick();
       return;
     }
@@ -1894,7 +1936,7 @@ const shotCards = new Map(); // shot id -> 已渲染的卡片 DOM（增量更新
 let shotAddCard = null; // 网格末尾「＋」空卡
 
 function clearShotCards() {
-  for (const [, card] of shotCards) card.remove();
+  for (const [, card] of shotCards) disposeShotCard(card);
   shotCards.clear();
   if (shotAddCard) {
     shotAddCard.remove();
@@ -2476,10 +2518,16 @@ function fillShotCardFields(card, shot) {
 
 const SHOT_CARD_UI = 10;
 
+function disposeShotCard(card) {
+  if (!card) return;
+  stopShotStillsSlideshow($(".shot-preview", card));
+  card.remove();
+}
+
 function ensureShotCard(id) {
   let card = shotCards.get(id);
   if (card && card._ui !== SHOT_CARD_UI) {
-    card.remove();
+    disposeShotCard(card);
     shotCards.delete(id);
     card = null;
   }
@@ -2879,7 +2927,7 @@ async function deleteShotOnGrid(shotId) {
   state.shotSb.shots = state.shotSb.shots.filter((s) => s.id !== shotId);
   const card = shotCards.get(shotId);
   if (card) {
-    card.remove();
+    disposeShotCard(card);
     shotCards.delete(shotId);
   }
   markShotSbDirty();
@@ -3772,7 +3820,7 @@ async function renderShots() {
   // 删掉不再存在的镜头卡
   for (const [id, card] of [...shotCards]) {
     if (!desired.includes(id)) {
-      card.remove();
+      disposeShotCard(card);
       shotCards.delete(id);
     }
   }
@@ -3811,20 +3859,51 @@ function syncShotPreviewAspect(preview, video) {
 function bindShotPreviewHover(preview) {
   if (!preview || preview._hoverBound) return;
   preview._hoverBound = true;
-  preview.addEventListener("mouseenter", () => {
+  preview._pinPlay = false; // 点击钉住播放；离开后仍播，再点或离开后点空白取消
+
+  const showClip = () => {
     const video = $(".shot-clip", preview);
     if (!video) return;
     preview.classList.add("is-hover");
-    video.muted = true; // 悬停自动播需静音，否则浏览器会拦
+    video.muted = true; // 自动播需静音，否则浏览器会拦
     const play = video.play();
     if (play && typeof play.catch === "function") play.catch(() => {});
-  });
-  preview.addEventListener("mouseleave", () => {
+  };
+  const hideClip = () => {
     preview.classList.remove("is-hover");
     const video = $(".shot-clip", preview);
     if (!video) return;
     video.pause();
     try { video.currentTime = 0; } catch {}
+  };
+
+  preview.addEventListener("mouseenter", () => {
+    if (preview._pinPlay) return;
+    showClip();
+  });
+  preview.addEventListener("mouseleave", () => {
+    if (preview._pinPlay) return;
+    hideClip();
+  });
+  // 点静帧 / ▶：切换播放（Cursor 预览、触控板点按都吃这套，不单靠悬停）
+  preview.addEventListener("click", (ev) => {
+    if (ev.target.closest("a, button, input, textarea, select")) return;
+    const video = $(".shot-clip", preview);
+    if (!video) return;
+    // 点在原生控件上交给浏览器
+    if (ev.target === video || ev.target.closest("video")) {
+      preview._pinPlay = true;
+      preview.classList.add("is-hover");
+      return;
+    }
+    ev.preventDefault();
+    if (preview._pinPlay || preview.classList.contains("is-hover")) {
+      preview._pinPlay = false;
+      hideClip();
+    } else {
+      preview._pinPlay = true;
+      showClip();
+    }
   });
 }
 
@@ -3833,6 +3912,27 @@ function stillCellHtml(entry, tag) {
     return `<div class="shot-still-cell is-empty"><span class="shot-still-tag">${esc(tag)}</span><span class="shot-still-missing">未生成</span></div>`;
   }
   return `<div class="shot-still-cell"><span class="shot-still-tag">${esc(tag)}</span><img class="shot-still" src="${esc(mediaUrl(entry))}" loading="lazy" alt="${esc(tag)}"></div>`;
+}
+
+const STILL_SLIDE_MS = 2400;
+
+function stopShotStillsSlideshow(preview) {
+  if (!preview?._stillsTimer) return;
+  clearInterval(preview._stillsTimer);
+  preview._stillsTimer = null;
+}
+
+/** 首尾帧叠放横滑：定时在「首」「尾」之间切换；悬停播视频时暂停 */
+function bindShotStillsSlideshow(preview) {
+  if (!preview) return;
+  stopShotStillsSlideshow(preview);
+  const stills = $(".shot-stills.has-end", preview);
+  if (!stills || $$(".shot-still-cell", stills).length < 2) return;
+  stills.classList.remove("show-end");
+  preview._stillsTimer = setInterval(() => {
+    if (preview.classList.contains("is-hover")) return;
+    stills.classList.toggle("show-end");
+  }, STILL_SLIDE_MS);
 }
 
 function renderShotCard(shot, media, reuseMap, progItems) {
@@ -3865,6 +3965,7 @@ function renderShotCard(shot, media, reuseMap, progItems) {
     end: mediaSig(endEntry),
     voice: mediaSig(voiceEntry),
     wantEnd: shotWantsEndFrame(shot),
+    stillLayout: "slide", // 首尾横滑；改布局时 bump 以强制重建预览 DOM
   };
   // 媒体文件没变就不动 DOM：这是「视频闪 / 加载圈不停」的修复点
   if (JSON.stringify(sigs) !== JSON.stringify(card._sig || {})) {
@@ -3876,14 +3977,15 @@ function renderShotCard(shot, media, reuseMap, progItems) {
     const hasEnd = !!endEntry;
     const frameUrl = frameEntry ? mediaUrl(frameEntry) : "";
     const wantEndSlot = hasEnd || shotWantsEndFrame(shot);
+    stopShotStillsSlideshow(preview);
     const stillsHtml = wantEndSlot
-      ? `<div class="shot-stills has-end">${stillCellHtml(frameEntry, "首")}${stillCellHtml(endEntry, "尾")}</div>`
+      ? `<div class="shot-stills has-end"><div class="shot-stills-track">${stillCellHtml(frameEntry, "首")}${stillCellHtml(endEntry, "尾")}</div></div>`
       : frameEntry
         ? `<div class="shot-stills"><img class="shot-still" src="${esc(frameUrl)}" loading="lazy" alt=""></div>`
         : `<div class="shot-stills"><div class="shot-still-cell is-empty"><span class="shot-still-missing">暂无静帧</span></div></div>`;
     if (clipEntry) {
       const poster = frameUrl ? ` poster="${esc(frameUrl)}"` : "";
-      // 框以视频比例为准；默认静帧（可含尾帧并排），悬停播视频
+      // 框以视频比例为准；默认静帧（首尾定时横滑），悬停播视频
       preview.classList.add("has-clip");
       preview.classList.toggle("has-end", wantEndSlot);
       preview.classList.toggle("no-still", !frameEntry && !endEntry);
@@ -3895,11 +3997,13 @@ function renderShotCard(shot, media, reuseMap, progItems) {
       const clipEl = $(".shot-clip", preview);
       syncShotPreviewAspect(preview, clipEl);
       bindShotPreviewHover(preview);
+      bindShotStillsSlideshow(preview);
     } else if (frameEntry || endEntry) {
       preview.classList.remove("has-clip", "no-still", "is-hover");
       preview.classList.toggle("has-end", wantEndSlot);
       preview.style.removeProperty("aspect-ratio");
       preview.innerHTML = stillsHtml;
+      bindShotStillsSlideshow(preview);
     } else {
       // 无媒体时也保留 9:16 灰底占位，避免卡片顶栏塌掉
       preview.classList.remove("has-clip", "is-hover");
@@ -3907,6 +4011,7 @@ function renderShotCard(shot, media, reuseMap, progItems) {
       preview.classList.toggle("has-end", wantEndSlot);
       preview.style.removeProperty("aspect-ratio");
       preview.innerHTML = stillsHtml;
+      bindShotStillsSlideshow(preview);
     }
     if (voiceEntry) {
       audioEl.innerHTML = `<div class="shot-audio-bar">

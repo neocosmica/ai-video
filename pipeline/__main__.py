@@ -416,16 +416,19 @@ def cmd_selftest(_: argparse.Namespace) -> None:
         assert audio_mod.music_block_reason(dep_story, proj)
         blocked = assemble_block_reason(dep_story, proj)
         assert blocked and "s001" in blocked and "s003" in blocked, blocked
-        added = add_from_plan(
+        # 配乐后置：其它对白镜配音不齐时拒绝入队（灰掉），避免偷偷拉进 s002/s007
+        refused_music = add_from_plan(
             proj,
             kind="voice",
             id="s001",
             posts=[{"kind": "music", "id": ""}],
         )
-        assert added["ok"], added
-        keys = {it["key"] for it in added["queue"]["items"]}
-        assert {"voice:s001", "voice:s002", "voice:s007_p1", "music:"} <= keys, keys
-        assert "voice:s003" not in keys
+        assert not refused_music["ok"], refused_music
+        assert "还缺" in (refused_music.get("error") or "")
+        only_s001 = add_from_plan(proj, kind="voice", id="s001", posts=[])
+        assert only_s001["ok"], only_s001
+        keys = {it["key"] for it in only_s001["queue"]["items"]}
+        assert keys == {"voice:s001"}, keys
 
     # ---- 混音回归：人声不被无故削弱、闪避只在有对白的时段生效 ----
     # 之前出过两个 bug：(1) aformat 做 mono→stereo 会乘 0.707，白掉 3 dB；
@@ -695,6 +698,24 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     assert planned.update(8, 8) == (8, 11)
     assert planned.update(0, 3) == (8, 11)
     assert planned.update(3, 3) == (11, 11)
+    # 加载槽 + 去噪：分母含 Gemma/DiT/decode，加载阶段不再停在 0
+    from pipeline.progress import classify_load_phase, video_progress_plan
+
+    assert classify_load_phase("Loading text encoder (Gemma)") == "pre"
+    assert classify_load_phase("Loading transformer (x.safetensors)") == "pre"
+    assert classify_load_phase("Decoding video (--no-audio)") == "post"
+    assert classify_load_phase("estimate tokens") is None
+    full = video_progress_plan((8, 3))
+    assert full[0] >= 1 and full[-1] >= 1 and full[1:-1] == [8, 3], full
+    loaded = StageMerge(full)
+    total = sum(full)
+    assert loaded.total == total
+    assert loaded.update(1, full[0])[0] > 0
+    assert loaded.update(full[0], full[0]) == (full[0], total)
+    assert loaded.update(4, 8)[0] >= full[0] + 4
+    assert loaded.update(8, 8)[0] >= full[0] + 8
+    assert loaded.update(3, 3)[0] >= full[0] + 8 + 3
+    assert loaded.update(full[-1], full[-1]) == (total, total)
     # 实际段数比计划多时也不回退百分比（多出的段吃掉剩余区间）
     over = StageMerge((2,))
     assert over.update(2, 2) == (2, 2)
@@ -753,6 +774,88 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     assert end_step["status"] == "running" and end_step["pct"] == 50.0, end_step
     start_step = next(s for s in snap_d["steps"] if s["id"] == "images:s001")
     assert start_step["status"] == "done" and start_step["pct"] == 100.0, start_step
+
+    # 视频 tqdm 带 motion/尾帧后缀（s001 i2v dynamic+end）须挂到 videos:s001
+    eng_v = ProgressEngine(str(demo_dir), task_id="selftest-video-tag", stages=["videos"])
+    eng_v.feed_line("== videos ==")
+    eng_v.feed_line("s001 i2v dynamic+end:  50%|█████| 8/16 [00:27<00:27, 3.47s/step]")
+    snap_v = eng_v.snapshot()
+    v001 = next(s for s in snap_v["steps"] if s["id"] == "videos:s001")
+    assert v001["status"] == "running" and v001["pct"] == 50.0, v001
+    assert snap_v["overall_pct"] > 0, snap_v["overall_pct"]
+    assert v001.get("eta_s") is not None and v001["eta_s"] > 0, v001
+    eng_v.feed_line("s001 a2v:  25%|██| 2/8 [00:10<00:30, 5.00s/step]")
+    # 旧短标签仍可用；当前步已是 s001 时继续涨
+    assert eng_v.snapshot()["overall_pct"] >= snap_v["overall_pct"]
+
+    # 加载阶段也要占百分比，且 ETA 非空（不能一直 0%）
+    eng_load = ProgressEngine(str(demo_dir), task_id="selftest-video-load", stages=["videos"])
+    eng_load.feed_line("== videos ==")
+    eng_load.feed_line("[Loading text encoder (Gemma)]...")
+    snap_l1 = eng_load.snapshot()
+    vl = next(s for s in snap_l1["steps"] if s["id"] == "videos:s001")
+    assert vl["status"] == "running" and vl["pct"] > 0, vl
+    assert vl.get("eta_s") is not None and vl["eta_s"] > 0, vl
+    eng_load.feed_line("[Loading text encoder (Gemma)] done in 12.0s")
+    eng_load.feed_line("[Loading transformer (x.safetensors)]...")
+    snap_l2 = eng_load.snapshot()
+    vl2 = next(s for s in snap_l2["steps"] if s["id"] == "videos:s001")
+    assert vl2["pct"] >= vl["pct"], (vl, vl2)
+    eng_load.feed_line("s001 a2v dynamic:   3%|█| 1/29 [0:15<2:00]")
+    snap_l3 = eng_load.snapshot()
+    vl3 = next(s for s in snap_l3["steps"] if s["id"] == "videos:s001")
+    assert vl3["pct"] > 0 and vl3.get("eta_s") is not None, vl3
+
+    # 总 ETA：开跑即有预设；加载/静帧也占百分比；跑完后学习校正
+    from pipeline.progress_model import STEP_EXPECT_S, step_kind
+
+    eng_all = ProgressEngine(str(demo_dir), task_id="selftest-eta-all")
+    snap0 = eng_all.snapshot()
+    assert snap0.get("overall_eta_s") is not None and snap0["overall_eta_s"] > 60, snap0.get("overall_eta_s")
+    assert all("expect_s" in s for s in snap0["steps"]), "steps missing expect_s"
+    eng_all.feed_line("== images ==")
+    eng_all.feed_line("加载文生图模型 /tmp/weights")
+    snap_img = eng_all.snapshot()
+    assert snap_img["overall_pct"] > 0, snap_img["overall_pct"]
+    img_run = next(s for s in snap_img["steps"] if s["status"] == "running")
+    assert img_run["pct"] > 0 and img_run.get("eta_s"), img_run
+    assert snap_img.get("overall_eta_s") is not None and snap_img["overall_eta_s"] > 0
+    eng_all.feed_line("静帧 s001:  50%|████| 2/4 [00:20<00:20, 10s/it]")
+    mid_eta = eng_all.snapshot()["overall_eta_s"]
+    eng_all.feed_line("静帧 s001: 100%|████| 4/4 [00:40<00:00, 10s/it]")
+    after = eng_all.snapshot()
+    assert after["overall_eta_s"] < mid_eta, (after["overall_eta_s"], mid_eta)
+    assert step_kind("images:s001") == "frame"
+    assert STEP_EXPECT_S["video"] >= 60
+    eng_all.feed_line("加载 TTS：/tmp/tts")
+    snap_tts = eng_all.snapshot()
+    aud = next((s for s in snap_tts["steps"] if s["id"].startswith("audio:") and s["status"] == "running"), None)
+    assert aud is not None and aud["pct"] > 0 and aud.get("eta_s"), aud
+
+    # 加载空窗很长 + 步数还很少时，ETA 不得外推出几十分钟
+    eng_cap = ProgressEngine(str(demo_dir), task_id="selftest-eta-cap", stages=["videos"])
+    eng_cap.feed_line("== videos ==")
+    eng_cap.feed_line("[Loading text encoder (Gemma)]...")
+    sid_v = next(s["id"] for s in eng_cap.snapshot()["steps"] if s["id"].startswith("videos:"))
+    # 伪造「已加载两分钟、只走了 1/29」
+    eng_cap._soft_started[sid_v] = __import__("time").time() - 120.0
+    eng_cap.feed_line(f"{sid_v.split(':', 1)[-1]} a2v dynamic:   3%|█| 1/29 [2:00<58:00]")
+    capped = next(s for s in eng_cap.snapshot()["steps"] if s["id"] == sid_v)
+    expect_v = float(capped.get("expect_s") or 200)
+    assert capped["eta_s"] is not None and capped["eta_s"] <= expect_v * 1.6 + 1, capped
+    assert capped["eta_s"] < 600, capped  # 绝不能到「剩 60 分钟」
+
+    # 时长解析：内部一律秒；``1:00`` = 60 秒（旧 bug 会当成 3600 → 显示「剩 60 分钟」）
+    from pipeline.progress import format_duration, parse_duration_seconds
+
+    assert parse_duration_seconds("1:00") == 60
+    assert parse_duration_seconds("2:00") == 120
+    assert parse_duration_seconds("1:00:00") == 3600
+    assert parse_duration_seconds("90") == 90
+    assert parse_duration_seconds(45) == 45
+    assert format_duration(60) == "1:00"
+    assert format_duration(3661) == "1:01:01"
+    assert parse_duration_seconds(format_duration(125)) == 125
 
     # 混音成片：整理切走后须激活 mux；成功收尾不得留下 pending 步却 overall 100%
     eng.feed_line("整理 s001")

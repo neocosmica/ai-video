@@ -297,9 +297,35 @@ class Job:
             }
 
     # -- 日志 --------------------------------------------------------------
+    def _disk_log_lines(self) -> list[str]:
+        """读 log_path 尾部。网页重启后内存 log 会空，挂载任务靠这个回填终端。"""
+        path = getattr(self, "log_path", None)
+        if not path:
+            return []
+        path = Path(path)
+        if not path.is_file():
+            return []
+        try:
+            # 只读末尾，避免超大日志拖垮接口
+            data = path.read_bytes()
+            if len(data) > 512_000:
+                data = data[-512_000:]
+            text = data.decode("utf-8", errors="replace")
+        except Exception:
+            return []
+        lines = [ln.rstrip("\r") for ln in text.splitlines() if ln.strip()]
+        if len(lines) > LOG_TAIL_LINES:
+            lines = lines[-LOG_TAIL_LINES:]
+        return lines
+
     def log_lines(self, after: int) -> tuple[list[str], int]:
+        after = max(0, int(after or 0))
         with self.lock:
-            return list(self.log[after:]), len(self.log)
+            mem = list(self.log)
+        disk = self._disk_log_lines()
+        # 挂载/重启后内存往往只有几条 [webui]，磁盘才是完整终端；取更长的那份
+        lines = disk if len(disk) > len(mem) else mem
+        return lines[after:], len(lines)
 
     def append_log(self, line: str) -> None:
         with self.lock:

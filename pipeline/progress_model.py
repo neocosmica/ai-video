@@ -37,15 +37,78 @@ STAGE_WEIGHTS = {
     "assemble": 0.05,
 }
 
+# 单步预设耗时（秒，16GB Mac 经验值）；跑完后用实测平滑更新
+STEP_EXPECT_S = {
+    "storyboard": 100.0,
+    "screenplay": 2.0,
+    "portrait": 50.0,
+    "frame": 42.0,
+    "end_frame": 42.0,
+    "voice": 22.0,
+    "video": 200.0,
+    "music": 75.0,
+    "assemble": 2.0,
+    "mux": 12.0,
+}
+# 阶段首次加载模型额外预算（叠在该阶段第一个未完成步上）
+STAGE_LOAD_EXPECT_S = {
+    "storyboard": 45.0,
+    "images": 40.0,
+    "audio": 28.0,
+    "music": 22.0,
+    # videos 加载已计入每镜 plan 权重，不再另加
+}
+
+# 中文「加载…」行 → 所属阶段（用于软爬百分比）
+_GENERIC_LOAD = re.compile(
+    r"^(?:"
+    r"加载\s*(?:mflux|transformers|文生图|参考图|尾帧|TTS|分镜\s*LLM|配乐)|"
+    r"正在为\s*vendor|"
+    r"Loading\s+(?:mflux|text encoder|transformer|decoder)"
+    r")",
+    re.I,
+)
+
 PROGRESS_FILENAME = "progress.json"
 DENOISE_PLAN = (8, 3)
+
+
+def step_kind(step_id: str) -> str:
+    """步骤 id → 耗时类别。"""
+    sid = str(step_id or "")
+    if sid == "storyboard:generate":
+        return "storyboard"
+    if sid == "screenplay:validate":
+        return "screenplay"
+    if sid.startswith("images:portrait:"):
+        return "portrait"
+    if sid.startswith("images:") and sid.endswith(":end"):
+        return "end_frame"
+    if sid.startswith("images:"):
+        return "frame"
+    if sid.startswith("audio:"):
+        return "voice"
+    if sid.startswith("videos:"):
+        return "video"
+    if sid == "music:bgm":
+        return "music"
+    if sid == "assemble:mux":
+        return "mux"
+    if sid.startswith("assemble:"):
+        return "assemble"
+    return "frame"
+
+
+def default_expect_s(step_id: str) -> float:
+    return float(STEP_EXPECT_S.get(step_kind(step_id), 30.0))
 
 _TQDM = re.compile(r"^(?P<desc>.+?):\s+(?P<pct>\d+)%.*? (?P<n>\d+)/(?P<total>\d+)\b")
 _TQDM_ETA = re.compile(r"\[(?P<elapsed>[^<]*)<(?P<eta>[^\],]*)")
 
 # tqdm desc → step_id 模板
+# 视频条形如「s001 a2v」或「s001 i2v dynamic+end」（后缀为 motion / 尾帧标记）
 _DESC_MAP = (
-    (re.compile(r"^(?P<id>\S+)\s+(?:a2v|i2v)$"), "videos:{id}"),
+    (re.compile(r"^(?P<id>\S+)\s+(?:a2v|i2v)\b.*"), "videos:{id}"),
     (re.compile(r"^静帧\s+(?P<id>\S+)"), "images:{id}"),
     (re.compile(r"^空镜\s+(?P<id>\S+)"), "images:{id}"),
     (re.compile(r"^尾帧\s+(?P<id>\S+)"), "images:{id}:end"),
@@ -97,13 +160,11 @@ def write_progress(out: str | Path, snap: dict) -> None:
     tmp.replace(path)
 
 
-def _parse_hms(text: str) -> float | None:
-    text = (text or "").strip()
-    m = re.match(r"^(?:(\d+):)?(?:(\d+):)?(\d+(?:\.\d+)?)$", text)
-    if not m:
-        return None
-    h, mi, s = (g or "0" for g in m.groups())
-    return int(h) * 3600 + int(mi) * 60 + float(s)
+def _parse_hms(text: str | float | int | None) -> float | None:
+    """→ 秒。委托统一解析，避免 ``1:00`` 被当成 1 小时。"""
+    from pipeline.progress import parse_duration_seconds
+
+    return parse_duration_seconds(text)
 
 
 def _load_story(out: str | Path) -> dict:
@@ -245,6 +306,7 @@ def build_plan(
                     "step": 0,
                     "total": 1,
                     "eta_s": None,
+                    "expect_s": default_expect_s(sid),
                     "status": "pending",
                 }
             )
@@ -299,11 +361,20 @@ class ProgressEngine:
         self._portrait_by_name: dict[str, str] = {}
         self._video_merge = None
         self._video_merge_sid: str | None = None
+        self._video_load_meta: dict[str, dict[str, int]] = {}
+        self._kind_samples: dict[str, list[float]] = {}
+        self._stage_load_done: set[str] = set()
+        self._task_started = time.time()
         self._last_emit = 0.0
         self._last_emit_pct = -1.0
         self._subscribers: list[queue.Queue] = []
         self._soft_started: dict[str, float] = {}
+        # 真实步进后的速率时钟（不含模型加载空窗，避免 ETA 外推爆炸）
+        self._rate_started: dict[str, float] = {}
+        self._rate_step0: dict[str, int] = {}
         self._rebuild_plan()
+        # 计划就绪后给 pending 步填初始总 ETA 用的 expect
+        self._refresh_expects_locked()
 
     # -- plan --------------------------------------------------------------
     def _rebuild_plan(self) -> None:
@@ -337,6 +408,79 @@ class ProgressEngine:
                 name = (row.get("label") or "").replace("肖像 ", "", 1).strip()
                 if name:
                     self._portrait_by_name[name] = sid
+        self._refresh_expects_locked()
+
+    def _refresh_expects_locked(self) -> None:
+        for sid, row in self.steps.items():
+            if row.get("status") in {"done", "failed"}:
+                continue
+            row["expect_s"] = self._expect_for(sid)
+
+    def _expect_for(self, step_id: str) -> float:
+        """预设 + 同类别实测平滑；阶段首步再叠加载预算。"""
+        kind = step_kind(step_id)
+        preset = float(STEP_EXPECT_S.get(kind, 30.0))
+        samples = self._kind_samples.get(kind) or []
+        if samples:
+            avg = sum(samples) / len(samples)
+            w = min(0.75, 0.35 + 0.08 * len(samples))
+            base = w * avg + (1.0 - w) * preset
+        else:
+            base = preset
+        row = self.steps.get(step_id) or {}
+        stage = str(row.get("stage") or "")
+        load = float(STAGE_LOAD_EXPECT_S.get(stage, 0.0) or 0.0)
+        if load > 0 and stage not in self._stage_load_done:
+            # 只叠在该阶段第一个未完成步上
+            first = next(
+                (
+                    s
+                    for s in self.step_order
+                    if self.steps[s].get("stage") == stage
+                    and self.steps[s].get("status") not in {"done", "failed"}
+                ),
+                None,
+            )
+            if first == step_id:
+                base += load
+        return max(1.0, base)
+
+    def _note_step_finished(self, step_id: str) -> None:
+        t0 = self._soft_started.pop(step_id, None)
+        self._rate_started.pop(step_id, None)
+        self._rate_step0.pop(step_id, None)
+        if t0 is None:
+            return
+        dur = max(0.5, time.time() - t0)
+        kind = step_kind(step_id)
+        bucket = self._kind_samples.setdefault(kind, [])
+        bucket.append(dur)
+        if len(bucket) > 10:
+            del bucket[:-10]
+        stage = (self.steps.get(step_id) or {}).get("stage")
+        if stage:
+            self._stage_load_done.add(str(stage))
+        self._refresh_expects_locked()
+
+    def _overall_eta_locked(self) -> float | None:
+        if self.status != "running":
+            return 0.0 if self.status == "success" else None
+        total = 0.0
+        for sid in self.step_order:
+            row = self.steps[sid]
+            st = row.get("status")
+            if st in {"done", "failed"}:
+                continue
+            if st == "running":
+                eta = row.get("eta_s")
+                if eta is not None and float(eta) >= 0:
+                    total += float(eta)
+                else:
+                    pct = min(100.0, max(0.0, float(row.get("pct") or 0))) / 100.0
+                    total += max(0.0, self._expect_for(sid) * (1.0 - pct))
+            else:
+                total += self._expect_for(sid)
+        return max(0.0, total)
 
     def ensure_plan(self) -> None:
         snap = None
@@ -445,11 +589,13 @@ class ProgressEngine:
         # 兼容旧前端字段
         running = [dict(s, id=s["id"]) for s in steps if s.get("status") == "running"]
         stage_pct = {r["key"]: r["pct"] for r in stages}
+        overall_eta = self._overall_eta_locked()
         return {
             "seq": self.seq,
             "task_id": self.task_id,
             "status": self.status,
             "overall_pct": overall_pct,
+            "overall_eta_s": overall_eta,
             "current_step_id": self.current_step_id,
             "current_stage": self.current_stage,
             "stages": stages,
@@ -524,6 +670,12 @@ class ProgressEngine:
             self.current_stage = row["stage"]
             self.stage_status[row["stage"]] = "running"
             self._soft_started.setdefault(step_id, time.time())
+            # 刚激活：用预设/学习值给 ETA，避免一直空白
+            if row.get("eta_s") is None:
+                row["expect_s"] = self._expect_for(step_id)
+                row["eta_s"] = float(row["expect_s"])
+            if float(row.get("pct") or 0) <= 0:
+                row["pct"] = max(float(row.get("pct") or 0), 1.0)
 
     def bump_step(
         self,
@@ -586,15 +738,24 @@ class ProgressEngine:
         if new_pct is not None:
             row["pct"] = max(float(row.get("pct") or 0), min(100.0, float(new_pct)))
         if eta_s is not None and row.get("status") == "running":
-            row["eta_s"] = eta_s
+            # 一律按秒写入，并相对预设钳制（杜绝解析/外推出「剩 60 分钟」）
+            expect = float(row.get("expect_s") or self._expect_for(step_id))
+            row["expect_s"] = expect
+            row["eta_s"] = min(self._eta_cap(expect), max(0.0, float(eta_s)))
         if status == "done" or (step is not None and total and step >= total):
+            was_running = row.get("status") == "running"
             row["status"] = "done"
             row["pct"] = 100.0
             row["step"] = int(row.get("total") or 1)
             row["eta_s"] = None
+            if was_running or step_id in self._soft_started:
+                self._note_step_finished(step_id)
         elif row.get("status") != "failed":
             row["status"] = "running"
             self.current_step_id = step_id
+            if row.get("eta_s") is None:
+                row["expect_s"] = self._expect_for(step_id)
+                row["eta_s"] = float(row["expect_s"])
 
     # -- line feed ---------------------------------------------------------
     def feed_line(self, line: str, stage: str | None = None) -> None:
@@ -649,16 +810,90 @@ class ProgressEngine:
                 return
             if step_id not in running:
                 self._activate(step_id)
+            # 全部步骤统一：墙钟均速为主，tqdm ETA 为辅
+            stage = (self.steps.get(step_id) or {}).get("stage")
+            if stage:
+                self._stage_load_done.add(str(stage))
+            eta_s = self._stable_step_eta(step_id, n, total, eta_s)
             self._bump_locked(step_id, step=n, total=total, pct=100.0 * n / max(1, total), eta_s=eta_s)
             return
+
+        # 通用「加载模型」行（静帧 / TTS / 分镜 / 配乐…）
+        if _GENERIC_LOAD.match(text):
+            self._handle_generic_load_locked(text)
+            return
+
+        # 视频加载阶段：即使还没有合并 tqdm，也不能停在 0%
+        load_start = re.match(r"^\[(?P<label>[^\]]+)\]\s*\.\.\.\s*$", text)
+        load_done = re.match(
+            r"^\[(?P<label>[^\]]+)\]\s+done in\s+(?P<sec>\d+(?:\.\d+)?)s\b",
+            text,
+            re.I,
+        )
+        if load_start or load_done:
+            from pipeline.progress import (
+                VIDEO_LOAD_POST_COUNT,
+                VIDEO_LOAD_POST_WEIGHT,
+                VIDEO_LOAD_PRE_COUNT,
+                VIDEO_LOAD_PRE_WEIGHT,
+                classify_load_phase,
+                video_progress_plan,
+            )
+
+            label = (load_start or load_done).group("label")
+            kind = classify_load_phase(label)
+            if kind in {"pre", "post"}:
+                sid = self.current_step_id
+                if not sid or not sid.startswith("videos:"):
+                    for cand in self.step_order:
+                        if cand.startswith("videos:") and self.steps[cand]["status"] not in {
+                            "done",
+                            "failed",
+                        }:
+                            sid = cand
+                            break
+                if sid and sid in self.steps and self.steps[sid]["status"] != "done":
+                    plan = video_progress_plan(DENOISE_PLAN)
+                    tot = sum(plan) or 1
+                    pre = VIDEO_LOAD_PRE_WEIGHT
+                    post = VIDEO_LOAD_POST_WEIGHT
+                    cur = int(self.steps[sid].get("step") or 0)
+                    meta = self._video_load_meta.setdefault(sid, {"pre": 0, "post": 0})
+                    if load_done:
+                        meta[kind] = min(
+                            int(meta.get(kind) or 0) + 1,
+                            VIDEO_LOAD_PRE_COUNT if kind == "pre" else VIDEO_LOAD_POST_COUNT,
+                        )
+                    if kind == "pre":
+                        frac = (int(meta.get("pre") or 0) + (0 if load_done else 0.35)) / max(
+                            1, VIDEO_LOAD_PRE_COUNT
+                        )
+                        target = max(cur, max(1, int(round(min(1.0, frac) * pre))))
+                    else:
+                        base = pre + sum(DENOISE_PLAN)
+                        frac = (int(meta.get("post") or 0) + (0 if load_done else 0.35)) / max(
+                            1, VIDEO_LOAD_POST_COUNT
+                        )
+                        target = max(cur, base + max(1, int(round(min(1.0, frac) * post))))
+                    self._activate(sid)
+                    eta = self._stable_step_eta(sid, target, tot, None)
+                    self._bump_locked(
+                        sid,
+                        step=target,
+                        total=tot,
+                        pct=100.0 * target / tot,
+                        eta_s=eta,
+                    )
+                return
 
         if _STORYBOARD_START.match(text) and "storyboard:generate" in self.steps:
             self._activate("storyboard:generate")
             if self.steps["storyboard:generate"]["status"] != "done":
-                self.steps["storyboard:generate"]["status"] = "running"
-                self.steps["storyboard:generate"]["pct"] = max(
-                    float(self.steps["storyboard:generate"].get("pct") or 0), 5.0
-                )
+                sid = "storyboard:generate"
+                self.steps[sid]["status"] = "running"
+                self.steps[sid]["pct"] = max(float(self.steps[sid].get("pct") or 0), 5.0)
+                self.steps[sid]["expect_s"] = self._expect_for(sid)
+                self.steps[sid]["eta_s"] = self._soft_eta_locked(sid)
             return
 
         if _STORYBOARD_DONE.match(text) and "storyboard:generate" in self.steps:
@@ -670,10 +905,11 @@ class ProgressEngine:
         if _MUX_START.match(text) and "assemble:mux" in self.steps:
             self._activate("assemble:mux")
             if self.steps["assemble:mux"]["status"] != "done":
-                self.steps["assemble:mux"]["status"] = "running"
-                self.steps["assemble:mux"]["pct"] = max(
-                    float(self.steps["assemble:mux"].get("pct") or 0), 1.0
-                )
+                sid = "assemble:mux"
+                self.steps[sid]["status"] = "running"
+                self.steps[sid]["pct"] = max(float(self.steps[sid].get("pct") or 0), 1.0)
+                self.steps[sid]["expect_s"] = self._expect_for(sid)
+                self.steps[sid]["eta_s"] = self._soft_eta_locked(sid)
             return
 
         if _MUX_DONE.match(text) and "assemble:mux" in self.steps:
@@ -720,6 +956,8 @@ class ProgressEngine:
                     if self.steps[step_id]["status"] != "done":
                         self.steps[step_id]["status"] = "running"
                         self.steps[step_id]["pct"] = max(float(self.steps[step_id].get("pct") or 0), 1.0)
+                        self.steps[step_id]["expect_s"] = self._expect_for(step_id)
+                        self.steps[step_id]["eta_s"] = self._soft_eta_locked(step_id)
                 return
 
     def _step_id_for_desc(self, desc: str) -> str | None:
@@ -734,9 +972,123 @@ class ProgressEngine:
             return template.format(**{k: mm.group(k) for k in mm.groupdict()})
         return None
 
+    def _guess_load_stage(self, text: str) -> str | None:
+        low = (text or "").lower()
+        if "分镜" in text or "llm" in low:
+            return "storyboard"
+        if any(k in text for k in ("文生图", "参考图", "尾帧", "mflux", "肖像")) or "flux" in low:
+            return "images"
+        if "tts" in low or "对白" in text:
+            return "audio"
+        if "配乐" in text or "musicgen" in low:
+            return "music"
+        if "gemma" in low or "ltx" in low or "transformer" in low or "decoder" in low:
+            return "videos"
+        return self.current_stage
+
+    def _first_open_step(self, stage: str | None) -> str | None:
+        if not stage:
+            return None
+        for sid in self.step_order:
+            row = self.steps[sid]
+            if row.get("stage") == stage and row.get("status") not in {"done", "failed"}:
+                return sid
+        return None
+
+    def _eta_cap(self, expect: float) -> float:
+        """单步 ETA 上限：预设的 1.6 倍，至少多留 45s，避免加载慢时外推出几十分钟。"""
+        expect = max(1.0, float(expect))
+        return max(expect * 1.6, expect + 45.0)
+
+    def _soft_eta_locked(self, step_id: str) -> float:
+        expect = float(self.steps.get(step_id, {}).get("expect_s") or self._expect_for(step_id))
+        t0 = self._soft_started.get(step_id) or time.time()
+        elapsed = max(0.0, time.time() - t0)
+        pct = min(100.0, max(0.0, float((self.steps.get(step_id) or {}).get("pct") or 0))) / 100.0
+        # 加载期只按「预设剩余」估，绝不把已耗时外推成更长
+        rem = max(expect * (1.0 - pct), expect - elapsed, 1.0)
+        if elapsed > expect:
+            # 已超时：给一个收缩的尾巴，而不是 elapsed*1.5 越跑越大
+            rem = max(15.0, expect * 0.25)
+        return min(self._eta_cap(expect), rem)
+
+    def _handle_generic_load_locked(self, text: str) -> None:
+        """加载行：当前阶段首个未完成步立刻占百分比 + ETA。"""
+        stage = self._guess_load_stage(text)
+        sid = self.current_step_id if (self.current_step_id and self.steps.get(self.current_step_id, {}).get("stage") == stage) else None
+        if not sid or (self.steps.get(sid) or {}).get("status") in {"done", "failed"}:
+            sid = self._first_open_step(stage)
+        if not sid or sid not in self.steps:
+            return
+        if self.steps[sid].get("status") == "done":
+            return
+        self._activate(sid)
+        expect = self._expect_for(sid)
+        self.steps[sid]["expect_s"] = expect
+        t0 = self._soft_started.get(sid) or time.time()
+        load = float(STAGE_LOAD_EXPECT_S.get(str(self.steps[sid].get("stage") or ""), 25.0) or 25.0)
+        elapsed = max(0.2, time.time() - t0)
+        # 加载期最多爬到 18%，给真正生成留空间
+        frac = min(0.18, 0.04 + 0.14 * min(1.0, elapsed / max(8.0, load)))
+        pct = max(float(self.steps[sid].get("pct") or 0), frac * 100.0)
+        self.steps[sid]["pct"] = pct
+        self.steps[sid]["status"] = "running"
+        self.steps[sid]["eta_s"] = self._soft_eta_locked(sid)
+
+    def _stable_step_eta(
+        self, step_id: str, step: int, total: int, tqdm_eta: float | None
+    ) -> float | None:
+        """墙钟均速 + 预设；早期不信外推，并硬钳制，杜绝「加载 2 分钟 → 剩 60 分钟」。"""
+        total = max(1, int(total or 1))
+        step = max(0, int(step or 0))
+        # 速率时钟：有真实步进后才开始计，避开加载期把 elapsed 灌进 unit
+        rate_t0 = self._rate_started.get(step_id)
+        if step > 0:
+            if rate_t0 is None:
+                self._rate_started[step_id] = time.time()
+                self._rate_step0[step_id] = step
+                rate_t0 = self._rate_started[step_id]
+            rate_elapsed = max(0.2, time.time() - rate_t0)
+            rate_steps = max(1, step - int(self._rate_step0.get(step_id) or step) + 1)
+        else:
+            rate_elapsed = max(0.2, time.time() - (self._soft_started.get(step_id) or time.time()))
+            rate_steps = 0
+        expect = float((self.steps.get(step_id) or {}).get("expect_s") or self._expect_for(step_id))
+        cap = self._eta_cap(expect)
+        frac = step / float(total)
+        preset_rem = max(0.0, expect * (1.0 - frac))
+        # 丢弃离谱的 tqdm ETA（例如把 M:SS 解析炸了、或瞬时尖刺）
+        te = float(tqdm_eta) if tqdm_eta is not None and tqdm_eta > 0 else None
+        if te is not None and te > cap * 1.2:
+            te = None
+        if step <= 0:
+            rem = self._soft_eta_locked(step_id)
+            if te is not None:
+                rem = 0.6 * rem + 0.4 * te
+            return min(cap, max(5.0, rem))
+        unit = rate_elapsed / float(rate_steps)
+        wall = max(0.0, (total - step) * unit)
+        # 进度越靠前越信预设；过半后再信墙钟
+        if frac < 0.15:
+            w_wall = 0.12
+        elif frac < 0.4:
+            w_wall = 0.35
+        else:
+            w_wall = 0.6
+        mixed = w_wall * min(wall, cap) + (1.0 - w_wall) * preset_rem
+        if te is not None:
+            mixed = 0.75 * mixed + 0.25 * te
+        return min(cap, max(0.0, mixed))
+
+    def _stable_video_eta(
+        self, step_id: str, step: int, total: int, tqdm_eta: float | None
+    ) -> float | None:
+        """兼容旧名。"""
+        return self._stable_step_eta(step_id, step, total, tqdm_eta)
+
     def _merge_denoise(self, n: int, total: int, eta_s: float | None) -> str | None:
-        """原始 Denoising 行：挂到当前视频步，用 StageMerge(8,3)。"""
-        from pipeline.progress import StageMerge
+        """原始 Denoising 行：挂到当前视频步；分母含加载/收尾权重。"""
+        from pipeline.progress import StageMerge, video_progress_plan
 
         sid = self.current_step_id
         if not sid or not sid.startswith("videos:"):
@@ -747,16 +1099,22 @@ class ProgressEngine:
                     break
         if not sid or sid not in self.steps:
             return None
+        plan = video_progress_plan(DENOISE_PLAN)
         if self._video_merge is None or self._video_merge_sid != sid:
-            self._video_merge = StageMerge(DENOISE_PLAN)
+            # 原始 Denoising 不含加载段：先把 pre 权重咬满，再接去噪
+            self._video_merge = StageMerge(plan)
             self._video_merge_sid = sid
+            if plan and plan[0] > 0 and len(plan) > 1:
+                self._video_merge.update(plan[0], plan[0])
         done, overall = self._video_merge.update(n, total)
         self._activate(sid)
+        tot = overall or sum(plan)
+        eta_s = self._stable_video_eta(sid, done, tot, eta_s)
         self._bump_locked(
             sid,
             step=done,
-            total=overall or sum(DENOISE_PLAN),
-            pct=100.0 * done / max(1, overall or sum(DENOISE_PLAN)),
+            total=tot,
+            pct=100.0 * done / max(1, tot),
             eta_s=eta_s,
         )
         return sid
@@ -824,17 +1182,25 @@ class ProgressEngine:
                 row["pct"] = 100.0
                 row["eta_s"] = None
 
-        # 无 tqdm 的 running 步：时间软爬到 30%
+        # 无 tqdm 的 running 步：按预设耗时软爬百分比 + ETA（最高约 85%）
         now = time.time()
         for sid, row in self.steps.items():
             if row.get("status") != "running":
                 continue
             if int(row.get("total") or 1) > 1 and int(row.get("step") or 0) > 0:
-                continue  # 已有真实步数
+                # 有真实步数时仍刷新 ETA
+                row["eta_s"] = self._stable_step_eta(
+                    sid, int(row.get("step") or 0), int(row.get("total") or 1), row.get("eta_s")
+                )
+                continue
             t0 = self._soft_started.get(sid) or now
             self._soft_started.setdefault(sid, t0)
-            soft = min(30.0, (now - t0) * 2.0)  # ~15s 到 30%
+            expect = float(row.get("expect_s") or self._expect_for(sid))
+            row["expect_s"] = expect
+            frac = min(0.85, max(0.02, (now - t0) / max(5.0, expect)))
+            soft = frac * 100.0
             row["pct"] = max(float(row.get("pct") or 0), soft)
+            row["eta_s"] = self._soft_eta_locked(sid)
 
         # 从日志补视频/配乐/静帧 tqdm（Attached 路径）
         self._observe_logs_locked()
@@ -864,20 +1230,37 @@ class ProgressEngine:
             log = logs / f"{shot}.log"
             if not log.exists():
                 continue
-            info = self._latest_tqdm(log, desc_substr="Denoising", plan=DENOISE_PLAN)
+            # 优先读合并后的镜头条（含加载权重）；没有再退回原始 Denoising
+            info = self._latest_tqdm(log, desc_substr=f"{shot} ")
+            if not info:
+                from pipeline.progress import VIDEO_LOAD_POST_WEIGHT, VIDEO_LOAD_PRE_WEIGHT
+
+                raw = self._latest_tqdm(log, desc_substr="Denoising", plan=DENOISE_PLAN)
+                if raw:
+                    pre = VIDEO_LOAD_PRE_WEIGHT
+                    post = VIDEO_LOAD_POST_WEIGHT
+                    tot = pre + int(raw["total"]) + post
+                    done = pre + int(raw["n"])
+                    info = {
+                        "n": done,
+                        "total": tot,
+                        "pct": 100.0 * done / max(1, tot),
+                        "eta_s": raw.get("eta_s"),
+                    }
             if not info:
                 continue
+            eta = self._stable_step_eta(sid, info["n"], info["total"], info.get("eta_s"))
             self._activate(sid)
             self._bump_locked(
                 sid,
                 step=info["n"],
                 total=info["total"],
                 pct=info["pct"],
-                eta_s=info.get("eta_s"),
+                eta_s=eta,
             )
             break
 
-        # webui 日志里的静帧 / 配乐
+        # webui 日志里的静帧 / 视频合并条 / 配乐
         if logs.is_dir():
             cands = sorted(logs.glob("webui-*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
             if cands:
@@ -896,8 +1279,13 @@ class ProgressEngine:
                     if self.steps[step_id].get("status") == "done":
                         continue
                     n, total = int(tm.group("n")), int(tm.group("total"))
+                    eta_m = _TQDM_ETA.search(line)
+                    eta_s = _parse_hms(eta_m.group("eta")) if eta_m else None
+                    eta_s = self._stable_step_eta(step_id, n, total, eta_s)
                     self._activate(step_id)
-                    self._bump_locked(step_id, step=n, total=total, pct=100.0 * n / max(1, total))
+                    self._bump_locked(
+                        step_id, step=n, total=total, pct=100.0 * n / max(1, total), eta_s=eta_s
+                    )
                     break
 
         bgm_log = logs / "bgm.log"
@@ -906,13 +1294,16 @@ class ProgressEngine:
                 bgm_log, desc_substr="配乐"
             )
             if info:
+                eta = self._stable_step_eta(
+                    "music:bgm", info["n"], info["total"], info.get("eta_s")
+                )
                 self._activate("music:bgm")
                 self._bump_locked(
                     "music:bgm",
                     step=info["n"],
                     total=info["total"],
                     pct=info["pct"],
-                    eta_s=info.get("eta_s"),
+                    eta_s=eta,
                 )
 
     def _read_tail(self, path: Path, nbytes: int = 24576) -> str:

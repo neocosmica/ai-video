@@ -298,13 +298,11 @@ def infer_stage_status(out: str | Path, stages: list[str] | None = None) -> dict
     return status
 
 
-def _parse_hms(text: str) -> float | None:
-    text = (text or "").strip()
-    m = re.match(r"^(?:(\d+):)?(?:(\d+):)?(\d+(?:\.\d+)?)$", text)
-    if not m:
-        return None
-    h, mi, s = (g or "0" for g in m.groups())
-    return int(h) * 3600 + int(mi) * 60 + float(s)
+def _parse_hms(text: str | float | int | None) -> float | None:
+    """→ 秒。旧实现会把 ``1:00``（1 分钟）误解析成 3600 秒。"""
+    from pipeline.progress import parse_duration_seconds
+
+    return parse_duration_seconds(text)
 
 
 def _read_log_tail(path: Path, nbytes: int = 24576) -> str:
