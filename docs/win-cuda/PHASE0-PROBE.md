@@ -326,6 +326,18 @@ POSIX 行为保持不变（实测 `build_pipeline_cmd` / `build_artifact_groups_
 `/api/state` 用 `tasks` 字段且需 `?project=`；分镜缺失时 `final` 闭包展不开，须先跑一轮分镜；
 `/api/queue/add` 入参是 `kind/id/posts` 而非 `items`。
 
+## 7.2 网页连续多阶段（run --from）分支验收
+
+网页勾选「连续多个阶段」时不走单跑队列，而是 `pipeline run --from <首个> --until <末个>`。
+该分支在 Windows 上单独实测（`--from storyboard --until assemble`）：
+
+- `rc=0`，耗时 640 秒
+- 七个阶段分隔行齐备：`storyboard / screenplay / images / audio / videos / music / assemble`
+- 产出 `final.mp4`：4.46 秒 / 106 帧 / 384x640@24fps / h264+aac
+- 抽帧确认画面真实（便利店双人 + 对应台词字幕）
+
+至此网页两种启动路径（单跑队列 / 连续阶段 run）在 Windows 上都有实测通过证据。
+
 ## 8. 下一步
 
 1. 确认最新 I2V 修复的抽帧无网格伪影、首帧与输入静帧一致
