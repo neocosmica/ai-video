@@ -229,20 +229,9 @@ def _wait_memory_headroom(min_free_pct: float = 25.0, timeout_s: float = 90.0) -
     """粗略等统一内存喘口气，降低 Gemma/connector 连续加载被 jetsam 杀掉的概率。"""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        try:
-            out = subprocess.check_output(["memory_pressure"], text=True, stderr=subprocess.DEVNULL)
-        except (OSError, subprocess.CalledProcessError):
-            return
-        free = None
-        for line in out.splitlines():
-            if "System-wide memory free percentage" in line:
-                # e.g. "System-wide memory free percentage: 35%"
-                raw = line.rsplit(":", 1)[-1].strip().rstrip("%")
-                try:
-                    free = float(raw)
-                except ValueError:
-                    free = None
-                break
+        from pipeline.platform import free_memory_percent
+
+        free = free_memory_percent()
         if free is None or free >= min_free_pct:
             return
         print(f"内存空闲约 {free:.0f}%，等待回收后再加载 Gemma…")

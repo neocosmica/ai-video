@@ -31,12 +31,14 @@ CHARS_PER_SECOND = 2.4
 
 
 def total_memory_bytes() -> int:
-    """本机物理统一内存字节数。不用 sysctl / mx.device_info。"""
-    pages = os.sysconf("SC_PHYS_PAGES")
-    page_size = os.sysconf("SC_PAGE_SIZE")
-    if pages <= 0 or page_size <= 0:
-        raise SystemExit("无法读取本机总内存（SC_PHYS_PAGES / SC_PAGE_SIZE）")
-    return int(pages) * int(page_size)
+    """本机物理内存字节数。
+
+    统一走 ``pipeline.platform``：macOS/Linux 用 sysconf，Windows 用
+    ``GlobalMemoryStatusEx``（不引入 psutil）。Mac 行为与之前一致。
+    """
+    from pipeline.platform import total_memory_bytes as _total
+
+    return _total()
 
 
 def gib(bytes_: int | float) -> float:

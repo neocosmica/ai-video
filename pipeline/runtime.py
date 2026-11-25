@@ -36,7 +36,12 @@ def musicgen_venv_path() -> Path:
 
 
 def clear_uf_hidden(path: Path) -> None:
+    """清掉 macOS 的 uchg/hidden 标志。非 macOS 平台是空操作。"""
     if not path.exists():
+        return
+    from pipeline.platform import IS_MAC
+
+    if not IS_MAC:
         return
     subprocess.call(
         ["chflags", "-R", "nohidden", str(path)],

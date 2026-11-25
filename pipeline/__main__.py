@@ -82,6 +82,25 @@ def cmd_doctor(_: argparse.Namespace) -> None:
     print(f"HF 镜像：{os.environ.get('HF_ENDPOINT')}")
     print(f"PyPI 镜像：{os.environ.get('UV_INDEX_URL')}")
     print(f"禁用 XET：{os.environ.get('HF_HUB_DISABLE_XET')}")
+    # ---- 平台与推理后端 ----
+    from pipeline import platform as plat
+    from pipeline.backends import describe as describe_backend
+
+    pinfo = plat.describe()
+    print(f"平台：{pinfo['platform']}  Python {pinfo['python']}")
+    print(f"总内存：{pinfo['total_memory_gb']} GB")
+    if pinfo["nvidia_vram_gb"]:
+        print(f"NVIDIA 显存：{pinfo['nvidia_vram_gb']} GB（nvidia-smi 可用）")
+    elif pinfo["has_nvidia_smi"]:
+        print("NVIDIA：有 nvidia-smi 但读不到显存")
+    else:
+        print("NVIDIA：未检测到 nvidia-smi")
+    b = describe_backend(getattr(settings, "backend", None))
+    print(f"推理后端：{b['backend']}（{b['reason']}）")
+    if b["backend"] == "cuda":
+        print(f"  torch CUDA 就绪：{b.get('torch_cuda_ready', False)}")
+    print(f"缓存目录：{pinfo['cache_dir']}")
+    print(f"字幕字体：{pinfo['subtitle_font']}（{pinfo['font_dir']}）")
     uv = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
     print(f"uv：{uv}（{'存在' if Path(uv).exists() or shutil.which('uv') else '缺失'}）")
     print(f"ffmpeg：{settings.ffmpeg}（{'存在' if settings.ffmpeg.exists() else '缺失'}）")

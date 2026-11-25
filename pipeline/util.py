@@ -64,7 +64,9 @@ def allowed_data_roots() -> list[Path]:
     except Exception:
         pass
     # Application Support 日志等
-    support = Path.home() / "Library" / "Application Support" / "AI短视频"
+    from pipeline.platform import app_support_dir
+
+    support = app_support_dir()
     roots.append(support.resolve())
     # 去重保序
     seen: set[str] = set()

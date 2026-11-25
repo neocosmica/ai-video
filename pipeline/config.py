@@ -58,6 +58,17 @@ class Settings:
     ffprobe: Path = ROOT / "tools" / "ffprobe"
     # resolve_frame_cap 的明细，供 doctor / budget 打印；不入库
     budget_detail: dict[str, Any] = field(default_factory=dict, repr=False)
+    # ---- 推理后端（见 pipeline/backends）----
+    # auto：macOS→mlx，Windows/Linux 有 NVIDIA→cuda
+    backend: str = "auto"
+    # CUDA 后端专用参数（Mac 端忽略）
+    cuda_video_gguf: str = "ltx-2-19b-dev-Q2_K.gguf"
+    cuda_video_gguf_repo: str = "unsloth/LTX-2-GGUF"
+    cuda_conf_repo: str = "Lightricks/LTX-2"
+    cuda_image_model: str = "black-forest-labs/FLUX.2-klein-4B"
+    cuda_llm_model: str = "Qwen/Qwen3.5-4B"
+    cuda_llm_quant: str = "4bit"
+    cuda_tts_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 
     def token_budget_table(self) -> tuple[tuple[float, int], ...] | None:
         raw = self.video_token_budget_table

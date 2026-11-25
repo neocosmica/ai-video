@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import codecs
 import os
-import pty
 import re
 import select
 import shutil
@@ -275,6 +274,8 @@ def run_tee(
     use_pty = hasattr(os, "openpty") and sys.platform != "win32"
     if use_pty:
         try:
+            import pty  # Windows 无此模块，但上面已用 use_pty 拦住
+
             master, slave = pty.openpty()
         except OSError:
             # 某些容器/受限环境没有可用 PTY；退回普通管道

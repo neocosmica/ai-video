@@ -9,8 +9,11 @@ from pipeline.config import Settings
 from pipeline.projects import WORK_DIRNAME, artifacts_dir, artifacts_sub
 from pipeline.util import ass_escape, ass_time, ffmpeg_concat_line, load_json, resolve
 
-FONT_DIR = Path("/System/Library/Fonts/Supplemental")
-FONT_NAME = "Songti SC"
+#: 字幕字体：macOS 用 Supplemental + Songti SC；Windows 用 Fonts + Microsoft YaHei
+from pipeline.platform import font_dir as _font_dir, subtitle_font_name as _subtitle_font
+
+FONT_DIR = _font_dir()
+FONT_NAME = _subtitle_font()
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> None:
