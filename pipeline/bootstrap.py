@@ -190,8 +190,16 @@ def _pkg_items() -> list[dict[str, Any]]:
     except Exception as exc:
         add("mflux", "文生图依赖 mflux", False, str(exc))
 
-    ffmpeg = settings.ffmpeg
-    add("ffmpeg", "ffmpeg", ffmpeg.exists(), str(ffmpeg) if ffmpeg.exists() else "缺 tools/ffmpeg")
+    from pipeline.media_bins import binary_runnable
+
+    # Settings.load 已做过包内→系统回退；这里再试跑，堵住「文件在但不可执行」假阳性
+    ff_ok, ff_detail = binary_runnable(settings.ffmpeg)
+    fp_ok, fp_detail = binary_runnable(settings.ffprobe)
+    if ff_ok and fp_ok:
+        note = str((settings.budget_detail or {}).get("ffmpeg") or ff_detail)
+        add("ffmpeg", "ffmpeg", True, note)
+    else:
+        add("ffmpeg", "ffmpeg", False, ff_detail if not ff_ok else fp_detail)
 
     try:
         cli = ltx_cli(settings.ltx_dir)

@@ -179,16 +179,83 @@ done
 echo "已确认 LTX Gemma 分阶段加载"
 
 mkdir -p tools
+
+# Apple Silicon 应用：tools/ffmpeg 必须是本机 CPU 架构（arm64），
+# 否则未装 Rosetta 的 Mac 会在视频阶段报 Bad CPU type in executable。
+host_arch="$(uname -m)"
+bin_arch() {
+  local p="$1"
+  [[ -f "$p" ]] || { print -r -- ""; return; }
+  # lipo 对非 Mach-O / 缺工具时安静失败
+  /usr/bin/lipo -archs "$p" 2>/dev/null | awk '{print $1; exit}'
+}
+bin_matches_host() {
+  local p="$1"
+  local a
+  a="$(bin_arch "$p")"
+  [[ -n "$a" && "$a" == "$host_arch" ]]
+}
+
+# 无 brew 时：从 npmmirror 拉 @ffmpeg-installer / @ffprobe-installer 的 darwin-arm64
+download_bin_npmmirror() {
+  local name="$1"
+  local pkg ver url
+  case "$name-$host_arch" in
+    ffmpeg-arm64)  pkg="@ffmpeg-installer/darwin-arm64";  ver="4.1.5" ;;
+    ffprobe-arm64) pkg="@ffprobe-installer/darwin-arm64"; ver="5.0.1" ;;
+    *) return 1 ;;
+  esac
+  url="https://registry.npmmirror.com/${pkg}/-/${pkg##*/}-${ver}.tgz"
+  local tmp
+  tmp="$(mktemp -d "$ROOT/tools/.${name}-dl.XXXXXX")"
+  echo "经 npmmirror 下载 $name（$host_arch）…"
+  if ! curl_cn -o "$tmp/pkg.tgz" "$url"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  mkdir -p "$tmp/out"
+  tar -xzf "$tmp/pkg.tgz" -C "$tmp/out"
+  local bin
+  bin="$(find "$tmp/out" -type f -name "$name" | head -1)"
+  if [[ -z "$bin" || ! -f "$bin" ]]; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! bin_matches_host "$bin"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  cp -f "$bin" "tools/$name"
+  chmod +x "tools/$name"
+  xattr -dr com.apple.quarantine "tools/$name" 2>/dev/null || true
+  codesign -s - --force "tools/$name" 2>/dev/null || true
+  rm -rf "$tmp"
+  return 0
+}
+
 download_bin() {
   local name="$1"
-  if [[ -x "tools/$name" ]]; then
-    echo "使用仓内 tools/$name"
+  if [[ -x "tools/$name" ]] && bin_matches_host "tools/$name"; then
+    echo "使用仓内 tools/$name（$host_arch）"
     return
   fi
-  echo "仓内缺少 tools/$name，尝试经清华 Homebrew 镜像安装"
+  if [[ -x "tools/$name" ]]; then
+    echo "仓内 tools/$name 架构是 $(bin_arch "tools/$name")，本机是 $host_arch，需要替换"
+    mv -f "tools/$name" "tools/${name}.wrong-arch.bak"
+  else
+    echo "仓内缺少 tools/$name"
+  fi
+
+  if download_bin_npmmirror "$name"; then
+    echo "已写入 tools/$name（npmmirror / $host_arch）"
+    return
+  fi
+
+  echo "尝试经清华 Homebrew 镜像安装 $name（$host_arch）"
   if ! command -v brew >/dev/null 2>&1; then
-    echo "未找到 brew，无法从国内源补 $name。" >&2
-    echo "请把可执行文件放到 tools/$name 后重跑 setup。" >&2
+    echo "未找到 brew，且 npmmirror 补 $name 失败。" >&2
+    echo "请把 $host_arch 版可执行文件放到 tools/$name 后重跑 setup。" >&2
+    echo "（勿使用 evermeet / Intel 版；未装 Rosetta 的 Apple Silicon 会 Bad CPU type。）" >&2
     exit 1
   fi
   if [[ "$name" == "ffmpeg" || "$name" == "ffprobe" ]]; then
@@ -198,6 +265,10 @@ download_bin() {
   bin="$(command -v "$name" || true)"
   if [[ -z "$bin" || ! -x "$bin" ]]; then
     echo "brew 安装后仍找不到 $name" >&2
+    exit 1
+  fi
+  if ! bin_matches_host "$bin"; then
+    echo "brew 的 $name 仍是 $(bin_arch "$bin")，与本机 $host_arch 不符" >&2
     exit 1
   fi
   cp "$bin" "tools/$name"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -20,6 +21,23 @@ from pipeline.runtime import (
 )
 from pipeline.progress import run_tee
 from pipeline.util import dump_json, load_json, resolve, snap, snap_frames
+
+# 环境类错误：同一批再跑下一镜也必然挂，应立即终止并写清原因
+_ENV_ERROR_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"Bad CPU type|Errno 86", re.I),
+        "ffmpeg 架构与本机不符（Bad CPU type）。请重跑 ./scripts/setup.sh 换 arm64 版，"
+        "或安装 Rosetta：softwareupdate --install-rosetta",
+    ),
+    (
+        re.compile(r"ffmpeg not found|找不到 ffmpeg|No such file.*ffmpeg", re.I),
+        "找不到可用的 ffmpeg。请先 ./scripts/setup.sh 或 brew install ffmpeg",
+    ),
+    (
+        re.compile(r"ffprobe not found|找不到 ffprobe", re.I),
+        "找不到可用的 ffprobe。请先 ./scripts/setup.sh 或 brew install ffmpeg",
+    ),
+)
 
 DEFAULT_GEMMA = "mlx-community/gemma-3-12b-it-4bit"
 
@@ -170,11 +188,45 @@ def _video_env(settings: Settings, *, offline: bool) -> dict[str, str]:
         settings.ltx_dir / "packages" / "ltx-core-mlx" / "src",
     ]
     env["PYTHONPATH"] = os.pathsep.join(str(path) for path in srcs)
+    # LTX 用 shutil.which("ffmpeg")：把已校验可用的 bin 目录放最前，避开坏的 tools/
+    ff_dir = str(Path(settings.ffmpeg).resolve().parent)
     local_bin = str(Path.home() / ".local" / "bin")
-    env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
+    env["PATH"] = os.pathsep.join(
+        [ff_dir, local_bin, env.get("PATH", "")]
+    )
     # 子进程勿继承主项目 VIRTUAL_ENV，否则会指到错误解释器
     env.pop("VIRTUAL_ENV", None)
     return env
+
+
+def _read_log_tail(path: Path, nbytes: int = 12288) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    if len(data) > nbytes:
+        data = data[-nbytes:]
+    return data.decode("utf-8", errors="replace")
+
+
+def _classify_video_failure(log: Path, code: int) -> tuple[str, bool]:
+    """返回 (用户可见原因, 是否环境类需整批终止)。"""
+    text = _read_log_tail(log)
+    for pattern, message in _ENV_ERROR_PATTERNS:
+        if pattern.search(text):
+            return message, True
+    # 子进程还没写出日志就因 exec 失败退出时，偶发信息在 stderr 已进 log 头
+    if code != 0 and not text.strip():
+        return f"退出码 {code}，日志为空", False
+    # 截一句最像报错的行
+    for line in reversed(text.splitlines()):
+        s = line.strip()
+        if not s:
+            continue
+        if re.search(r"Error|Exception|OSError|Traceback|failed|找不到", s, re.I):
+            short = s if len(s) <= 180 else s[:177] + "…"
+            return f"{short}（退出码 {code}）", False
+    return f"退出码 {code}，详见 {log.name}", False
 
 
 def _prepare_a2v_audio(out: Path, shot: dict, voice: Path, frames: int, fps: int) -> Path:
@@ -253,6 +305,17 @@ def cmd_videos(args: argparse.Namespace) -> None:
     settings = Settings.load(resolve(args.config) if args.config else None)
     if not settings.ltx_dir.exists():
         raise SystemExit(f"还没有视频模型代码：{settings.ltx_dir}。请先运行 scripts/setup.sh")
+    from pipeline.media_bins import binary_runnable
+
+    ff_ok, ff_detail = binary_runnable(settings.ffmpeg)
+    fp_ok, fp_detail = binary_runnable(settings.ffprobe)
+    if not ff_ok or not fp_ok:
+        raise SystemExit(
+            f"视频环境错误（ffmpeg 不可用，已终止）：{ff_detail if not ff_ok else fp_detail}"
+        )
+    note = (settings.budget_detail or {}).get("ffmpeg")
+    if note:
+        print(f"ffmpeg：{note}", flush=True)
     ensure_runtime_layout(ltx_dir=settings.ltx_dir)
     preflight(ltx_dir=settings.ltx_dir, python=ltx_python(settings.ltx_dir), soft=False)
     _ensure_ltx_patches(settings)
@@ -300,13 +363,25 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 print(f"跳过 {shot['id']}：请先 ./scripts/run.sh audio --out {out}")
                 continue
             audio_for_ltx = _prepare_a2v_audio(out, shot, voice, frames, settings.video_fps)
+        def _fail_shot(log_path: Path, exit_code: int) -> None:
+            nonlocal failures
+            reason, is_env = _classify_video_failure(log_path, exit_code)
+            shot["video_error"] = reason
+            failures += 1
+            dump_json(story_path, story)  # 立刻落盘，UI 能读到失败原因
+            if is_env:
+                print(f"镜头 {shot['id']} 环境错误，终止本批：{reason}")
+                raise SystemExit(f"视频环境错误（已终止，避免重复失败）：{reason}")
+            print(f"镜头 {shot['id']} 失败：{reason}；继续下一个。")
+
         _wait_memory_headroom()
+        log_path = artifacts_sub(out, "logs", f"{shot['id']}.log")
         code = _run_once(
             settings,
             shot,
             image,
             dest,
-            artifacts_sub(out, "logs", f"{shot['id']}.log"),
+            log_path,
             width,
             height,
             frames,
@@ -315,6 +390,11 @@ def cmd_videos(args: argparse.Namespace) -> None:
             offline=offline,
             audio=audio_for_ltx,
         )
+        if code != 0 or not dest.exists():
+            reason, is_env = _classify_video_failure(log_path, code)
+            if is_env:
+                _fail_shot(log_path, code)
+                continue
         # 被系统杀掉（负退出码）或 Gemma/connector 峰值 OOM：等内存后重试一次
         if code != 0 and (code < 0 or not dest.exists()):
             print(f"{shot['id']} 失败（退出码 {code}），回收内存后重试一次…")
@@ -322,12 +402,13 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 dest.unlink()
             _wait_memory_headroom(min_free_pct=30.0, timeout_s=120.0)
             time.sleep(3)
+            log_path = artifacts_sub(out, "logs", f"{shot['id']}-retry.log")
             code = _run_once(
                 settings,
                 shot,
                 image,
                 dest,
-                artifacts_sub(out, "logs", f"{shot['id']}-retry.log"),
+                log_path,
                 width,
                 height,
                 frames,
@@ -336,6 +417,11 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 offline=offline,
                 audio=audio_for_ltx,
             )
+            if code != 0 or not dest.exists():
+                reason, is_env = _classify_video_failure(log_path, code)
+                if is_env:
+                    _fail_shot(log_path, code)
+                    continue
         small = (320, snap(576, 64), snap_frames(25))
         if code < 0 and (width, height, frames) != small:
             print(f"{shot['id']} 仍被系统杀掉，改成 320x576、25 帧再试一次。")
@@ -344,12 +430,13 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 dest.unlink()
             if audio_for_ltx is not None and voice.exists():
                 audio_for_ltx = _prepare_a2v_audio(out, shot, voice, frames, settings.video_fps)
+            log_path = artifacts_sub(out, "logs", f"{shot['id']}-small.log")
             code = _run_once(
                 settings,
                 shot,
                 image,
                 dest,
-                artifacts_sub(out, "logs", f"{shot['id']}-small.log"),
+                log_path,
                 width,
                 height,
                 frames,
@@ -359,9 +446,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 audio=audio_for_ltx,
             )
         if code != 0 or not dest.exists():
-            shot["video_error"] = f"退出码 {code}，详见 work/logs/{shot['id']}.log"
-            failures += 1
-            print(f"镜头 {shot['id']} 失败，继续下一个。")
+            _fail_shot(log_path, code)
             continue
         shot.pop("video_error", None)
         shot["video"] = str(dest)

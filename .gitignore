@@ -19,6 +19,14 @@ AI短视频.app/Contents/Resources/runtime/
 
 # 安装镜像 dist/AI短视频.dmg 入库，方便直接取用
 
+# ffmpeg 架构误放备份 / 临时下载
+tools/.x86_64-backup/
+tools/.ffmpeg-dl/
+tools/.ffprobe-dl/
+tools/.ffmpeg-dl.*/
+tools/.ffprobe-dl.*/
+tools/*.wrong-arch.bak
+
 # 网页控制台后台进程
 webui/server.log
 webui/server.pid

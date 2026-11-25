@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pipeline.media_bins import resolve_ffmpeg_bins
 from pipeline.util import ROOT, resolve, snap, snap_frames
 
 
@@ -118,4 +119,9 @@ class Settings:
             settings.ffmpeg = resolve(settings.ffmpeg)
         if not settings.ffprobe.is_absolute():
             settings.ffprobe = resolve(settings.ffprobe)
+        # 包内 tools/ 架构不对时回退 PATH 上的原生 ffmpeg，避免 Bad CPU type
+        settings.ffmpeg, settings.ffprobe, ff_note = resolve_ffmpeg_bins(
+            settings.ffmpeg, settings.ffprobe
+        )
+        settings.budget_detail.setdefault("ffmpeg", ff_note)
         return settings

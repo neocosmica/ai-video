@@ -17,10 +17,13 @@ Agent 维护项目文件夹里的 `storyboard.json`。本界面负责填小说�
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
+import os
 import queue
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import threading
@@ -28,11 +31,14 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import urlopen
 
 from pipeline.mirrors import apply_mirrors
 
 apply_mirrors()
 
+from pipeline.media_bins import server_pid_path, support_dir
 from pipeline.progress_model import (
     STAGE_LABELS as _PM_STAGE_LABELS,
     STAGE_WEIGHTS as _PM_STAGE_WEIGHTS,
@@ -1999,6 +2005,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(self.api_state(query))
             elif path == "/api/menubar":
                 self._json(active_run_info())
+            elif path == "/api/health":
+                self._json({"ok": True, "pid": os.getpid(), "root": str(ROOT)})
             elif path == "/api/budget":
                 self._json(budget_info())
             elif path == "/api/setup/status":
@@ -2635,7 +2643,93 @@ class _Handler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 
+def _port_in_use(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, port)) == 0
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _read_pidfile() -> int:
+    path = server_pid_path()
+    if not path.exists():
+        return 0
+    try:
+        return int(path.read_text(encoding="utf-8").strip() or "0")
+    except (OSError, ValueError):
+        return 0
+
+
+def _health_ok(host: str, port: int) -> bool:
+    try:
+        with urlopen(f"http://{host}:{port}/api/health", timeout=1.0) as resp:
+            raw = resp.read()
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+        return bool(data.get("ok"))
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
+        pass
+    # 旧实例可能还没有 /api/health：根路径能开就算活着
+    try:
+        with urlopen(f"http://{host}:{port}/", timeout=1.0) as resp:
+            return 200 <= int(getattr(resp, "status", 200)) < 500
+    except (URLError, TimeoutError, OSError):
+        return False
+
+
+def _claim_port_or_exit(host: str, port: int) -> None:
+    """端口预检：已有健康实例则提示；被占用则立刻失败，避免启动器盲等 45 秒。"""
+    if not _port_in_use(host, port):
+        return
+    old_pid = _read_pidfile()
+    if _health_ok(host, port):
+        hint = f"（PID {old_pid}）" if old_pid and _pid_alive(old_pid) else ""
+        raise SystemExit(
+            f"控制台已在运行{hint}：http://{host}:{port}/ 。请用菜单栏打开网页，或先退出旧实例。"
+        )
+    if old_pid and _pid_alive(old_pid):
+        raise SystemExit(
+            f"端口 {port} 被占用（PID {old_pid}），但健康检查失败。"
+            f"请退出旧实例（kill {old_pid}）或用 --port 换端口。"
+        )
+    raise SystemExit(
+        f"端口 {port} 被占用（Address already in use）。请退出占用进程或用 --port 换端口。"
+    )
+
+
+def _write_pidfile() -> None:
+    path = server_pid_path()
+    try:
+        support_dir().mkdir(parents=True, exist_ok=True)
+        path.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError as exc:
+        print(f"写 pidfile 失败（可忽略）：{exc}", flush=True)
+        return
+
+    def _clear() -> None:
+        try:
+            if path.exists() and path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    atexit.register(_clear)
+
+
 def serve(host: str, port: int) -> None:
+    _claim_port_or_exit(host, port)
     try:
         moved = migrate_repo_projects()
         if moved:
@@ -2666,7 +2760,15 @@ def serve(host: str, port: int) -> None:
             ensure_async()
     except Exception as exc:
         print(f"依赖检查失败（网页仍可开）：{exc}", flush=True)
-    server = ThreadingHTTPServer((host, port), _Handler)
+    try:
+        server = ThreadingHTTPServer((host, port), _Handler)
+    except OSError as exc:
+        if getattr(exc, "errno", None) == 48 or "Address already in use" in str(exc):
+            raise SystemExit(
+                f"端口 {port} 被占用（Address already in use）。请退出旧实例或用 --port 换端口。"
+            ) from exc
+        raise
+    _write_pidfile()
     url = f"http://{host}:{port}"
     print(f"小说成片控制台：{url}  （菜单栏退出 / Ctrl+C 停止）", flush=True)
 

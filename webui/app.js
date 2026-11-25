@@ -3743,7 +3743,8 @@ function renderShotCard(shot, media, reuseMap, progItems) {
     progShow = true;
     progWidth = "100%";
     progFillCls += " failed";
-    progLabel = "失败";
+    const why = String(shot.video_error || "").trim();
+    progLabel = why ? (why.length > 48 ? why.slice(0, 45) + "…" : why) : "失败";
   }
   progEl.classList.toggle("show", progShow);
   progText.classList.toggle("show", progShow && (prog?.status === "running" || prog?.status === "failed"));

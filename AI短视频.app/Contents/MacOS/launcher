@@ -1,20 +1,29 @@
 #!/bin/zsh
 # Finder 双击入口：必要时后台拉起网页后端（菜单栏图标），再打开浏览器。
+# 源文件；pack-app.sh 会同步到 AI短视频.app/Contents/MacOS/launcher
 set -euo pipefail
 
 HOST="127.0.0.1"
 PORT="8790"
 URL="http://${HOST}:${PORT}/"
+HEALTH="http://${HOST}:${PORT}/api/health"
 
 APP_CONTENTS="$(cd "$(dirname "$0")/.." && pwd)"
-APP_BUNDLE="$(cd "$APP_CONTENTS/.." && pwd)"
-PACKED_ROOT="$APP_CONTENTS/Resources/runtime"
+# 既可能是 App/Contents/MacOS/launcher，也可能是仓库 scripts/macos/launcher
+if [[ "$(basename "$(dirname "$0")")" == "MacOS" ]]; then
+  APP_BUNDLE="$(cd "$APP_CONTENTS/.." && pwd)"
+  PACKED_ROOT="$APP_CONTENTS/Resources/runtime"
+else
+  # 开发：直接跑仓库里的 scripts/macos/launcher
+  APP_BUNDLE="$(cd "$(dirname "$0")/../.." && pwd)"
+  PACKED_ROOT=""
+fi
 
-# 优先包内 runtime；未打包时回退到仓库根（App 仍在仓库旁）
-if [[ -x "$PACKED_ROOT/scripts/run.sh" ]]; then
+# 优先包内 runtime；未打包时回退到仓库根
+if [[ -n "$PACKED_ROOT" && -x "$PACKED_ROOT/scripts/run.sh" ]]; then
   ROOT="$PACKED_ROOT"
 else
-  ROOT="$(cd "$APP_BUNDLE/.." && pwd)"
+  ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 fi
 cd "$ROOT"
 
@@ -24,7 +33,21 @@ LOG="$SUPPORT/server.log"
 PID_FILE="$SUPPORT/server.pid"
 
 ready() {
-  curl -fsS --max-time 1 "$URL" >/dev/null 2>&1
+  curl -fsS --max-time 1 "$HEALTH" >/dev/null 2>&1 \
+    || curl -fsS --max-time 1 "$URL" >/dev/null 2>&1
+}
+
+port_in_use() {
+  /usr/bin/python3 - "$HOST" "$PORT" <<'PY' 2>/dev/null
+import socket, sys
+host, port = sys.argv[1], int(sys.argv[2])
+s = socket.socket()
+s.settimeout(0.5)
+try:
+    sys.exit(0 if s.connect_ex((host, port)) == 0 else 1)
+finally:
+    s.close()
+PY
 }
 
 # 生成中则带 ?project=，前端会锁定进该项目页
@@ -60,6 +83,44 @@ pid_alive() {
   [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
+# 从启动日志里抠已知错误，立刻告诉用户真实原因（不要笼统超时）
+boot_error_message() {
+  local tail_txt=""
+  if [[ -f "$LOG" ]]; then
+    tail_txt="$(tail -n 80 "$LOG" 2>/dev/null || true)"
+  fi
+  if print -r -- "$tail_txt" | grep -q "Address already in use"; then
+    local old=""
+    old="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$old" ]]; then
+      print -r -- "端口 ${PORT} 被占用（Address already in use，PID ${old}）。请退出旧实例或换端口。"
+    else
+      print -r -- "端口 ${PORT} 被占用（Address already in use）。请退出旧实例或换端口。"
+    fi
+    return
+  fi
+  if print -r -- "$tail_txt" | grep -q "控制台已在运行"; then
+    print -r -- "$(print -r -- "$tail_txt" | grep "控制台已在运行" | tail -1)"
+    return
+  fi
+  if print -r -- "$tail_txt" | grep -q "端口 .* 被占用"; then
+    print -r -- "$(print -r -- "$tail_txt" | grep "端口 .* 被占用" | tail -1)"
+    return
+  fi
+  if print -r -- "$tail_txt" | grep -qi "Bad CPU type"; then
+    print -r -- "ffmpeg 架构与本机不符（Bad CPU type）。请重跑 setup 或安装 Rosetta。"
+    return
+  fi
+  # 截一段末尾给用户
+  local snippet
+  snippet="$(print -r -- "$tail_txt" | tail -n 8 | tr '\n' ' ')"
+  if [[ -n "$snippet" ]]; then
+    print -r -- "后端已退出。日志：${snippet}"
+  else
+    print -r -- "后端已退出，请查看 ${LOG}"
+  fi
+}
+
 if [[ ! -x "$ROOT/scripts/run.sh" ]]; then
   alert "打不开 AI短视频" "找不到可执行的 scripts/run.sh。请先在仓库里跑 scripts/macos/pack-app.sh，或把 App 放回仓库根目录。"
   exit 1
@@ -77,6 +138,17 @@ if ready; then
   exit 0
 fi
 
+# 端口被占但 HTTP 不通：多半是旧实例挂死 / 工作目录已进废纸篓
+if port_in_use; then
+  old="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [[ -n "$old" ]] && pid_alive "$old"; then
+    alert "AI短视频无法启动" "端口 ${PORT} 被占用（PID ${old}），但服务无响应。请退出旧实例（kill ${old}）后再试，或用 --port 换端口。"
+  else
+    alert "AI短视频无法启动" "端口 ${PORT} 被占用，但服务无响应。请退出占用进程后再试，或查看 ${LOG}。"
+  fi
+  exit 1
+fi
+
 # 清掉失效 pid 记录
 if [[ -f "$PID_FILE" ]]; then
   old="$(cat "$PID_FILE" 2>/dev/null || true)"
@@ -86,8 +158,10 @@ if [[ -f "$PID_FILE" ]]; then
 fi
 
 # 后台起服务（菜单栏「退出」会停掉该进程）；日志进 Application Support
+: >"$LOG"
 nohup "$ROOT/scripts/run.sh" --host "$HOST" --port "$PORT" >>"$LOG" 2>&1 &
 echo $! >"$PID_FILE"
+child_pid="$(cat "$PID_FILE")"
 
 for _ in {1..90}; do
   if ready; then
@@ -95,8 +169,14 @@ for _ in {1..90}; do
     notify "AI短视频" "控制台已启动（菜单栏可打开网页 / 退出）"
     exit 0
   fi
+  if ! pid_alive "$child_pid"; then
+    msg="$(boot_error_message)"
+    alert "AI短视频启动失败" "$msg"
+    exit 1
+  fi
   sleep 0.5
 done
 
-alert "AI短视频启动超时" "后端 45 秒内没有响应 ${URL}。请查看 ${LOG}；也可先跑 ./scripts/run.sh doctor。"
+msg="$(boot_error_message)"
+alert "AI短视频启动超时" "后端 45 秒内没有响应 ${URL}。${msg}"
 exit 1

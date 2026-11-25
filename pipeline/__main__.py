@@ -84,7 +84,11 @@ def cmd_doctor(_: argparse.Namespace) -> None:
     print(f"禁用 XET：{os.environ.get('HF_HUB_DISABLE_XET')}")
     uv = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
     print(f"uv：{uv}（{'存在' if Path(uv).exists() or shutil.which('uv') else '缺失'}）")
-    print(f"ffmpeg：{settings.ffmpeg}（{'存在' if settings.ffmpeg.exists() else '缺失'}）")
+    from pipeline.media_bins import binary_runnable
+
+    ff_ok, ff_detail = binary_runnable(settings.ffmpeg)
+    ff_note = (settings.budget_detail or {}).get("ffmpeg") or ff_detail
+    print(f"ffmpeg：{ff_note}（{'可用' if ff_ok else '不可用'}）")
     if sys.platform == "darwin":
         from pipeline.menubar import HELPER, menubar_enabled
 
