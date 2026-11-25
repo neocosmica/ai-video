@@ -360,7 +360,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
             if not voice.exists():
                 shot["video_error"] = "有对白但缺少 wav，请先跑 audio"
                 failures += 1
-                print(f"跳过 {shot['id']}：请先 ./scripts/run.sh audio --out {out}")
+                print(f"跳过 {shot['id']}：有对白但没有配音 {voice}")
                 continue
             audio_for_ltx = _prepare_a2v_audio(out, shot, voice, frames, settings.video_fps)
         def _fail_shot(log_path: Path, exit_code: int) -> None:

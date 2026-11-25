@@ -18,6 +18,7 @@ from pipeline.artifact_plan import (
     _reachable,
     _topo_sort,
     direct_pre,
+    node_label,
     plan_rerun,
 )
 from pipeline.projects import artifacts_dir
@@ -86,6 +87,35 @@ def _story(out: str | Path) -> dict:
         return load_json(path)
     except Exception:
         return {}
+
+
+def expand_missing_prereqs(out: str | Path, items: list[dict]) -> list[dict]:
+    """按依赖把队列里每一项还缺的前置补进来。
+
+    已有产物不补。配乐要全部对白 wav，成片要每一镜视频和（写了 music_prompt 时）配乐，
+    这些边在勾选后置时也要补上，否则单跑会在半套输入上失败或写出半成品。
+    """
+    story = _story(out)
+    by_key = {it["key"]: dict(it) for it in items if it.get("key")}
+    for it in list(by_key.values()):
+        try:
+            pre = _reachable(story, out, (it["kind"], it.get("id") or ""), forward=False)
+        except Exception:
+            continue
+        for pk, pid in pre:
+            key = _node_key(pk, pid)
+            if key in by_key or _exists(out, pk, pid):
+                continue
+            by_key[key] = {
+                "key": key,
+                "kind": pk,
+                "id": pid,
+                "label": node_label(story, pk, pid),
+                "force": False,
+                "status": "pending",
+            }
+    ordered = _topo_sort([(it["kind"], it.get("id") or "") for it in by_key.values()])
+    return [by_key[_node_key(k, i)] for k, i in ordered if _node_key(k, i) in by_key]
 
 
 def dependents_of(out: str | Path, items: list[dict], key: str) -> list[str]:
@@ -262,8 +292,11 @@ def add_from_plan(
         by_key[key] = dict(node)
         added.append(node["label"])
 
-    ordered = _topo_sort([(it["kind"], it.get("id") or "") for it in by_key.values()])
-    queue["items"] = [by_key[_node_key(k, i)] for k, i in ordered if _node_key(k, i) in by_key]
+    expanded = expand_missing_prereqs(out, list(by_key.values()))
+    for it in expanded:
+        if it["key"] not in by_key:
+            added.append(it["label"])
+    queue["items"] = expanded
     save_queue(out, queue)
     return {
         "ok": True,
@@ -379,8 +412,9 @@ def _groups_from_nodes(nodes: Iterable[dict]) -> list[dict]:
 
 def build_groups_from_queue(out: str | Path, queue: dict | None = None) -> list[dict]:
     queue = queue or load_queue(out)
+    items = expand_missing_prereqs(out, list(queue.get("items") or []))
     nodes = []
-    for it in queue.get("items") or []:
+    for it in items:
         force = bool(it.get("force"))
         if not force and _exists(out, it["kind"], it.get("id") or ""):
             continue

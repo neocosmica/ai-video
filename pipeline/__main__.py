@@ -304,6 +304,114 @@ def cmd_selftest(_: argparse.Namespace) -> None:
         if len(segments) > 1:
             assert all(dur <= 10.0 + 1e-3 for _, _, dur in segments), segments
 
+    # --only 补几镜时，别的台词镜还没配音也不该中断，更不能把它们写成空镜时长
+    import soundfile as sf
+
+    from pipeline.projects import artifacts_sub
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        voice_dir = artifacts_sub(tmp_path, "audio", "voice")
+        voice_dir.mkdir(parents=True)
+        sr = 24000
+        tone = (0.2 * np.sin(2 * np.pi * 440 * np.arange(sr) / sr)).astype(np.float32)
+        sf.write(voice_dir / "s002.wav", tone, sr)
+        kept = voice_dir / "s001.wav"
+        sf.write(kept, tone, sr)
+        story = {
+            "shots": [
+                {"id": "s001", "dialogue": "已有。", "video_frames": 80, "audio_duration": 3.0},
+                {"id": "s002", "dialogue": "重做这句。", "video_frames": 49},
+                {"id": "s003", "dialogue": "", "video_frames": 17, "audio_duration": 1.0},
+                {"id": "s005", "dialogue": "还没配。", "video_frames": 121, "audio_duration": 4.0},
+            ]
+        }
+        missing = audio_mod._dialogue_ids_missing_voice(story, voice_dir, {"s002", "s003"})
+        assert missing == ["s005"], missing
+        settings_timing = Settings()
+        audio_mod.apply_shot_timings(settings_timing, story, tmp_path)
+        by_id = {shot["id"]: shot for shot in story["shots"]}
+        assert by_id["s002"].get("audio_duration"), by_id["s002"]
+        assert by_id["s002"]["video_frames"] >= settings_timing.video_frames_min
+        assert by_id["s003"]["video_frames"] == settings_timing.video_frames
+        assert "audio_duration" not in by_id["s003"]
+        assert by_id["s005"]["video_frames"] == 121, by_id["s005"]
+        assert "audio_duration" not in by_id["s005"]
+        assert by_id["s001"]["video_frames"] >= settings_timing.video_frames_min
+        merged = audio_mod._merge_voice_records(
+            story,
+            [
+                {"shot_id": "s001", "path": str(kept), "text": "已有。"},
+                {"shot_id": "s009", "path": str(voice_dir / "missing.wav"), "text": "丢了"},
+                {"shot_id": "s002", "path": str(voice_dir / "old.wav"), "text": "旧的"},
+            ],
+            [{"shot_id": "s002", "path": str(voice_dir / "s002.wav"), "text": "重做这句。"}],
+        )
+        assert [item["shot_id"] for item in merged] == ["s001", "s002"], merged
+        assert merged[1]["text"] == "重做这句。"
+        assert audio_mod.music_block_reason(story, tmp_path) and "s005" in audio_mod.music_block_reason(story, tmp_path)
+
+    # 单跑依赖：视频只吃本镜静帧/配音；配乐吃全部对白；成片吃全部视频和配乐。
+    # 勾了配乐/成片时，队列要把还缺的前置补上，而不是让命令在半套输入上失败。
+    import json
+
+    from pipeline.artifact_plan import direct_pre
+    from pipeline.assemble import assemble_block_reason
+    from pipeline.images import _selected, run_edit
+    from pipeline.run_queue import add_from_plan
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = Path(tmp) / "piece"
+        proj.mkdir()
+        dep_story = {
+            "music_prompt": "soft piano, instrumental only, no vocals",
+            "characters": [{"id": "a", "name": "甲", "appearance": "短发"}],
+            "shots": [
+                {"id": "s001", "dialogue": "你好", "characters": ["a"], "speaker": "甲"},
+                {"id": "s002", "dialogue": "在呢", "characters": ["a"], "speaker": "甲"},
+                {"id": "s003", "dialogue": "", "characters": []},
+                {
+                    "id": "s007_p1",
+                    "dialogue": "后半",
+                    "characters": [],
+                    "reuse_frame": "s007",
+                    "speaker": "甲",
+                },
+            ],
+        }
+        (proj / "storyboard.json").write_text(
+            json.dumps(dep_story, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        pre = direct_pre(dep_story, proj, "clip", "s001")
+        assert ("frame", "s001") in pre and ("voice", "s001") in pre, pre
+        assert ("voice", "s002") not in pre
+        pre_split = direct_pre(dep_story, proj, "clip", "s007_p1")
+        assert ("frame", "s007") in pre_split and ("frame", "s007_p1") not in pre_split, pre_split
+        assert ("voice", "s007_p1") in pre_split
+        ghosts = _selected(dep_story["shots"], "s007")
+        assert [s["id"] for s in ghosts] == ["s007"], ghosts
+        assert "reuse_frame" not in ghosts[0]
+        try:
+            run_edit(dep_story, proj, Settings(), "s001,s002", True)
+            raise AssertionError("两镜都缺肖像时应该失败，而不是去加载编辑模型")
+        except SystemExit as exc:
+            text = str(exc)
+            assert "s001" in text and "s002" in text, text
+        assert audio_mod.music_block_reason(dep_story, proj)
+        blocked = assemble_block_reason(dep_story, proj)
+        assert blocked and "s001" in blocked and "s003" in blocked, blocked
+        added = add_from_plan(
+            proj,
+            kind="voice",
+            id="s001",
+            posts=[{"kind": "music", "id": ""}],
+        )
+        assert added["ok"], added
+        keys = {it["key"] for it in added["queue"]["items"]}
+        assert {"voice:s001", "voice:s002", "voice:s007_p1", "music:"} <= keys, keys
+        assert "voice:s003" not in keys
+
     # ---- 混音回归：人声不被无故削弱、闪避只在有对白的时段生效 ----
     # 之前出过两个 bug：(1) aformat 做 mono→stereo 会乘 0.707，白掉 3 dB；
     # (2) 只要有对白就全程把配乐乘 0.35，空镜段也被压掉、整条片听不见配乐。

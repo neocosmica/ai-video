@@ -148,7 +148,23 @@ def _selected(shots: list[dict], only: str | None) -> list[dict]:
     if not only:
         return shots
     wanted = {item.strip() for item in only.split(",") if item.strip()}
-    return [s for s in shots if s["id"] in wanted]
+    chosen = [s for s in shots if s["id"] in wanted]
+    have = {str(s.get("id") or "") for s in chosen}
+    seen_reuse: set[str] = set()
+    for shot in shots:
+        reuse = str(shot.get("reuse_frame") or "").strip()
+        if not reuse or reuse not in wanted or reuse in have or reuse in seen_reuse:
+            continue
+        if any(str(s.get("id") or "") == reuse for s in shots):
+            continue
+        # 父镜头已被拆掉，分镜里只剩子镜头；静帧文件仍用父 id
+        ghost = dict(shot)
+        ghost["id"] = reuse
+        ghost.pop("reuse_frame", None)
+        chosen.append(ghost)
+        seen_reuse.add(reuse)
+        have.add(reuse)
+    return chosen
 
 
 def _parse_id_list(raw: str | None) -> set[str] | None:
@@ -176,8 +192,8 @@ def run_t2i(
     shots = _selected(story["shots"], only)
     wanted_chars = _parse_id_list(characters)
     # 肖像：
-    # - 缺文件 → 补生成
-    # - --characters + --force → 只重做这些肖像
+    # - 缺文件 → 补生成（--only 的镜头用到的肖像，即使没写进 --characters）
+    # - --characters + --force → 重做点名的这些肖像
     # - 全量 --force（无 --only / --characters）→ 重做全部肖像
     # - 镜头 --only + --force（无 --characters）→ 不动已有肖像
     redo_all_portraits = bool(force) and not only and wanted_chars is None
@@ -186,20 +202,22 @@ def run_t2i(
         cid = str(char.get("id") or "").strip()
         if not cid:
             continue
-        if wanted_chars is not None and cid not in wanted_chars:
-            continue
         path = portraits / f"{cid}.png"
+        in_frame = bool(only) and any(cid in (s.get("characters") or []) for s in shots)
+        explicit = wanted_chars is not None and cid in wanted_chars
+        if wanted_chars is not None and not explicit:
+            # 不在 --characters 里的肖像：这次要画的镜头用到、文件又没有，才补
+            if not (in_frame and not path.exists()):
+                continue
+        elif wanted_chars is None and only and not in_frame:
+            continue
         if path.exists():
-            if wanted_chars is not None and force and cid in wanted_chars:
-                pass  # 单跑肖像：强制重做
+            if explicit and force:
+                pass  # 点名的肖像：强制重做
             elif redo_all_portraits:
                 pass
             else:
                 continue
-        if wanted_chars is None and only and not any(
-            cid in (s.get("characters") or []) for s in shots
-        ):
-            continue
         pending_portraits.append((char, path))
     # 仅 --characters、未指定 --only：只做肖像，不进静帧
     portrait_only = wanted_chars is not None and not only
@@ -253,39 +271,52 @@ def run_edit(story: dict, out: Path, settings: Settings, only: str | None, force
     frames = artifacts_sub(out, "frames")
     portraits = artifacts_sub(out, "characters")
     pending = []
+    skipped: list[str] = []
     for shot in _selected(story["shots"], only):
         path = frames / f"{shot['id']}.png"
         cast = _cast_of(shot, story.get("characters") or [])
         if not cast or (path.exists() and not force):
             continue
         refs = []
+        missing_ref = False
         for char in cast:
             ref = portraits / f"{char['id']}.png"
             if not ref.exists():
-                raise SystemExit(f"缺少角色参考图 {ref}，请先完成文生图。")
+                missing_ref = True
+                print(f"跳过 {shot['id']}：缺少角色参考图 {ref}")
+                break
             refs.append(ref)
+        if missing_ref:
+            skipped.append(str(shot["id"]))
+            continue
         pending.append((shot, path, cast, refs))
-    if not pending:
+    if not pending and not skipped:
         print("没有需要按参考图重绘的镜头。")
         return
-    cls, config, weights = _load_class("edit")
-    print(f"加载参考图编辑模型 {weights}")
-    model = cls(model_config=config, quantize=None, model_path=weights)
-    for shot, path, cast, refs in pending:
-        print(f"分镜静帧 {shot['id']}，参考 {'、'.join(c['name'] for c in cast)}")
-        image = _generate(
-            model,
-            prompt=_edit_prompt(shot, story, cast),
-            seed=int(shot["seed"]),
-            width=settings.image_width,
-            height=settings.image_height,
-            steps=settings.image_steps,
-            desc=f"静帧 {shot['id']}",
-            images=refs,
+    if pending:
+        cls, config, weights = _load_class("edit")
+        print(f"加载参考图编辑模型 {weights}")
+        model = cls(model_config=config, quantize=None, model_path=weights)
+        for shot, path, cast, refs in pending:
+            print(f"分镜静帧 {shot['id']}，参考 {'、'.join(c['name'] for c in cast)}")
+            image = _generate(
+                model,
+                prompt=_edit_prompt(shot, story, cast),
+                seed=int(shot["seed"]),
+                width=settings.image_width,
+                height=settings.image_height,
+                steps=settings.image_steps,
+                desc=f"静帧 {shot['id']}",
+                images=refs,
+            )
+            _save_image(image, path)
+        del model
+        gc.collect()
+    if skipped:
+        raise SystemExit(
+            f"有 {len(skipped)} 个镜头缺少角色参考图（{', '.join(skipped)}），"
+            "这些镜头先跳过。先补上对应肖像，再跑这些静帧。"
         )
-        _save_image(image, path)
-    del model
-    gc.collect()
 
 
 def cmd_images(args: argparse.Namespace) -> None:

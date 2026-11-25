@@ -134,7 +134,9 @@ def direct_pre(story: dict, out: str | Path, kind: str, nid: str = "") -> list[t
         return sb
     if kind == "clip":
         shot = shots.get(nid)
-        pre: list[tuple[str, str]] = sb + [("frame", nid)]
+        # 自动拆出来的子镜头没有自己的静帧，依赖父镜头那张
+        frame_id = str((shot or {}).get("reuse_frame") or "").strip() or nid
+        pre: list[tuple[str, str]] = sb + [("frame", frame_id)]
         if _has_dialogue(shot):
             pre.append(("voice", nid))
         return pre

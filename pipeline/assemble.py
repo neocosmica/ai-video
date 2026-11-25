@@ -309,6 +309,24 @@ def _mix_soundtrack(
     return mixed
 
 
+def assemble_block_reason(story: dict, out: Path) -> str | None:
+    """成片依赖每一镜的视频；写了 music_prompt 时还依赖配乐。缺了就返回原因。"""
+    missing = [
+        str(shot.get("id") or "")
+        for shot in story.get("shots") or []
+        if str(shot.get("id") or "").strip()
+        and not artifacts_sub(out, "clips", f"{shot['id']}.mp4").is_file()
+    ]
+    if missing:
+        return (
+            f"成片要带上每一镜的视频。还缺：{', '.join(missing)}。"
+            "先跑这些镜头的 videos。"
+        )
+    if str(story.get("music_prompt") or "").strip() and not artifacts_sub(out, "audio", "bgm.wav").is_file():
+        return "分镜写了 music_prompt，配乐文件还没有。先跑 music，再合成。"
+    return None
+
+
 def cmd_assemble(args: argparse.Namespace) -> None:
     settings = Settings.load(resolve(args.config) if args.config else None)
     if not settings.ffmpeg.exists() or not settings.ffprobe.exists():
@@ -318,6 +336,9 @@ def cmd_assemble(args: argparse.Namespace) -> None:
     if not story_path.exists():
         raise SystemExit(f"还没有分镜：{story_path}")
     story = load_json(story_path)
+    blocked = assemble_block_reason(story, out)
+    if blocked:
+        raise SystemExit(blocked)
     clips = []
     for shot in story["shots"]:
         path = artifacts_sub(out, "clips", f"{shot['id']}.mp4")

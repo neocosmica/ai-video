@@ -2341,6 +2341,7 @@ class _Handler(BaseHTTPRequestHandler):
         from pipeline.run_queue import (
             annotate_removable,
             build_groups_from_queue,
+            expand_missing_prereqs,
             load_queue,
             queue_only_shots,
             queue_portrait_ids,
@@ -2371,6 +2372,11 @@ class _Handler(BaseHTTPRequestHandler):
             )
         if busy:
             raise ValueError("已有任务在跑，请先停止")
+        expanded = expand_missing_prereqs(out, list(queue.get("items") or []))
+        if [it.get("key") for it in expanded] != [it.get("key") for it in queue.get("items") or []]:
+            queue["items"] = expanded
+            save_queue(out, queue)
+            notify_change()
 
         groups = build_groups_from_queue(out, queue)
         if not groups:

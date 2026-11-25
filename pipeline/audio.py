@@ -321,8 +321,10 @@ def _generate_dialogue(
     拆分结果按原镜头顺序写回 story（子镜头复用父镜头的静帧），
     分镜文件随后会落盘，因此文生图阶段不用重跑。
 
-    ``only``：逗号分隔的镜头 id。只重新合成这些镜头的对白；其余镜头
-    复用已有 wav（没有则报错——漏配音会让后面 videos 阶段静默跳过）。
+    ``only``：逗号分隔的镜头 id。只重新合成这些镜头的对白。
+    其余镜头已有 wav 就留着；还没配音的镜头这次跳过并提示，不因此中断
+    （网页按镜头重做配音走的就是这条路径）。缺的配音留给之后单独补，
+    或去掉 ``--only`` 再跑一遍。``--only`` 不自动拆镜。
     """
     from mlx_audio.tts.utils import load_model
 
@@ -356,16 +358,15 @@ def _generate_dialogue(
         return trim_silence_wav(dest) <= max_seconds + 1e-3
 
     if wanted is not None:
-        for shot in story["shots"]:
-            line = str(shot.get("dialogue") or "").strip()
-            if not line or str(shot["id"]) in wanted:
-                continue
-            voice = voice_dir / f"{shot['id']}.wav"
-            if not voice.exists():
-                raise SystemExit(
-                    f"--only 模式只重做 {sorted(wanted)}，但镜头 {shot['id']} 有对白却没有配音"
-                    f" {voice}。请先不带 --only 完整跑一次 audio。"
-                )
+        missing = _dialogue_ids_missing_voice(story, voice_dir, wanted)
+        if missing:
+            chosen = [str(s["id"]) for s in story["shots"] if str(s["id"]) in wanted]
+            label = ", ".join(chosen) if chosen else ", ".join(sorted(wanted))
+            print(
+                f"--only 只合成 {label}。"
+                f"镜头 {', '.join(missing)} 有对白但还没有配音，这次先留着；"
+                "要补上就再跑这些镜头，或去掉 --only 跑一遍 audio。"
+            )
         # --only 模式只重念指定镜头，绝不自动拆镜改写 shots（拆镜会动整个分镜，
         # 和「只重做这几个镜头」的预期相悖）；要拆镜请不带 --only 跑。
         force = force or True
@@ -466,10 +467,63 @@ def _split_shot(parent: dict, offset: int, text: str) -> dict:
     return child
 
 
+def _dialogue_ids_missing_voice(story: dict, voice_dir: Path, wanted: set[str]) -> list[str]:
+    """``--only`` 范围之外、有对白但还没有 wav 的镜头 id（按分镜顺序）。"""
+    missing: list[str] = []
+    for shot in story.get("shots") or []:
+        sid = str(shot.get("id") or "")
+        line = str(shot.get("dialogue") or "").strip()
+        if not sid or not line or sid in wanted:
+            continue
+        if not (voice_dir / f"{sid}.wav").is_file():
+            missing.append(sid)
+    return missing
+
+
+def music_block_reason(story: dict, out: Path) -> str | None:
+    """配乐依赖全部对白镜的 wav 来定长。缺了就返回原因，齐了返回 None。"""
+    missing = _dialogue_ids_missing_voice(story, artifacts_sub(out, "audio", "voice"), set())
+    if not missing:
+        return None
+    return (
+        f"配乐按全部对白镜的实测时长定长。这些镜头有对白、还没有配音：{', '.join(missing)}。"
+        "先跑这些镜头的 audio，再跑 music。"
+    )
+
+
+def _merge_voice_records(story: dict, previous: list, fresh: list) -> list:
+    """把本轮合成的配音并进已有清单；wav 已经不在的旧记录丢掉。"""
+    by_id: dict[str, dict] = {}
+    for item in previous or []:
+        sid = str(item.get("shot_id") or "")
+        if sid:
+            by_id[sid] = item
+    fresh_ids: set[str] = set()
+    for item in fresh or []:
+        sid = str(item.get("shot_id") or "")
+        if not sid:
+            continue
+        by_id[sid] = item
+        fresh_ids.add(sid)
+    ordered = [str(shot.get("id") or "") for shot in story.get("shots") or []]
+    ordered += [sid for sid in by_id if sid not in ordered]
+    merged: list[dict] = []
+    for sid in ordered:
+        item = by_id.get(sid)
+        if not item:
+            continue
+        path = Path(str(item.get("path") or ""))
+        if sid not in fresh_ids and not path.is_file():
+            continue
+        merged.append(item)
+    return merged
+
+
 def apply_shot_timings(settings: Settings, story: dict, out: Path) -> None:
     """按对白 wav / 空镜默认，提前写齐每镜 video_frames（镜头计划时长）。
 
-    有对白：时长跟着配音走（向上取 8k+1 格），不删字压短。
+    有对白且已有 wav：时长跟着配音走（向上取 8k+1 格），不删字压短。
+    有对白但还没有 wav：不动 video_frames，避免 --only 补几镜时把其余台词镜写成空镜时长。
     空镜：用 settings.video_frames。
     视频阶段服从这个数；配乐也按各镜 video_frames 加总定长，不依赖 clips。
     """
@@ -489,6 +543,8 @@ def apply_shot_timings(settings: Settings, story: dict, out: Path) -> None:
                 min_frames=settings.video_frames_min,
                 max_frames=max(cap_frames, snap_frames(int(math.ceil(duration * fps)) + 1)),
             )
+        elif line:
+            shot.pop("audio_duration", None)
         else:
             shot.pop("audio_duration", None)
             shot["video_frames"] = int(settings.video_frames)
@@ -673,6 +729,7 @@ def cmd_audio(args: argparse.Namespace) -> None:
     assert_no_overflow(settings, story)
     timeline, source = _timeline_seconds(settings, out, story)
     manifest = _load_manifest(out)
+    voices = _merge_voice_records(story, manifest.get("voices") or [], voices)
     manifest.update(
         {
             "tts_model": settings.tts_model,
@@ -721,7 +778,10 @@ def cmd_music(args: argparse.Namespace) -> None:
     if not story_path.exists():
         raise SystemExit(f"还没有分镜：{story_path}")
     story = load_json(story_path)
-    # 对白镜缺 wav 时仍可估；有 wav 则写齐 video_frames 再定长
+    blocked = music_block_reason(story, out)
+    if blocked:
+        raise SystemExit(blocked)
+    # 对白 wav 已齐：按实测写入 video_frames，再定配乐长度
     ensure_video_frames(settings, story, out, persist=story_path)
     timeline, source = _timeline_seconds(settings, out, story)
     music = _generate_music(settings, story, out, args.force)
