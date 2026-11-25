@@ -1320,6 +1320,32 @@ def _single_stage_cmd(
     return cmd
 
 
+def _sequence_cmd(commands: list[tuple[str, list[str]]]) -> list[str]:
+    """跨平台按顺序执行多个 pipeline 子命令。
+
+    POSIX 保留原有 ``bash -c 'echo && cmd'`` 行为；Windows 用 Python 当前解释器
+    启动子进程，打印同样的 ``== stage ==`` 分隔行供进度解析器消费。
+    """
+    if sys.platform != "win32":
+        script_parts = []
+        for stage, argv in commands:
+            script_parts.append(f"echo '== {stage} =='")
+            script_parts.append(shlex.join(argv))
+        return ["/bin/bash", "-c", " && ".join(script_parts)]
+
+    code = (
+        "import json,subprocess,sys\n"
+        "items=json.loads(sys.argv[1])\n"
+        "for stage,argv in items:\n"
+        "    print('== %s ==' % stage, flush=True)\n"
+        "    result=subprocess.run(argv)\n"
+        "    if result.returncode:\n"
+        "        raise SystemExit(result.returncode)\n"
+    )
+    payload = json.dumps(commands, ensure_ascii=False)
+    return [sys.executable, "-c", code, payload]
+
+
 def build_artifact_groups_cmd(
     *,
     out: str,
@@ -1328,32 +1354,24 @@ def build_artifact_groups_cmd(
 ) -> tuple[list[str], Path, list[str]]:
     """按 execution_groups 拼 bash && 串跑；返回 (argv, log, stage_keys)。"""
     out_dir = resolve(out)
-    parts: list[str] = []
+    commands: list[tuple[str, list[str]]] = []
     stage_keys: list[str] = []
     for g in groups:
         stage = g["stage"]
         stage_keys.append(stage)
         chars = g.get("characters") or []
-        parts.append(
-            shlex.join(
-                _single_stage_cmd(
-                    stage,
-                    out=out_dir,
-                    novel=novel,
-                    only=g.get("only"),
-                    force=bool(g.get("force")),
-                    characters=",".join(chars) if chars else None,
-                )
-            )
+        argv = _single_stage_cmd(
+            stage,
+            out=out_dir,
+            novel=novel,
+            only=g.get("only"),
+            force=bool(g.get("force")),
+            characters=",".join(chars) if chars else None,
         )
-    if not parts:
+        commands.append((stage, argv))
+    if not commands:
         raise ValueError("没有可执行的阶段")
-    # 打印阶段分隔，便于进度引擎识别
-    script_parts = []
-    for g, part in zip(groups, parts):
-        script_parts.append(f"echo '== {g['stage']} =='")
-        script_parts.append(part)
-    cmd = ["/bin/bash", "-c", " && ".join(script_parts)]
+    cmd = _sequence_cmd(commands)
     log_path = artifacts_sub(out_dir, "logs", f"webui-{time.strftime('%Y%m%d-%H%M%S')}.log")
     return cmd, log_path, stage_keys
 
@@ -1400,21 +1418,18 @@ def build_pipeline_cmd(
         if force:
             cmd.append("--force")
     else:
-        parts = []
+        commands = []
         for stage in selected:
-            parts.append(
-                shlex.join(
-                    _single_stage_cmd(
-                        stage,
-                        out=out_dir,
-                        novel=novel,
-                        storyboard=storyboard,
-                        only=only,
-                        force=force,
-                    )
-                )
+            argv = _single_stage_cmd(
+                stage,
+                out=out_dir,
+                novel=novel,
+                storyboard=storyboard,
+                only=only,
+                force=force,
             )
-        cmd = ["/bin/bash", "-c", " && ".join(parts)]
+            commands.append((stage, argv))
+        cmd = _sequence_cmd(commands)
     log_path = artifacts_sub(out_dir, "logs", f"webui-{time.strftime('%Y%m%d-%H%M%S')}.log")
     return cmd, log_path
 
