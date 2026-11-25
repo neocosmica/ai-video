@@ -70,10 +70,16 @@ def write_live(out: str | Path, patch: dict) -> dict:
     if "pid" not in cur:
         cur["pid"] = os.getpid()
     if "pgid" not in cur:
-        try:
-            cur["pgid"] = os.getpgid(0)
-        except OSError:
+        # os.getpgid 是 POSIX-only：Windows 上没有这个属性（AttributeError，
+        # 不是 OSError），所以按「有函数就调用、否则用 pid」处理
+        getpgid = getattr(os, "getpgid", None)
+        if getpgid is None:
             cur["pgid"] = cur["pid"]
+        else:
+            try:
+                cur["pgid"] = getpgid(0)
+            except OSError:
+                cur["pgid"] = cur["pid"]
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(cur, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(path)

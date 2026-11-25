@@ -187,8 +187,14 @@ def generate_music(
         "guidance_scale": float(guidance),
         "max_new_tokens": tokens,
     }
+    # transformers 5.x 的 MusicGen.generate 不接受 generator 参数
+    # （会报 "model_kwargs are not used by the model: ['generator']"），
+    # 改用全局 RNG 种子
     if seed is not None:
-        gen_kwargs["generator"] = torch.Generator(model.device).manual_seed(int(seed))
+        torch.manual_seed(int(seed) & 0xFFFFFFFF)
+    # 注意：不要给 MusicGen 传 pad_token_id / eos_token_id。
+    # 它的 generation_config 里 eos=2048 而词表只有 0..2047，传进去会触发
+    # CUDA device-side assert（实测 device-side assert triggered）。
     with torch.no_grad():
         audio = model.generate(**inputs, **gen_kwargs)
     wav = audio[0, 0].float().cpu().numpy()
