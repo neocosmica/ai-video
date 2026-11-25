@@ -196,15 +196,41 @@ diffusers 0.43 默认建 **6 行**。自建 config 能让表对上，但
 `quantization` 与 `low_cpu_mem_usage=False` 互斥，最终卡在 meta tensor。
 且 `Lightricks/LTX-2.5-Diffusers` 是 **gated**，无法取官方 config。
 
-### 3.5 文本编码器（LTX 用 Gemma）
+### 3.5 文本编码器：Gemma3 ✅（4bit 后必须分阶段释放）
 
-| 仓库 | 体积 | 可访问 |
+LTX-2 的 `model_index.json` 声明 `text_encoder: Gemma3ForConditionalGeneration`。
+
+| 量化 | 显存峰值 | 结论 |
 |---|---|---|
-| `unsloth/LTX-2.5-GGUF` 的 `gemma4-12b-with-proj` | 24.46 GB | ✅ 已下载 |
-| `google/gemma-4-12B-it-qat-q4_0-gguf` | 待测 | 官方 QAT 4bit |
+| bf16 | 约 22 GB | 装不下 |
+| **4bit nf4** | **7.77 GB** | ✅ 可用（6.60B 参数） |
 
-注意：LTX-2（19B）用 **Gemma3**（`mlx-community/gemma-3-12b-it-4bit` 对应），
-LTX-2.5 用 **Gemma4**。选定 19B 后编码器应与 19B 配套。
+**关键坑**：`hidden_states` 是元组，若继续持有引用，`del model` 不会真正释放显存。
+实测错误写法释放后 free 只回到 3.00 GB（因为 hidden_states 还在 GPU）。
+正确做法是**先把 embeds `.cpu()` 落到主机内存，再删所有引用**：
+
+```python
+with torch.no_grad():
+    out = model(**ids, output_hidden_states=True)
+hidden = out.hidden_states[-1].detach().to(torch.bfloat16)
+embeds = hidden.cpu()          # ← 关键：先落主机内存
+del out, hidden, ids
+cuda_memory.empty_cache()
+```
+
+**三阶段编排实测**（这是 12 GB 跑通完整链路的核心证据）：
+
+```
+段1 载入 text_encoder   free 3.02 GB  peak 7.77 GB
+    编码 → embeds 落 CPU
+    释放                free 10.79 GB   ← 完全回收
+段2 载入 transformer    free 3.07 GB  peak 7.69 GB
+    释放                free 10.79 GB
+段3 载入 VAE            peak 3.64 GB
+```
+
+**峰值 = max(单段) = 7.77 GB，不累加。** 若三段同时驻留需 7.77+8.57+3.64 ≈ 20 GB，
+12 GB 卡必爆。
 
 ## 4. 已被证伪的路线
 
