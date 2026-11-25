@@ -14,6 +14,9 @@
 # 项目已迁到 ~/AI短视频项目/；仓库里残留的 projects/ 不入库
 projects/
 
+# 旧布局 / 网页运行期产物目录
+output/
+
 # App 内打包的运行副本（由 scripts/macos/pack-app.sh 生成）
 AI短视频.app/Contents/Resources/runtime/
 
