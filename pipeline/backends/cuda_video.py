@@ -113,6 +113,47 @@ def load_vae(*, conf_repo: str = DEFAULT_CONF_REPO, offline: bool = False,
     return vae
 
 
+def load_connectors(*, conf_repo: str = DEFAULT_CONF_REPO, offline: bool = False,
+                    device: str = "cuda") -> Any:
+    """加载 LTX-2 文本 connectors（Gemma 全部层 → transformer 的 prompt_embeds）。
+
+    没有这一步，直接把 Gemma 最后一层喂给 transformer 会得到网格噪声画面
+    （实测）。权重约 2.67 GB。
+    """
+    require_cuda(what="文本 connector 阶段")
+    import torch
+    from diffusers.models.condition_embedders.condition_embedder_ltx2 import LTX2TextConnectors
+
+    conf = _hub_file(conf_repo, "connectors/config.json", offline=offline)
+    weights = _hub_file(conf_repo, "connectors/diffusion_pytorch_model.safetensors",
+                        offline=offline)
+    from pathlib import Path as _P
+
+    conn = LTX2TextConnectors.from_pretrained(_P(weights).parent, torch_dtype=torch.bfloat16)
+    return conn.to(device).eval()
+
+
+def encode_prompt_with_connectors(
+    connectors: Any,
+    *,
+    hidden: Any,
+    mask: Any,
+    scale_factor: int = 8,
+) -> tuple[Any, Any]:
+    """Gemma 全部层 + connectors → (video_embeds, audio_embeds)。"""
+    import torch
+
+    h = hidden.to("cuda", dtype=torch.bfloat16)
+    m = mask.to("cuda") if mask is not None else torch.ones(h.shape[:2], device="cuda", dtype=torch.long)
+    with torch.no_grad():
+        out = connectors(h, m, padding_side="left", scale_factor=int(scale_factor))
+    # 官方返回 (video_embeds, audio_embeds, ...)
+    video = out[0] if isinstance(out, (tuple, list)) else out
+    audio = out[1] if isinstance(out, (tuple, list)) and len(out) > 1 else video
+    del h, m
+    return video, audio
+
+
 def make_coords(model: Any, frames: int, height: int, width: int,
                 audio_frames: int, device: str = "cuda"):
     """构造 video / audio 的 RoPE 坐标（必须用官方 API，手搓会 OOM/维度错）。"""
@@ -135,36 +176,62 @@ def denoise(
     audio_latents: Any,
     prompt_embeds: Any,
     audio_prompt_embeds: Any,
-    timesteps: list[float],
+    steps: int,
     frames: int,
     height: int,
     width: int,
     audio_frames: int,
+    conditioning_mask: Any | None = None,
+    conditioning_latents: Any | None = None,
     on_step: Callable[[int, float], None] | None = None,
 ) -> tuple[Any, Any]:
     """跑完整去噪循环，返回 (video_latents, audio_latents)。
 
-    ``timesteps`` 是 sigma×1000 的列表（LTX 用 ``timestep_scale_multiplier=1000``）。
+    ``steps`` 是去噪步数；timestep 表由官方 FlowMatchEulerDiscreteScheduler 生成。
     """
     import torch
+    from diffusers import FlowMatchEulerDiscreteScheduler
 
     video_coords, audio_coords, _ = make_coords(
         model, frames, height, width, audio_frames
     )
     tokens = latents.shape[1]
+
+    # Match diffusers LTX2 I2V: token-count shift and Euler sigmas.
+    import numpy as np
+    from diffusers.pipelines.ltx2.pipeline_ltx2 import calculate_shift
+
+    scheduler = FlowMatchEulerDiscreteScheduler()
+    audio_scheduler = FlowMatchEulerDiscreteScheduler()
+    sigmas = np.linspace(1.0, 1.0 / int(steps), int(steps))
+    mu = calculate_shift(
+        tokens,
+        scheduler.config.get("base_image_seq_len", 1024),
+        scheduler.config.get("max_image_seq_len", 4096),
+        scheduler.config.get("base_shift", 0.95),
+        scheduler.config.get("max_shift", 2.05),
+    )
+    scheduler.set_timesteps(int(steps), device="cuda", sigmas=sigmas, mu=mu)
+    audio_scheduler.set_timesteps(int(steps), device="cuda", sigmas=sigmas, mu=mu)
+    if conditioning_mask is None:
+        conditioning_mask = torch.zeros((latents.shape[0], tokens), device="cuda", dtype=torch.bfloat16)
+
     t0 = time.time()
-    for idx, ts in enumerate(timesteps):
+    for idx, t in enumerate(scheduler.timesteps):
         step_t = time.time()
-        timestep = torch.full((1, tokens), float(ts), device="cuda", dtype=torch.bfloat16)
-        audio_ts = torch.full((1,), float(ts), device="cuda", dtype=torch.bfloat16)
+        audio_t = audio_scheduler.timesteps[idx]
+        # Official I2V timestep mask: conditioned first-frame tokens receive timestep 0.
+        timestep = t.expand(latents.shape[0], tokens) * (1 - conditioning_mask)
+        audio_ts = audio_t.expand(audio_latents.shape[0])
         with torch.no_grad():
             out = model(
                 hidden_states=latents,
                 audio_hidden_states=audio_latents,
                 encoder_hidden_states=prompt_embeds,
                 audio_encoder_hidden_states=audio_prompt_embeds,
-                timestep=timestep,
-                audio_timestep=audio_ts,
+                timestep=timestep.to(torch.bfloat16),
+                audio_timestep=audio_ts.to(torch.bfloat16),
+                sigma=timestep.to(torch.bfloat16),
                 video_coords=video_coords,
                 audio_coords=audio_coords,
                 num_frames=frames,
@@ -173,27 +240,99 @@ def denoise(
                 audio_num_frames=audio_frames,
                 return_dict=False,
             )
-        video_vel = out[0] if isinstance(out, tuple) else out
-        audio_vel = out[1] if isinstance(out, tuple) and len(out) > 1 else None
-        # Euler 步进（与项目的 FlowMatchEulerDiscreteScheduler 对齐由调用方保证）
-        latents = latents - video_vel.to(latents.dtype) * (1.0 / len(timesteps))
-        if audio_vel is not None and audio_latents is not None:
-            audio_latents = audio_latents - audio_vel.to(audio_latents.dtype) * (1.0 / len(timesteps))
+        # LTX-2 transformer returns velocity (v), not x0. The official I2V pipeline
+        # converts v<->x0 only when applying guidance; without extra guidance, feed v
+        # directly into FlowMatchEulerDiscreteScheduler.step.
+        video_velocity = out[0].float() if isinstance(out, tuple) else out.float()
+        audio_velocity = out[1].float() if isinstance(out, tuple) and len(out) > 1 else None
+        # Packed token order is [T,H,W]. Keep the first latent frame (H*W tokens)
+        # conditioned on the source still; only denoise following frames.
+        first_frame_tokens = latent_dims(height, width, frames)[1] * latent_dims(height, width, frames)[2]
+        pred = scheduler.step(
+            video_velocity[:, first_frame_tokens:], t,
+            latents[:, first_frame_tokens:].float(), return_dict=False
+        )[0].to(latents.dtype)
+        latents = torch.cat([latents[:, :first_frame_tokens], pred], dim=1)
+        if audio_velocity is not None and audio_latents is not None:
+            audio_latents = audio_scheduler.step(
+                audio_velocity, audio_t, audio_latents.float(), return_dict=False
+            )[0].to(audio_latents.dtype)
         if on_step is not None:
             on_step(idx, time.time() - step_t)
-    print(f"  去噪 {len(timesteps)} 步共 {time.time()-t0:.1f}s", flush=True)
+    print(f"  去噪 {int(steps)} 步共 {time.time()-t0:.1f}s", flush=True)
     return latents, audio_latents
 
 
+def _normalize_latents(z, vae):
+    """按 VAE 的 latents_mean/std 归一化（缺失这一步画面会错乱）。"""
+    mean = vae.latents_mean.view(1, -1, 1, 1, 1)
+    std = vae.latents_std.view(1, -1, 1, 1, 1)
+    return (z - mean) * vae.config.scaling_factor / std
+
+
+def _denormalize_latents(z, vae):
+    mean = vae.latents_mean.view(1, -1, 1, 1, 1)
+    std = vae.latents_std.view(1, -1, 1, 1, 1)
+    return z * std / vae.config.scaling_factor + mean
+
+
+def _pack_latents(z, patch_size: int = 1, patch_size_t: int = 1):
+    """[B,C,F,H,W] → [B, tokens, C]（与 diffusers 官方实现一致）。"""
+    b, c, f, h, w = z.shape
+    pf, ph, pw = f // patch_size_t, h // patch_size, w // patch_size
+    z = z.reshape(b, -1, pf, patch_size_t, ph, patch_size, pw, patch_size)
+    return z.permute(0, 2, 4, 6, 1, 3, 5, 7).flatten(4, 7).flatten(1, 3)
+
+
+def _unpack_latents(tokens, num_frames: int, height: int, width: int,
+                    patch_size: int = 1, patch_size_t: int = 1):
+    """[B, tokens, C] → [B,C,F,H,W]。"""
+    b = tokens.size(0)
+    z = tokens.reshape(b, num_frames, height, width, -1, patch_size_t, patch_size, patch_size)
+    z = z.permute(0, 4, 1, 5, 2, 6, 3, 7).flatten(6, 7).flatten(4, 5).flatten(2, 3)
+    return z
+
+
+def encode_frame_to_latents(vae: Any, image_path: Path, *, frames: int,
+                            height: int, width: int) -> Any:
+    """把静帧编码成初始 latent（I2V 起点）。
+
+    必须走「VAE encode → normalize → pack」三步，缺 normalize 会让
+    画面出现网格状伪影（实测）。返回 ``(1, tokens, C)``。
+    """
+    import numpy as np
+    import torch
+    from PIL import Image
+
+    lat_t, lat_h, lat_w = latent_dims(height, width, frames)
+
+    img = Image.open(image_path).convert("RGB").resize((width, height), Image.LANCZOS)
+    arr = np.asarray(img).astype(np.float32) / 127.5 - 1.0
+    frame = torch.from_numpy(arr).permute(2, 0, 1)[None, :, None, :, :].to("cuda", dtype=torch.bfloat16)
+
+    # Official I2V 先编码单帧 image latent，再沿时间轴复制；不要把一张图
+    # 复制成 49 帧送入 causal VAE，否则时间压缩窗口错位，首帧重建会出现伪影。
+    with torch.no_grad():
+        posterior = vae.encode(frame, causal=True, return_dict=False)[0]
+        z0 = posterior.mode() if hasattr(posterior, "mode") else posterior.sample()
+        z0 = z0[:, :, :1, :lat_h, :lat_w]
+        z0 = _normalize_latents(z0, vae).to(torch.bfloat16)
+        z = z0.repeat(1, 1, lat_t, 1, 1)
+        return _pack_latents(z).contiguous()
+
+
 def decode_video(vae: Any, latents: Any, *, frames: int, height: int, width: int):
-    """latent → 像素帧张量 ``(3, F, H, W)``，值域约 [-1, 1]。"""
+    """latent → 像素帧张量 ``(3, F, H, W)``，值域约 [-1, 1]。
+
+    必须走「unpack → denormalize → VAE decode」，与编码对称。
+    """
     import torch
 
     lat_t, lat_h, lat_w = latent_dims(height, width, frames)
-    # (1, tokens, C) → (1, C, T, H, W)
-    packed = latents.reshape(1, lat_t, lat_h, lat_w, -1).permute(0, 4, 1, 2, 3)
     with torch.no_grad():
-        dec = vae.decode(packed.contiguous(), return_dict=False)[0]
+        z = _unpack_latents(latents.float(), lat_t, lat_h, lat_w)
+        z = _denormalize_latents(z, vae).to(torch.bfloat16)
+        dec = vae.decode(z.contiguous(), return_dict=False)[0]
     return dec
 
 
@@ -222,7 +361,7 @@ def generate_shot(
     audio_latents,
     prompt_embeds,
     audio_prompt_embeds,
-    timesteps: list[float],
+    steps: int,
     frames: int,
     height: int,
     width: int,
@@ -251,7 +390,7 @@ def generate_shot(
             audio_latents=audio_latents,
             prompt_embeds=prompt_embeds,
             audio_prompt_embeds=audio_prompt_embeds,
-            timesteps=timesteps,
+            steps=steps,
             frames=frames,
             height=height,
             width=width,
@@ -408,16 +547,41 @@ def _generate_shot_cuda(
     tokens = lat_t * lat_h * lat_w
     audio_frames = 41
 
-    # ---- 段1：文本编码 ----
+    # ---- 段1：文本编码（Gemma 全部层）+ connectors ----
     with cuda_memory.stage("videos/text_encoder", min_free_gib=7.0):
         te, tok = cuda_textenc.load(quant="4bit")
-        embeds = cuda_textenc.encode_and_free(te, tok, prompt=prompt)
+        enc = cuda_textenc.encode_and_free(te, tok, prompt=prompt)
         del te, tok
-    prompt_embeds = embeds.to("cuda", dtype=torch.bfloat16)
-    audio_embeds = prompt_embeds
+    cuda_memory.empty_cache()
 
-    # 初始 latent（I2V：静帧经 VAE 编码会更准，这里先用随机 latent 占位）
-    latents = torch.randn(1, tokens, 128, device="cuda", dtype=torch.bfloat16)
+    with cuda_memory.stage("videos/connectors", min_free_gib=3.0):
+        conn = load_connectors(conf_repo=conf_repo)
+        prompt_embeds, audio_embeds = encode_prompt_with_connectors(
+            conn, hidden=enc["hidden"], mask=enc["mask"],
+            scale_factor=enc.get("scale_factor", 8),
+        )
+        del conn
+    del enc
+    cuda_memory.empty_cache()
+
+    # ---- 段1.5：用 VAE 编码静帧，得到 I2V 的初始 latent ----
+    # 不编码静帧的话生成结果就是纯噪声（实测成片是彩色噪点）
+    with cuda_memory.stage("videos/vae_encode", min_free_gib=2.0):
+        vae_enc = load_vae(conf_repo=conf_repo)
+        latents = encode_frame_to_latents(
+            vae_enc, Path(image_path), frames=frames, height=height, width=width
+        )
+        del vae_enc
+    cuda_memory.empty_cache()
+
+    # Official I2V initial state: keep the encoded first latent frame; noise the rest.
+    conditioning_latents = latents.clone()
+    conditioning_mask = torch.zeros((1, latents.shape[1]), device="cuda", dtype=torch.bfloat16)
+    first_frame_tokens = lat_h * lat_w
+    conditioning_mask[:, :first_frame_tokens] = 1.0
+    noise = torch.randn(latents.shape, device="cuda", dtype=torch.bfloat16,
+                        generator=torch.Generator("cuda").manual_seed(int(seed)))
+    latents = conditioning_latents * conditioning_mask.unsqueeze(-1) + noise * (1 - conditioning_mask.unsqueeze(-1))
     audio_latents = torch.randn(1, audio_frames, 128, device="cuda", dtype=torch.bfloat16)
 
     # ---- 段2：transformer 去噪 → 释放 ----
@@ -425,12 +589,13 @@ def _generate_shot_cuda(
     with cuda_memory.stage("videos/transformer", min_free_gib=7.5):
         model = load_transformer(gguf_file=gguf_file, gguf_repo=gguf_repo,
                                  conf_repo=conf_repo)
-        timesteps = [1000.0 * (1 - i / steps) for i in range(steps)]
         latents, audio_latents = denoise(
             model, latents=latents, audio_latents=audio_latents,
             prompt_embeds=prompt_embeds, audio_prompt_embeds=audio_embeds,
-            timesteps=timesteps, frames=frames, height=height, width=width,
+            steps=steps, frames=frames, height=height, width=width,
             audio_frames=audio_frames,
+            conditioning_mask=conditioning_mask,
+            conditioning_latents=conditioning_latents,
         )
         del model
     del prompt_embeds, audio_embeds, audio_latents

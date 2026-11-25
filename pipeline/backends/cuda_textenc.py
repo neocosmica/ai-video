@@ -64,26 +64,39 @@ def encode_and_free(
     tokenizer: Any,
     *,
     prompt: str,
-    layer: int = -1,
-) -> Any:
-    """编码一段文本，**返回 CPU 上的 embeds**，并立即释放模型。
+    max_length: int = 1024,
+    scale_factor: int = 8,
+) -> dict:
+    """编码一段文本 → ``{"hidden": 全部层, "mask": 注意力掩码}``（都在 CPU）。
 
-    返回的 tensor 在主机内存（bf16），不会占用显存，可以安全地与
-    后续 transformer 阶段共存。
+    **必须取全部层的 hidden_states**：LTX 的 ``LTX2TextConnectors`` 配置里
+    ``text_proj_in_factor=49``，说明它期望 Gemma 全部 49 层堆叠后的张量
+    ``(B, seq, caption_channels=3840, 49)``。只取最后一层会得到错误形状，
+    进而让视频画面变成网格噪声（实测）。
 
-    调用本函数后 ``model`` 已被释放，不要再用。
+    返回的 tensor 在主机内存，不占显存，可与后续阶段共存。
+    调用后 ``model`` 已被释放，不要再用。
     """
     import torch
 
-    ids = tokenizer(prompt, return_tensors="pt").to(model.device)
+    ids = tokenizer(
+        prompt, return_tensors="pt", padding="max_length",
+        truncation=True, max_length=int(max_length),
+    )
+    ids = {k: v.to(model.device) for k, v in ids.items()}
     with torch.no_grad():
         out = model(**ids, output_hidden_states=True)
-    hidden = out.hidden_states[layer].detach().to(torch.bfloat16)
-    embeds = hidden.cpu()          # 关键：先落到主机内存
+
+    # 全部层堆叠：每层 (B,seq,3840) → stack 到 (B,seq,3840,num_layers)
+    hidden = torch.stack(list(out.hidden_states), dim=-1)
+    mask = ids.get("attention_mask")
+    hidden_cpu = hidden.detach().to(torch.bfloat16).cpu()
+    mask_cpu = mask.detach().cpu() if mask is not None else None
 
     # 坚决丢干净，否则显存不回收（见模块 docstring 的「坑」）
-    del out, hidden, ids
+    del out, hidden, ids, mask
     from pipeline.backends import cuda_memory
 
     cuda_memory.empty_cache()
-    return embeds
+    return {"hidden": hidden_cpu, "mask": mask_cpu,
+            "scale_factor": int(scale_factor)}

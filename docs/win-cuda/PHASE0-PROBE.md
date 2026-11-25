@@ -268,14 +268,49 @@ avwin/
 与 Mac 端 `~/Library/Caches/novel-video/venvs/{main,ltx,musicgen}` 的多环境布局同构，
 因此 `pipeline/backends/` 抽象层可直接复用「按阶段选解释器」的设计。
 
-## 7. 下一步（阶段 1 之前需补测）
+## 7. 完整 produce 实测（2026-11-25）
 
-1. **VAE 解码端到端**：Q2_K 前向 → 释放 → VAE 解码 → 输出 mp4（目前只验证到 VAE 上卡）
-2. **文本编码器**：LTX-2（19B）配套的 Gemma3 编码器在 CUDA 上的加载与显存
-3. **FLUX.2 Klein 4bit 量化**：当前 bf16 已 7.8 GB，叠 bnb4 可进一步降
-4. **显存编排脚本化**：把「阶段间释放」固化成 `backends/cuda/memory.py`
+开发机上用全新项目通过 `pipeline produce` 一条命令跑完整流程：
 
-## 8. 复现方式
+```
+storyboard → screenplay → images → audio → videos → music → assemble
+```
+
+实测产物：
+- `final.mp4`：**7.88 秒，189 帧，384×640 @24fps，H.264 + AAC，5.61 MB**
+- 5 个镜头视频、5 张静帧、2 张角色肖像、5 段对白配音、配乐全部生成
+- 总耗时 **901.8 秒（15 分钟）**，`produce` 返回码 0
+
+阶段峰值（视频阶段内部）：
+
+```
+text_encoder   7.77 GiB → 释放后 free 10.79 GiB
+connectors     2.67 GiB → 释放
+transformer    8.49 GiB → 释放后 free 10.78 GiB
+VAE            3.00 GiB
+```
+
+**ffmpeg/字幕跨平台问题**：Windows 上 `fontsdir=C:\\WINDOWS\\Fonts` 会因盘符冒号破坏滤镜语法，
+三种转义均失败。`platform.ass_filter()` 在 Windows 不加 `fontsdir`（ffmpeg 自动加载系统字体），
+Mac/Linux 保留原 `fontsdir` 行为。
+
+**重要质量问题（进行中）**：初版完整 produce 虽然生成 MP4，但抽帧为网格噪点。
+已发现并修复：
+- latent 必须按 VAE `latents_mean/std` normalize，解码时 denormalize
+- Gemma 必须给 connector 输入全部 49 层 hidden_states，且输出经过 LTX2TextConnectors
+- 官方 I2V 需要 conditioning mask 固定首帧，并按 token 数算 scheduler shift
+- 官方 I2V 对模型输出做 velocity↔x0 转换，scheduler 仅更新非 conditioning 帧
+
+已重写为官方 LTX2 I2V 步进逻辑；正在最后复测画面质量。**阶段验收以抽帧为真实画面为准，不能只以 rc=0 认定完成。**
+
+## 8. 下一步
+
+1. 确认最新 I2V 修复的抽帧无网格伪影、首帧与输入静帧一致
+2. 重跑完整 `produce` 形成最终回归证据
+3. 网页控制台端到端验收（目标 c）
+4. 把安装/端到端结果补充入 Windows 部署文档
+
+## 9. 复现方式
 
 探针脚本位于 `docs/win-cuda/probes/`，通过 SSH 以 base64 上传执行（开发机无 bash）。
 主环境 `C:/Users/annas/avwin/.venv`，TTS 环境 `C:/Users/annas/avwin/venv-tts`。
