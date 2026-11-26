@@ -270,6 +270,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func quit(_ sender: Any?) {
+        // 先让控制台清掉本仓库相关进程（含孤儿 download-one），再结束自己。
+        var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        var path = comps?.path ?? "/"
+        if path.hasSuffix("/") {
+            path += "api/shutdown"
+        } else {
+            path += "/api/shutdown"
+        }
+        comps?.path = path
+        comps?.query = nil
+        comps?.fragment = nil
+        if let shutdownURL = comps?.url {
+            var req = URLRequest(url: shutdownURL)
+            req.httpMethod = "POST"
+            req.timeoutInterval = 8
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = Data("{}".utf8)
+            let sem = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: req) { _, _, _ in
+                sem.signal()
+            }.resume()
+            _ = sem.wait(timeout: .now() + 8)
+        }
         if parentPid > 0 {
             kill(parentPid, SIGTERM)
         }

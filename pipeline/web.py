@@ -386,6 +386,14 @@ class Job:
                     self.append_log(f"[webui] 启动前已清除 {len(removed)} 项产物")
             except Exception as exc:
                 self.append_log(f"[webui] 启动前清产物失败：{exc}")
+        try:
+            from pipeline.process_guard import KIND_DOWNLOAD, KIND_SETUP, sweep_stale
+
+            killed = sweep_stale(kinds=(KIND_DOWNLOAD, KIND_SETUP), keep_pids=(os.getpid(),))
+            if killed:
+                self.append_log(f"[webui] 启动前已清理残留进程：{', '.join(str(pid) for pid in killed)}")
+        except Exception as exc:
+            self.append_log(f"[webui] 启动前清理残留进程失败：{exc}")
         _persist()
         notify_change()
         threading.Thread(target=self._run, daemon=True).start()
@@ -2053,6 +2061,107 @@ def _validate_skip_empty(
 # ---------------------------------------------------------------------------
 
 
+def api_models() -> dict:
+    """各阶段可选模型，以及 config.json 里当前选中的那条。"""
+    from pipeline.backends import selection_view
+    from pipeline.config import Settings
+
+    return selection_view(Settings.load())
+
+
+def api_models_space(data: dict | None = None) -> dict:
+    """当前选择里还没下载的权重，和缓存盘剩余空间。不够时 ``ok`` 为假，调用方不要开始下载。"""
+    from dataclasses import replace
+
+    from pipeline.backends.catalog import STAGE_FIELDS, STAGES, download_specs, resolve_stage_model
+    from pipeline.config import Settings
+    from pipeline.disk_space import plan_weight_space
+
+    settings = Settings.load()
+    raw = None
+    if isinstance(data, dict):
+        candidate = data.get("models") if isinstance(data.get("models"), dict) else data.get("keep")
+        if "models" in data and not isinstance(data.get("models"), dict) and data.get("models") is not None:
+            raise ValueError("models 需要是阶段到模型 id 的对象")
+        if "keep" in data and not isinstance(data.get("keep"), dict) and data.get("keep") is not None:
+            raise ValueError("keep 需要是阶段到模型 id 的对象")
+        raw = candidate if isinstance(candidate, dict) else None
+    if raw:
+        unknown = [str(key) for key in raw if str(key) not in STAGE_FIELDS]
+        if unknown:
+            known = "、".join(STAGES)
+            raise ValueError(f"未知阶段 {'、'.join(unknown)}（可选 {known}）")
+        overlay: dict[str, str] = {}
+        for stage, value in raw.items():
+            try:
+                resolve_stage_model(str(stage), str(value))
+            except SystemExit as exc:
+                raise ValueError(str(exc)) from exc
+            overlay[STAGE_FIELDS[str(stage)]] = str(value)
+        settings = replace(settings, **overlay)
+    try:
+        specs = download_specs(settings)
+    except SystemExit as exc:
+        raise ValueError(str(exc)) from exc
+    return plan_weight_space(specs)
+
+
+def api_models_save(data: dict) -> dict:
+    """把网页上的阶段选择写回 config.json。只改模型字段。"""
+    from pipeline.backends import save_selection, selection_view
+    from pipeline.config import Settings
+    from pipeline.util import ROOT
+
+    raw = data.get("models") if isinstance(data.get("models"), dict) else data.get("selections")
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("需要 models：阶段 → 模型 id")
+    try:
+        save_selection(ROOT / "config.json", {str(key): str(value) for key, value in raw.items()})
+    except SystemExit as exc:
+        raise ValueError(str(exc)) from exc
+    return selection_view(Settings.load())
+
+
+def _model_keep(data: dict | None) -> dict[str, str] | None:
+    if not isinstance(data, dict) or not isinstance(data.get("keep"), dict):
+        return None
+    return {str(key): str(value) for key, value in data["keep"].items()}
+
+
+def _assert_model_cache_idle() -> None:
+    """安装或生成还在写权重时，不删缓存。"""
+    from pipeline.bootstrap import setup_status
+
+    status = setup_status()
+    if status.get("status") in {"installing", "checking"}:
+        raise ValueError("正在安装或检查依赖，请等它结束后再清理模型。")
+    if active_run_info().get("running"):
+        raise ValueError("有生成任务在跑，请等它结束后再清理模型。")
+
+
+def api_models_unused(data: dict | None = None, *, delete: bool = False) -> dict:
+    """列出 hub 里的全部模型。``delete`` 为真时只删请求里点名的仓库。"""
+    from pipeline.config import Settings
+    from pipeline.model_cache import delete_selected_caches, list_hub_caches
+
+    settings = Settings.load()
+    keep = _model_keep(data)
+    if not delete:
+        return list_hub_caches(settings, keep=keep)
+    if not (isinstance(data, dict) and data.get("confirm") is True):
+        raise ValueError("清理模型需要确认")
+    repos = data.get("repos")
+    if not isinstance(repos, list) or not any(str(item).strip() for item in repos):
+        raise ValueError("先选择要删除的模型")
+    _assert_model_cache_idle()
+    result = delete_selected_caches([str(item) for item in repos])
+    if result["errors"] and result["freed_bytes"] == 0:
+        detail = "；".join(f"{item['repo']}：{item['error']}" for item in result["errors"])
+        raise ValueError(f"没能清理：{detail}")
+    result.update(list_hub_caches(settings, keep=keep))
+    return result
+
+
 def budget_info() -> dict:
     """单镜上限（复用 budget 命令逻辑，秒级、不加载模型）。"""
     from pipeline.config import Settings
@@ -2208,16 +2317,17 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "pid": os.getpid(), "root": str(ROOT)})
             elif path == "/api/budget":
                 self._json(budget_info())
+            elif path == "/api/models":
+                self._json(api_models())
+            elif path == "/api/models/unused":
+                self._json(api_models_unused())
+            elif path == "/api/models/space":
+                self._json(api_models_space())
             elif path == "/api/setup/status":
-                from pipeline.bootstrap import ensure_async, setup_status
+                from pipeline.bootstrap import setup_status
 
-                # 打开网页即检查；缺依赖时后台补装（含分镜 LLM）
-                st = setup_status()
-                if st.get("status") in {"unknown", "need_install"} or (
-                    not st.get("ready") and st.get("status") not in {"installing", "checking", "failed"}
-                ):
-                    st = ensure_async()
-                self._json(st)
+                # 只返回检查结果。下载要等用户点「安装依赖」。
+                self._json(setup_status())
             elif path == "/api/events":
                 self._stream_events()
             elif path.startswith("/api/log/"):
@@ -2299,10 +2409,26 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(self.queue_start(data))
             elif path == "/api/task/cancel":
                 self._json(self.queue_remove(data))
+            elif path == "/api/models":
+                self._json(api_models_save(data))
+            elif path == "/api/models/unused":
+                self._json(api_models_unused(data, delete=bool(data.get("confirm"))))
+            elif path == "/api/models/space":
+                self._json(api_models_space(data))
             elif path == "/api/setup/ensure":
                 from pipeline.bootstrap import ensure_async
 
                 self._json(ensure_async(force=bool(data.get("force"))))
+            elif path == "/api/setup/recheck":
+                from pipeline.bootstrap import recheck_async
+
+                self._json(recheck_async())
+            elif path == "/api/setup/cancel":
+                from pipeline.bootstrap import cancel_async
+
+                self._json(cancel_async())
+            elif path == "/api/shutdown":
+                self._json(request_web_shutdown())
             else:
                 self._json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -2948,8 +3074,74 @@ def _write_pidfile() -> None:
     atexit.register(_clear)
 
 
+def _stop_all_jobs_for_exit() -> None:
+    with _LOCK:
+        jobs = list(_JOBS.values())
+    for job in jobs:
+        try:
+            if getattr(job, "status", None) == "running":
+                job.stop()
+        except Exception:
+            pass
+
+
+def cleanup_project_on_exit() -> None:
+    """菜单栏退出 / Ctrl+C：停安装、停任务，再清本仓库相关进程。"""
+    try:
+        from pipeline.bootstrap import cancel_async
+
+        cancel_async()
+    except Exception as exc:
+        print(f"停止安装失败（可忽略）：{exc}", flush=True)
+    try:
+        _stop_all_jobs_for_exit()
+    except Exception as exc:
+        print(f"停止任务失败（可忽略）：{exc}", flush=True)
+    try:
+        from pipeline.process_guard import shutdown_project_processes
+
+        killed = shutdown_project_processes(keep_pids=(os.getpid(),), include_web=False)
+        if killed:
+            print(f"已结束相关进程：{', '.join(str(pid) for pid in killed)}", flush=True)
+    except Exception as exc:
+        print(f"清理相关进程失败（可忽略）：{exc}", flush=True)
+
+
+_SHUTDOWN_ONCE = threading.Event()
+
+
+def request_web_shutdown() -> dict:
+    """给菜单栏「退出」用：先回包，再在后台收尾并结束本进程。"""
+    import signal
+
+    if _SHUTDOWN_ONCE.is_set():
+        return {"ok": True, "status": "stopping"}
+    _SHUTDOWN_ONCE.set()
+
+    def _run() -> None:
+        time.sleep(0.15)
+        try:
+            cleanup_project_on_exit()
+        finally:
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+            except Exception:
+                os._exit(0)
+
+    threading.Thread(target=_run, name="webui-shutdown", daemon=True).start()
+    return {"ok": True, "status": "stopping"}
+
+
 def serve(host: str, port: int) -> None:
     _claim_port_or_exit(host, port)
+    try:
+        from pipeline.process_guard import KIND_DOWNLOAD, KIND_SETUP, sweep_stale
+
+        killed = sweep_stale(kinds=(KIND_DOWNLOAD, KIND_SETUP), keep_pids=(os.getpid(),))
+        if killed:
+            print(f"已清理残留进程：{', '.join(str(pid) for pid in killed)}", flush=True)
+    except Exception as exc:
+        print(f"启动前清理残留进程失败（可忽略）：{exc}", flush=True)
     try:
         moved = migrate_repo_projects()
         if moved:
@@ -2967,17 +3159,15 @@ def serve(host: str, port: int) -> None:
             print(f"已挂载外部任务 {len(attached)} 个：{', '.join(j.out for j in attached)}", flush=True)
     except Exception as exc:
         print(f"挂载外部任务失败（可忽略）：{exc}", flush=True)
-    # 打开即检查依赖/模型；缺则后台补装，项目选择页会显示进度
+    # 打开即检查。缺依赖只提示，等用户点「安装依赖」再下载。
     try:
-        from pipeline.bootstrap import ensure_async, probe
+        from pipeline.bootstrap import recheck_async
 
-        report = probe(refresh_state=True)
+        report = recheck_async()
         if report.get("ready"):
             print("依赖与模型：已就绪", flush=True)
         else:
-            missing = report.get("missing") or []
-            print(f"依赖与模型：缺 {len(missing)} 项，后台补装中…", flush=True)
-            ensure_async()
+            print(report.get("message") or "依赖未齐，打开网页后点「安装依赖」", flush=True)
     except Exception as exc:
         print(f"依赖检查失败（网页仍可开）：{exc}", flush=True)
     try:
@@ -3033,6 +3223,8 @@ def serve(host: str, port: int) -> None:
         except KeyboardInterrupt:
             stopping = True
         finally:
+            if not _SHUTDOWN_ONCE.is_set():
+                cleanup_project_on_exit()
             if prev_term is not None:
                 try:
                     import signal
@@ -3055,6 +3247,8 @@ def serve(host: str, port: int) -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        if not _SHUTDOWN_ONCE.is_set():
+            cleanup_project_on_exit()
         server.server_close()
 
 

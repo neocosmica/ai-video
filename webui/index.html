@@ -15,35 +15,57 @@
 </header>
 
 <main class="layout">
-  <!-- 项目选择页：打开网页第一件事 -->
-  <section class="card" id="project-picker" style="grid-column:1/-1">
-    <h2>① 选择项目 <span class="hint">（每个项目一个文件夹 ~/AI短视频项目/<片名>/，小说、分镜、成片、任务历史都在里面）</span></h2>
-    <div class="setup-entry">
-      <button type="button" id="setup-install" class="ghost">安装依赖</button>
-      <span id="setup-entry-hint" class="hint">即使检查显示已就绪，也可以再装一次，用来补上下载不完整的模型。</span>
-    </div>
-    <div id="setup-banner" class="setup-banner" hidden>
-      <div class="setup-banner-head">
-        <strong id="setup-title">正在检查本机依赖与模型…</strong>
-        <span id="setup-pct" class="mono hint">0%</span>
+  <!-- 打开网页先看依赖，再选项目。两块一起显隐。 -->
+  <div id="project-picker" style="grid-column:1/-1">
+    <section class="card">
+      <h2>依赖与模型 <span class="hint">安装、清理和各阶段模型在这里。改选后自动保存并重新检查，缺的点「安装依赖」才下载。</span></h2>
+      <div class="setup-entry">
+        <button type="button" id="setup-install" class="ghost">安装依赖</button>
+        <button type="button" id="model-clean" class="ghost" title="列出本机 Hugging Face 模型权重，勾选后删除">清理模型权重</button>
+        <span id="model-clean-msg" class="hint"></span>
+        <span id="setup-entry-hint" class="hint">即使检查显示已就绪，也可以再装一次，用来补上下载不完整的模型。</span>
       </div>
-      <div class="setup-bar" aria-hidden="true"><div id="setup-fill" class="setup-fill"></div></div>
-      <div id="setup-msg" class="setup-msg hint">首次打开会自动安装 Python 依赖并下载模型（含分镜语言模型），请保持网络畅通。</div>
-      <ul id="setup-items" class="setup-items" hidden></ul>
-      <div class="setup-actions" id="setup-actions" hidden>
-        <button type="button" id="setup-retry" class="primary">重试安装</button>
+      <div id="setup-banner" class="setup-banner" hidden>
+        <div class="setup-banner-head">
+          <strong id="setup-title">正在检查本机依赖与模型…</strong>
+          <span id="setup-pct" class="mono hint">0%</span>
+        </div>
+        <div class="setup-bar" aria-hidden="true"><div id="setup-fill" class="setup-fill"></div></div>
+        <div id="setup-msg" class="setup-msg hint">点「安装依赖」后才会下载，请保持网络畅通。</div>
+        <ul id="setup-items" class="setup-items" hidden></ul>
+        <div class="setup-actions" id="setup-actions" hidden>
+          <button type="button" id="setup-retry" class="primary">重试安装</button>
+          <button type="button" id="setup-stop" class="danger" hidden>停止安装</button>
+        </div>
       </div>
-    </div>
-    <div id="project-grid" class="project-grid"></div>
-    <div class="row" style="margin-top:14px">
-      <label>或新建项目</label>
-      <div class="fileline">
-        <input id="new-project-name" placeholder="片名，例：雨夜重逢（自动建 ~/AI短视频项目/雨夜重逢/）" />
-        <button id="new-project-btn" class="primary">＋ 新建</button>
+      <div id="disk-banner" class="setup-banner warn" hidden>
+        <div class="setup-banner-head">
+          <strong>磁盘空间不足</strong>
+        </div>
+        <div id="disk-banner-msg" class="setup-msg"></div>
       </div>
-    </div>
-    <div id="picker-msg" class="error" hidden></div>
-  </section>
+      <details class="model-picks" id="model-picks">
+        <summary>各阶段模型 <span class="hint">分镜可选本机 Ollama 已下载的模型。</span> <span id="model-disk-hint" class="hint"></span></summary>
+        <div id="model-grid" class="model-grid"></div>
+        <div class="model-actions">
+          <span id="model-msg" class="hint"></span>
+          <span id="model-disk" class="hint model-disk"></span>
+        </div>
+      </details>
+    </section>
+    <section class="card">
+      <h2>① 选择项目 <span class="hint">（每个项目一个文件夹 ~/AI短视频项目/<片名>/，小说、分镜、成片、任务历史都在里面）</span></h2>
+      <div id="project-grid" class="project-grid"></div>
+      <div class="row" style="margin-top:14px">
+        <label>或新建项目</label>
+        <div class="fileline">
+          <input id="new-project-name" placeholder="片名，例：雨夜重逢（自动建 ~/AI短视频项目/雨夜重逢/）" />
+          <button id="new-project-btn" class="primary">＋ 新建</button>
+        </div>
+      </div>
+      <div id="picker-msg" class="error" hidden></div>
+    </section>
+  </div>
 
   <!-- 工程：成片展示 + 分镜编辑 -->
   <div class="card" id="shots-card" hidden>
@@ -273,6 +295,28 @@
   <option value="surprised"></option>
   <option value="whisper"></option>
 </datalist>
+
+<!-- 清理 Hugging Face 缓存：先勾选再删 -->
+<dialog id="model-clean-dialog" class="rerun-dialog">
+  <form method="dialog" id="model-clean-form" class="rerun-form">
+    <h3 class="rerun-title">清理 Hugging Face 模型</h3>
+    <p id="model-clean-summary" class="hint rerun-summary"></p>
+    <div id="model-clean-error" class="error" hidden></div>
+    <div class="model-clean-tools">
+      <label class="rerun-all">
+        <input type="checkbox" id="model-clean-all">
+        <span>全选</span>
+      </label>
+      <button type="button" id="model-clean-unused" class="ghost">只选未使用</button>
+    </div>
+    <div id="model-clean-list" class="rerun-list model-clean-list"></div>
+    <p class="hint rerun-foot">本机 Hugging Face 缓存里的模型都会列出来，不管在不在本应用的模型列表里。勾选后才删除。正在使用的、以及不在本应用列表里的，默认不勾。Ollama 的模型不在这个缓存里。</p>
+    <div class="rerun-actions">
+      <button type="submit" value="cancel" class="ghost">取消</button>
+      <button type="submit" value="ok" class="danger" id="model-clean-ok">删除所选</button>
+    </div>
+  </form>
+</dialog>
 
 <!-- 产物单跑确认框 -->
 <dialog id="rerun-dialog" class="rerun-dialog">

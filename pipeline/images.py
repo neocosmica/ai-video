@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import argparse
-import gc
 import os
 import sys
 
+from pipeline.backends import open_images
 from pipeline.config import Settings
 from pipeline.mirrors import apply_mirrors
 from pipeline.motion import (
@@ -35,109 +35,6 @@ def _save_image(result, path) -> None:
         image.save(path)
         return
     raise RuntimeError("图像模型没有返回可保存的图片")
-
-
-def _flux_dir() -> str:
-    root = Path.home() / ".cache/huggingface/hub/models--mflux-community--flux2-klein-4b-mflux-q4/snapshots"
-    snaps = [p for p in root.iterdir() if p.is_dir()] if root.exists() else []
-    if not snaps:
-        raise SystemExit("找不到 FLUX.2 Klein 4B 的 4-bit 权重。请先运行 scripts/setup.sh。")
-    return str(snaps[0])
-
-
-def _load_class(kind: str):
-    print("加载 mflux / transformers…", flush=True)
-    from mflux.models.common.config import ModelConfig
-
-    weights = _flux_dir()
-    if kind == "t2i":
-        try:
-            from mflux.models.flux2.variants import Flux2Klein
-        except ImportError:
-            from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
-        return Flux2Klein, ModelConfig.flux2_klein_4b(), weights
-    try:
-        from mflux.models.flux2.variants import Flux2KleinEdit
-    except ImportError:
-        from mflux.models.flux2.variants.edit.flux2_klein_edit import Flux2KleinEdit
-    return Flux2KleinEdit, ModelConfig.flux2_klein_4b(), weights
-
-
-_BAR_PATCHED = False
-
-
-def _use_step_bar(desc: str) -> None:
-    """给 mflux 去噪循环的 tqdm 加上说明。每张图新建 Config，所以各有一条。"""
-    global _BAR_PATCHED
-    from tqdm import tqdm
-
-    from mflux.models.common.config.config import Config
-
-    Config._novel_step_desc = desc  # type: ignore[attr-defined]
-    if _BAR_PATCHED:
-        return
-
-    def time_steps(self):
-        if self._time_steps is None:
-            label = getattr(Config, "_novel_step_desc", "") or None
-            # initial/total 按完整去噪步数计：img2img 从半程起跑时，条也要从 2/4 走到 4/4，
-            # 不要变成 1/2→2/2，否则网页上看起来总在 50% 就结束。
-            self._time_steps = tqdm(
-                range(self.init_time_step, self.num_inference_steps),
-                desc=label,
-                initial=self.init_time_step,
-                total=self.num_inference_steps,
-                miniters=1,
-                mininterval=0.2,
-                file=sys.stderr,
-            )
-        return self._time_steps
-
-    Config.time_steps = property(time_steps)
-    _BAR_PATCHED = True
-
-
-def _generate(
-    model,
-    *,
-    prompt: str,
-    seed: int,
-    width: int,
-    height: int,
-    steps: int,
-    desc: str,
-    images=None,
-    image_strength: float | None = None,
-):
-    kwargs = {
-        "seed": seed,
-        "prompt": prompt,
-        "num_inference_steps": steps,
-        "width": width,
-        "height": height,
-        "guidance": 1.0,
-    }
-    if images:
-        kwargs["image_paths"] = images
-    if image_strength is not None:
-        kwargs["image_strength"] = image_strength
-    _use_step_bar(desc)
-    try:
-        return model.generate_image(**kwargs)
-    except TypeError:
-        kwargs.pop("guidance", None)
-        if image_strength is not None:
-            kwargs.pop("image_strength", None)
-        if images:
-            kwargs.pop("image_paths", None)
-            kwargs["image_paths"] = images
-            if image_strength is not None:
-                kwargs["image_strength"] = image_strength
-        try:
-            return model.generate_image(**kwargs)
-        except TypeError:
-            kwargs.pop("image_strength", None)
-            return model.generate_image(**kwargs)
 
 
 def _portrait_prompt(char: dict, style: str) -> str:
@@ -262,35 +159,32 @@ def run_t2i(
     if not pending_portraits and not pending_frames:
         print("文生图阶段没有新的肖像或空镜。")
         return needs_edit and not portrait_only
-    cls, config, weights = _load_class("t2i")
-    print(f"加载文生图模型 {weights}")
-    model = cls(model_config=config, quantize=None, model_path=weights)
-    for char, path in pending_portraits:
-        print(f"角色参考图 {char['name']} -> {path.name}")
-        image = _generate(
-            model,
-            prompt=_portrait_prompt(char, story.get("style") or ""),
-            seed=int(char["seed"]),
-            width=settings.portrait_width,
-            height=settings.portrait_height,
-            steps=settings.image_steps,
-            desc=f"肖像 {char['name']}",
-        )
-        _save_image(image, path)
-    for shot, path in pending_frames:
-        print(f"空镜 {shot['id']} -> {path.name}")
-        image = _generate(
-            model,
-            prompt=_frame_prompt(shot, story, []),
-            seed=int(shot["seed"]),
-            width=settings.image_width,
-            height=settings.image_height,
-            steps=settings.image_steps,
-            desc=f"空镜 {shot['id']}",
-        )
-        _save_image(image, path)
-    del model
-    gc.collect()
+    model = open_images(settings, kind="t2i", load_label="文生图模型")
+    try:
+        for char, path in pending_portraits:
+            print(f"角色参考图 {char['name']} -> {path.name}")
+            image = model.generate(
+                prompt=_portrait_prompt(char, story.get("style") or ""),
+                seed=int(char["seed"]),
+                width=settings.portrait_width,
+                height=settings.portrait_height,
+                steps=settings.image_steps,
+                desc=f"肖像 {char['name']}",
+            )
+            _save_image(image, path)
+        for shot, path in pending_frames:
+            print(f"空镜 {shot['id']} -> {path.name}")
+            image = model.generate(
+                prompt=_frame_prompt(shot, story, []),
+                seed=int(shot["seed"]),
+                width=settings.image_width,
+                height=settings.image_height,
+                steps=settings.image_steps,
+                desc=f"空镜 {shot['id']}",
+            )
+            _save_image(image, path)
+    finally:
+        model.close()
     return needs_edit
 
 
@@ -321,24 +215,22 @@ def run_edit(story: dict, out: Path, settings: Settings, only: str | None, force
         print("没有需要按参考图重绘的镜头。")
         return
     if pending:
-        cls, config, weights = _load_class("edit")
-        print(f"加载参考图编辑模型 {weights}")
-        model = cls(model_config=config, quantize=None, model_path=weights)
-        for shot, path, cast, refs in pending:
-            print(f"分镜静帧 {shot['id']}，参考 {'、'.join(c['name'] for c in cast)}")
-            image = _generate(
-                model,
-                prompt=_edit_prompt(shot, story, cast),
-                seed=int(shot["seed"]),
-                width=settings.image_width,
-                height=settings.image_height,
-                steps=settings.image_steps,
-                desc=f"静帧 {shot['id']}",
-                images=refs,
-            )
-            _save_image(image, path)
-        del model
-        gc.collect()
+        model = open_images(settings, kind="edit", load_label="参考图编辑模型")
+        try:
+            for shot, path, cast, refs in pending:
+                print(f"分镜静帧 {shot['id']}，参考 {'、'.join(c['name'] for c in cast)}")
+                image = model.generate(
+                    prompt=_edit_prompt(shot, story, cast),
+                    seed=int(shot["seed"]),
+                    width=settings.image_width,
+                    height=settings.image_height,
+                    steps=settings.image_steps,
+                    desc=f"静帧 {shot['id']}",
+                    images=refs,
+                )
+                _save_image(image, path)
+        finally:
+            model.close()
     if skipped:
         raise SystemExit(
             f"有 {len(skipped)} 个镜头缺少角色参考图（{', '.join(skipped)}），"
@@ -377,32 +269,30 @@ def run_end_frames(story: dict, out: Path, settings: Settings, only: str | None,
     if not pending:
         print("没有需要生成的尾帧。")
         return
-    cls, config, weights = _load_class("edit")
-    print(f"加载尾帧编辑模型 {weights}")
-    model = cls(model_config=config, quantize=None, model_path=weights)
+    model = open_images(settings, kind="edit", load_label="尾帧编辑模型")
     # 尾帧要比首帧多几步去噪，否则 Edit 常只改雨丝/噪点、姿势几乎不动
     end_steps = max(int(settings.image_steps), 8)
-    for shot, start, end, cast, refs in pending:
-        # Flux2KleinEdit：首帧经 image_paths 做参考 token 条件；不要传 image_strength。
-        print(
-            f"尾帧 {shot['id']} <- {start.name}（参考 {len(refs)} 张："
-            + "、".join(p.name for p in refs)
-            + f"；{end_steps} 步）"
-        )
-        seed = int(shot["seed"]) ^ stable_seed("end", shot["id"], str(shot.get("end_image_prompt") or ""))
-        image = _generate(
-            model,
-            prompt=end_edit_prompt(shot, story, cast),
-            seed=seed & 0x7FFFFFFF,
-            width=settings.image_width,
-            height=settings.image_height,
-            steps=end_steps,
-            desc=f"尾帧 {shot['id']}",
-            images=refs,
-        )
-        _save_image(image, end)
-    del model
-    gc.collect()
+    try:
+        for shot, start, end, cast, refs in pending:
+            # Flux2KleinEdit：首帧经 image_paths 做参考 token 条件；不要传 image_strength。
+            print(
+                f"尾帧 {shot['id']} <- {start.name}（参考 {len(refs)} 张："
+                + "、".join(p.name for p in refs)
+                + f"；{end_steps} 步）"
+            )
+            seed = int(shot["seed"]) ^ stable_seed("end", shot["id"], str(shot.get("end_image_prompt") or ""))
+            image = model.generate(
+                prompt=end_edit_prompt(shot, story, cast),
+                seed=seed & 0x7FFFFFFF,
+                width=settings.image_width,
+                height=settings.image_height,
+                steps=end_steps,
+                desc=f"尾帧 {shot['id']}",
+                images=refs,
+            )
+            _save_image(image, end)
+    finally:
+        model.close()
 
 
 def cmd_images(args: argparse.Namespace) -> None:

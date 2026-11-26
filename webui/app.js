@@ -56,6 +56,20 @@ function esc(text) {
   return div.innerHTML;
 }
 
+function formatBytes(n) {
+  const v = Math.max(0, Number(n) || 0);
+  if (v < 1024) return `${Math.round(v)} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let x = v / 1024;
+  let i = 0;
+  while (x >= 1024 && i < units.length - 1) {
+    x /= 1024;
+    i += 1;
+  }
+  const digits = x >= 10 || i === 0 ? 0 : 1;
+  return `${x.toFixed(digits)} ${units[i]}`;
+}
+
 function fmtTime(ts) {
   if (!ts) return "";
   const d = new Date(ts * 1000);
@@ -293,7 +307,7 @@ function renderDatalists() {
 
 function setupBusy() {
   const st = state.setup?.status;
-  return st === "installing" || st === "checking" || (st === "need_install" && !state.setup?.ready);
+  return st === "installing" || st === "checking";
 }
 
 function inProjectWorkspace() {
@@ -333,19 +347,27 @@ function renderSetupBanner(st) {
   if (!banner || !picker) return;
   const ready = !!state.setup.ready;
   const failed = state.setup.status === "failed";
+  const shortSpace = state.setup.status === "need_space";
+  const waiting = state.setup.status === "need_install";
   const busy = setupBusy();
   if (!ready && inProjectWorkspace()) {
     leaveProjectForSetup(
-      failed ? "依赖安装失败，已回到项目列表" : "依赖还在安装，已退出项目页"
+      shortSpace
+        ? (state.setup.message || "磁盘空间不足，已回到项目列表")
+        : failed
+          ? "依赖安装失败，已回到项目列表"
+          : waiting
+            ? "还缺依赖，已回到项目列表。点「安装依赖」后再继续。"
+            : "依赖还在安装，已退出项目页"
     );
   }
-  banner.hidden = ready && !failed;
-  if (ready && !failed) {
+  banner.hidden = ready && !failed && !shortSpace;
+  if (ready && !failed && !shortSpace) {
     // 刚就绪时短暂显示，再藏
     if (banner.dataset.justReady === "1") {
       banner.hidden = false;
       banner.classList.add("ready");
-      banner.classList.remove("failed");
+      banner.classList.remove("failed", "warn");
       setTimeout(() => {
         if (state.setup.ready) banner.hidden = true;
         banner.dataset.justReady = "";
@@ -354,9 +376,10 @@ function renderSetupBanner(st) {
   } else {
     banner.dataset.justReady = "";
     banner.classList.toggle("failed", failed);
+    banner.classList.toggle("warn", shortSpace && !failed);
     banner.classList.toggle("ready", false);
   }
-  picker.classList.toggle("setup-busy", busy || failed);
+  picker.classList.toggle("setup-busy", busy || failed || shortSpace || waiting);
   const pct = Math.max(0, Math.min(100, Number(state.setup.pct) || 0));
   const title = $("#setup-title");
   const pctEl = $("#setup-pct");
@@ -366,17 +389,24 @@ function renderSetupBanner(st) {
   if (title) {
     title.textContent = failed
       ? "依赖安装失败"
-      : ready
-        ? "依赖与模型已就绪"
-        : "正在安装依赖与模型…";
+      : shortSpace
+        ? "磁盘空间不足，下载尚未开始"
+        : waiting
+          ? "还缺依赖，尚未开始下载"
+          : ready
+            ? "依赖与模型已就绪"
+            : "正在安装依赖与模型…";
   }
-  if (pctEl) pctEl.textContent = `${pct.toFixed(0)}%`;
+  const live = state.setup.status === "installing" || state.setup.status === "checking";
+  if (pctEl) pctEl.textContent = `${live ? pct.toFixed(1) : pct.toFixed(0)}%`;
   if (fill) fill.style.width = `${pct}%`;
   if (msg) {
     const err = state.setup.error ? `：${state.setup.error}` : "";
     msg.textContent = failed
       ? `安装失败${err}。可点重试，或在终端跑 ./scripts/setup.sh`
-      : (state.setup.message || "首次打开会自动安装 Python 依赖并下载模型（含分镜语言模型），请保持网络畅通。");
+      : shortSpace
+        ? (state.setup.message || state.setup.disk?.message || "磁盘空间不够，模型还没开始下载。")
+        : (state.setup.message || (waiting ? "点「安装依赖」后再下载。" : "正在安装依赖与模型，请保持网络畅通。"));
   }
   const list = $("#setup-items");
   const items = Array.isArray(state.setup.items) ? state.setup.items : [];
@@ -392,7 +422,14 @@ function renderSetupBanner(st) {
       }).join("");
     }
   }
-  if (actions) actions.hidden = !failed;
+  if (actions) actions.hidden = !(failed || shortSpace || waiting || busy);
+  const retry = $("#setup-retry");
+  if (retry) {
+    retry.hidden = busy;
+    retry.textContent = waiting ? "安装依赖" : shortSpace ? "空间已腾出，继续安装" : "重试安装";
+  }
+  const stop = $("#setup-stop");
+  if (stop) stop.hidden = !busy;
   syncSetupEntry();
 }
 
@@ -402,12 +439,18 @@ function syncSetupEntry() {
   const hint = $("#setup-entry-hint");
   if (!btn) return;
   const failed = state.setup?.status === "failed";
+  const shortSpace = state.setup?.status === "need_space";
+  const waiting = state.setup?.status === "need_install";
   const busy = setupBusy();
-  const ready = !!state.setup?.ready && !failed && !busy;
+  const ready = !!state.setup?.ready && !failed && !busy && !shortSpace && !waiting;
   btn.disabled = busy;
-  btn.textContent = failed ? "重试安装" : busy ? "正在安装…" : "安装依赖";
+  btn.textContent = failed ? "重试安装" : shortSpace ? "继续安装" : busy ? "正在安装…" : "安装依赖";
+  const clean = $("#model-clean");
+  if (clean) clean.disabled = busy || clean.dataset.cleaning === "1";
   if (!hint) return;
-  if (failed) hint.textContent = "安装失败，可再试一次。";
+  if (shortSpace) hint.textContent = "磁盘空间不够，模型还没开始下载。腾出空间或清理未使用模型后，再点继续安装。";
+  else if (waiting) hint.textContent = "检查完成，点「安装依赖」才会开始下载。";
+  else if (failed) hint.textContent = "安装失败，可再试一次。";
   else if (busy) hint.textContent = "正在安装，请稍候。";
   else if (ready) hint.textContent = "当前检查为已就绪。若仍缺模型或运行报错，点这里重新安装。";
   else hint.textContent = "即使检查显示已就绪，也可以再装一次，用来补上下载不完整的模型。";
@@ -502,7 +545,7 @@ async function refreshSetup() {
       renderSetupBanner(st);
       maybeOpenLastProjectAfterSetup();
     }
-    if (st.ready || st.status === "failed") {
+    if (st.ready || st.status === "failed" || st.status === "need_space" || st.status === "need_install") {
       stopSetupPolling();
     } else {
       startSetupPolling();
@@ -518,7 +561,7 @@ async function refreshSetup() {
 
 function startSetupPolling() {
   if (state.setupTimer) return;
-  state.setupTimer = setInterval(() => { refreshSetup(); }, 1500);
+  state.setupTimer = setInterval(() => { refreshSetup(); }, 1000);
 }
 
 function stopSetupPolling() {
@@ -526,6 +569,393 @@ function stopSetupPolling() {
     clearInterval(state.setupTimer);
     state.setupTimer = null;
   }
+}
+
+let modelCatalog = null;
+
+function choiceSize(item) {
+  const size = item?.size ? String(item.size) : "";
+  if (!size || String(item.label || "").includes(size)) return "";
+  return size;
+}
+
+function choiceNote(choice, error) {
+  const size = choiceSize(choice);
+  const disk = size ? `磁盘 ${size}` : "";
+  const rest = error || choice?.note || "";
+  if (disk && rest) return `${disk}。${rest}`;
+  return disk || rest;
+}
+
+function modelOption(item, selected) {
+  const missing = item.ready ? "" : (item.runtime === "ollama" ? "（不在本机）" : "（未下载）");
+  const size = choiceSize(item);
+  const sizeMark = size ? ` · ${size}` : "";
+  const on = item.id === selected ? " selected" : "";
+  return `<option value="${esc(item.id)}"${on}>${esc(item.label)}${esc(sizeMark)}${esc(missing)}</option>`;
+}
+
+function modelOptions(stage) {
+  const selected = stage.selected;
+  const choices = stage.choices || [];
+  const known = choices.some((item) => item.id === selected);
+  const extra = known ? "" : `<option value="${esc(selected)}" selected>${esc(stage.selected_label || selected)}</option>`;
+  const builtin = choices.filter((item) => item.runtime !== "ollama");
+  const local = choices.filter((item) => item.runtime === "ollama");
+  if (!local.length) {
+    return builtin.map((item) => modelOption(item, selected)).join("") + extra;
+  }
+  const extraBuiltin = String(selected).startsWith("ollama:") ? "" : extra;
+  const extraLocal = String(selected).startsWith("ollama:") ? extra : "";
+  return `<optgroup label="内置">${builtin.map((item) => modelOption(item, selected)).join("")}${extraBuiltin}</optgroup>`
+    + `<optgroup label="本机 Ollama">${local.map((item) => modelOption(item, selected)).join("")}${extraLocal}</optgroup>`;
+}
+
+async function loadModelPicks() {
+  const box = $("#model-grid");
+  if (!box) return;
+  try {
+    modelCatalog = await api("/api/models");
+    box.innerHTML = (modelCatalog.stages || []).map((stage) => {
+      const selected = stage.selected;
+      const current = (stage.choices || []).find((item) => item.id === selected);
+      const note = choiceNote(current, stage.error);
+      return `<label class="model-pick">
+        <span>${esc(stage.label)}</span>
+        <select data-stage="${esc(stage.stage)}">${modelOptions(stage)}</select>
+        <span class="hint model-note">${esc(note)}</span>
+      </label>`;
+    }).join("");
+    const msg = $("#model-msg");
+    if (msg && modelCatalog.backend && modelCatalog.backend.error) {
+      msg.textContent = modelCatalog.backend.error;
+    }
+    refreshUnusedModels();
+    refreshDiskPlan();
+  } catch (err) {
+    box.textContent = err.message || "模型列表加载失败";
+  }
+}
+
+function currentModelKeep() {
+  const keep = {};
+  $$("#model-grid select").forEach((sel) => {
+    if (sel.dataset.stage) keep[sel.dataset.stage] = sel.value;
+  });
+  return keep;
+}
+
+let diskScan = 0;
+
+function paintDiskPlan(plan) {
+  const short = !!(plan && plan.ok === false && (plan.items || []).length);
+  const text = short ? (plan.message || "磁盘空间不够，下载尚未开始。") : "";
+  const full = $("#model-disk");
+  if (full) {
+    full.textContent = text;
+    full.classList.toggle("warn", short);
+  }
+  const hint = $("#model-disk-hint");
+  if (hint) {
+    hint.textContent = short ? `磁盘不足，还要约 ${formatBytes(plan.need_bytes)}` : "";
+    hint.classList.toggle("warn", short);
+  }
+  const setupBlocked = state.setup?.status === "need_space";
+  const banner = $("#disk-banner");
+  if (banner) {
+    banner.hidden = !short || setupBlocked;
+    const msg = $("#disk-banner-msg");
+    if (msg) msg.textContent = text;
+  }
+  if (setupBlocked) {
+    const msg = $("#setup-msg");
+    if (msg) {
+      msg.textContent = short
+        ? text
+        : "按当前选择，磁盘放得下了。点「空间已腾出，继续安装」。";
+    }
+  }
+}
+
+async function refreshDiskPlan() {
+  const token = ++diskScan;
+  const models = currentModelKeep();
+  if (!Object.keys(models).length) return;
+  try {
+    const plan = await api("/api/models/space", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ models }),
+    });
+    if (token !== diskScan) return;
+    paintDiskPlan(plan);
+  } catch (err) {
+    if (token === diskScan) console.warn("disk space", err);
+  }
+}
+
+function setModelCleanMsg(text) {
+  const el = $("#model-clean-msg");
+  if (el) el.textContent = text || "";
+}
+
+let unusedScan = 0;
+let modelCleanKeep = null;
+
+function paintUnusedModels(data) {
+  const n = Number(data?.count) || 0;
+  const bytes = Number(data?.total_bytes) || 0;
+  const unused = Number(data?.unused_bytes) || 0;
+  const btn = $("#model-clean");
+  if (btn) {
+    const total = n > 0 ? ` · ${formatBytes(bytes)}` : "";
+    const idle = unused > 0 ? ` · 未使用 ${formatBytes(unused)}` : "";
+    btn.textContent = `清理模型权重${total}${idle}`;
+    btn.title = "列出本机 Hugging Face 模型权重，勾选后删除。容量是权重合计，未使用是当前没选中的部分。";
+    btn.disabled = setupBusy() || btn.dataset.cleaning === "1";
+  }
+}
+
+function cleanChecks() {
+  return $$("#model-clean-list input[type=checkbox]");
+}
+
+function syncCleanChoice() {
+  const checks = cleanChecks();
+  const picked = checks.filter((el) => el.checked);
+  const bytes = picked.reduce((sum, el) => sum + (Number(el.dataset.bytes) || 0), 0);
+  const using = picked.filter((el) => el.dataset.inUse === "1").length;
+  const summary = $("#model-clean-summary");
+  if (summary) {
+    if (!checks.length) summary.textContent = "Hugging Face 缓存里没有模型。";
+    else if (!picked.length) summary.textContent = "还没选要删除的模型。标成「使用中」的默认不勾。";
+    else {
+      const warn = using ? `其中 ${using} 个正在使用，删掉后下次要重新下载。` : "";
+      summary.textContent = `已选 ${picked.length} 个，约 ${formatBytes(bytes)}。${warn}`;
+    }
+  }
+  const ok = $("#model-clean-ok");
+  if (ok && ok.dataset.busy !== "1") {
+    ok.disabled = picked.length === 0;
+    ok.textContent = picked.length ? `删除所选 · ${formatBytes(bytes)}` : "删除所选";
+  }
+  const all = $("#model-clean-all");
+  if (all) {
+    all.checked = checks.length > 0 && picked.length === checks.length;
+    all.indeterminate = picked.length > 0 && picked.length < checks.length;
+  }
+}
+
+async function refreshUnusedModels() {
+  const token = ++unusedScan;
+  try {
+    const data = await api("/api/models/unused", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keep: currentModelKeep() }),
+    });
+    if (token !== unusedScan) return data;
+    paintUnusedModels(data);
+    return data;
+  } catch (err) {
+    if (token === unusedScan) setModelCleanMsg(err.message || "无法列出未使用模型");
+    return null;
+  }
+}
+
+async function openModelClean() {
+  const btn = $("#model-clean");
+  if (btn?.disabled) return;
+  setModelCleanMsg("");
+  const errBox = $("#model-clean-error");
+  if (errBox) {
+    errBox.hidden = true;
+    errBox.textContent = "";
+  }
+  const data = await refreshUnusedModels();
+  const items = data?.items || [];
+  if (!data) return;
+  if (!items.length) {
+    setModelCleanMsg("Hugging Face 缓存里没有模型。");
+    return;
+  }
+  modelCleanKeep = currentModelKeep();
+  const list = $("#model-clean-list");
+  if (list) {
+    list.innerHTML = items.map((item) => {
+      const title = item.known
+        ? `${item.stage_label ? `${item.stage_label} · ` : ""}${item.label}`
+        : item.repo;
+      const meta = item.known ? item.repo : "不在本应用列表";
+      const incomplete = item.known && !item.ready ? "（不完整）" : "";
+      const badge = item.in_use ? `<span class="model-clean-badge">使用中</span>` : "";
+      const checked = item.known && !item.in_use ? " checked" : "";
+      return `<label class="rerun-item model-clean-row">
+        <input type="checkbox" value="${esc(item.repo)}" data-bytes="${Number(item.bytes) || 0}" data-in-use="${item.in_use ? "1" : "0"}"${checked}>
+        <div class="model-clean-main">
+          <div>${esc(title)}${esc(incomplete)}${badge}</div>
+          <div class="ri-meta">${esc(meta)}</div>
+        </div>
+        <span class="model-clean-size mono">${esc(formatBytes(item.bytes))}</span>
+      </label>`;
+    }).join("");
+  }
+  const ok = $("#model-clean-ok");
+  if (ok) delete ok.dataset.busy;
+  syncCleanChoice();
+  const dlg = $("#model-clean-dialog");
+  if (dlg && !dlg.open) dlg.showModal();
+}
+
+async function confirmModelClean() {
+  const ok = $("#model-clean-ok");
+  const errBox = $("#model-clean-error");
+  const btn = $("#model-clean");
+  const repos = cleanChecks().filter((el) => el.checked).map((el) => el.value);
+  if (!repos.length) {
+    syncCleanChoice();
+    return;
+  }
+  if (ok) {
+    ok.dataset.busy = "1";
+    ok.disabled = true;
+    ok.textContent = "正在删除…";
+  }
+  if (btn) btn.dataset.cleaning = "1";
+  try {
+    const data = await api("/api/models/unused", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        confirm: true,
+        repos,
+        keep: modelCleanKeep || currentModelKeep(),
+      }),
+    });
+    const n = (data.deleted || []).length;
+    const leftover = (data.errors || []).length
+      ? `有 ${data.errors.length} 项没删掉。`
+      : "";
+    setModelCleanMsg(`已删除 ${n} 个模型，释放约 ${formatBytes(data.freed_bytes)}。${leftover}`);
+    const dlg = $("#model-clean-dialog");
+    if (dlg?.open) dlg.close();
+    await loadModelPicks();
+  } catch (err) {
+    if (errBox) {
+      errBox.hidden = false;
+      errBox.textContent = err.message || "清理失败";
+    }
+    if (ok) delete ok.dataset.busy;
+    syncCleanChoice();
+  } finally {
+    if (btn) delete btn.dataset.cleaning;
+    if (btn) btn.disabled = setupBusy();
+  }
+}
+
+function noteForModel(stageName, modelId) {
+  const stage = (modelCatalog?.stages || []).find((item) => item.stage === stageName);
+  const choice = (stage?.choices || []).find((item) => item.id === modelId);
+  const error = stage?.error && stage.selected === modelId ? stage.error : "";
+  return choiceNote(choice, error);
+}
+
+function modelSaveHint(models, setup) {
+  const ollama = String(models.storyboard || "").startsWith("ollama:");
+  const stage = (modelCatalog?.stages || []).find((item) => item.stage === "storyboard");
+  if (ollama && stage?.error) return `已保存。${stage.error}`;
+  if (!setup) return ollama ? "已保存。分镜走本机 Ollama，生成前请让 Ollama 保持运行。" : "已保存。";
+  if (setup.status === "need_space") return "已保存。磁盘空间不够，下载还没开始。";
+  if (setup.status === "need_install") return "已保存。还缺依赖，点「安装依赖」后再下载。";
+  if (setup.status === "failed") return "已保存。依赖检查未通过，见上方提示。";
+  if (setup.ready) {
+    return ollama ? "已保存。依赖已就绪。分镜走本机 Ollama，生成前请让 Ollama 保持运行。" : "已保存。依赖与模型已就绪。";
+  }
+  return "已保存。正在检查并补齐还没下载的依赖。";
+}
+
+function picksFromForm() {
+  const models = {};
+  $$("#model-grid select").forEach((sel) => {
+    if (sel.dataset.stage) models[sel.dataset.stage] = sel.value;
+  });
+  return models;
+}
+
+function selectionDiffers(models) {
+  return (modelCatalog?.stages || []).some((stage) => models[stage.stage] !== stage.selected);
+}
+
+function refreshModelNotes() {
+  $$("#model-grid select").forEach((sel) => {
+    const note = sel.parentElement?.querySelector(".model-note");
+    if (note) note.textContent = noteForModel(sel.dataset.stage, sel.value);
+  });
+}
+
+function restoreModelSelects() {
+  $$("#model-grid select").forEach((sel) => {
+    const stage = (modelCatalog?.stages || []).find((item) => item.stage === sel.dataset.stage);
+    if (stage && sel.value !== stage.selected) sel.value = stage.selected;
+  });
+  refreshModelNotes();
+}
+
+let modelSaveToken = 0;
+
+async function saveModelPicks() {
+  const models = picksFromForm();
+  if (!Object.keys(models).length || !selectionDiffers(models)) return;
+  const token = ++modelSaveToken;
+  const msg = $("#model-msg");
+  if (msg) msg.textContent = "正在保存…";
+  try {
+    const saved = await api("/api/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ models }),
+    });
+    if (token !== modelSaveToken) return;
+    modelCatalog = saved;
+    refreshModelNotes();
+    let setup = null;
+    try {
+      setup = await recheckSetupAfterSave();
+    } catch (err) {
+      if (token !== modelSaveToken) return;
+      if (msg) msg.textContent = `已保存。依赖检查失败：${err.message || "请稍后重试"}`;
+      refreshUnusedModels();
+      refreshDiskPlan();
+      return;
+    }
+    if (token !== modelSaveToken) return;
+    if (msg) msg.textContent = modelSaveHint(picksFromForm(), setup);
+    refreshUnusedModels();
+    refreshDiskPlan();
+  } catch (err) {
+    if (token !== modelSaveToken) return;
+    restoreModelSelects();
+    if (msg) msg.textContent = err.message || "保存失败，已恢复上次的选择";
+  }
+}
+
+function showSetupResult(st) {
+  const banner = $("#setup-banner");
+  if (banner && st?.ready) banner.dataset.justReady = "1";
+  renderSetupBanner(st);
+  if (banner && !banner.hidden) banner.scrollIntoView({ block: "start", behavior: "smooth" });
+  if (st?.ready || st?.status === "failed" || st?.status === "need_space" || st?.status === "need_install") stopSetupPolling();
+  else startSetupPolling();
+  return st;
+}
+
+async function recheckSetupAfterSave() {
+  const st = await api("/api/setup/recheck", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  return showSetupResult(st);
 }
 
 async function retrySetup() {
@@ -542,9 +972,40 @@ async function retrySetup() {
   }
 }
 
+async function stopSetup() {
+  const stop = $("#setup-stop");
+  if (stop) {
+    stop.disabled = true;
+    stop.textContent = "正在停止…";
+  }
+  try {
+    const st = await api("/api/setup/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    showSetupResult(st);
+  } catch (err) {
+    pickerMsg(`停止失败：${err.message}`, true);
+    startSetupPolling();
+  } finally {
+    if (stop) {
+      stop.disabled = false;
+      stop.textContent = "停止安装";
+    }
+  }
+}
+
 async function createProject() {
-  if (setupBusy() || state.setup?.status === "failed") {
-    pickerMsg(state.setup?.status === "failed" ? "请先重试安装依赖" : "依赖还在安装，请稍候", true);
+  if (setupBusy() || state.setup?.status === "failed" || state.setup?.status === "need_install" || state.setup?.status === "need_space") {
+    const waitMsg = state.setup?.status === "need_space"
+      ? "请先腾出磁盘空间，再点继续安装"
+      : state.setup?.status === "need_install"
+        ? "请先点「安装依赖」"
+        : state.setup?.status === "failed"
+          ? "请先重试安装依赖"
+          : "依赖还在安装，请稍候";
+    pickerMsg(waitMsg, true);
     return;
   }
   const name = $("#new-project-name").value.trim();
@@ -572,10 +1033,15 @@ function pickerMsg(msg, bad = false) {
 
 // 选项目 → 工作区所有字段归位到这个项目
 async function openProject(name, path, { autoSelectRunning = true } = {}) {
-  if (setupBusy() || state.setup?.status === "failed") {
-    leaveProjectForSetup(
-      state.setup?.status === "failed" ? "请先重试安装依赖" : "依赖还在安装，请稍候再进项目"
-    );
+  if (setupBusy() || state.setup?.status === "failed" || state.setup?.status === "need_install" || state.setup?.status === "need_space") {
+    const waitMsg = state.setup?.status === "need_space"
+      ? "请先腾出磁盘空间，再点继续安装"
+      : state.setup?.status === "need_install"
+        ? "请先点「安装依赖」，完成后再进项目"
+        : state.setup?.status === "failed"
+          ? "请先重试安装依赖"
+          : "依赖还在安装，请稍候再进项目";
+    leaveProjectForSetup(waitMsg);
     return;
   }
   state.project = name;
@@ -3621,14 +4087,16 @@ function bindMusicPlayer() {
 }
 
 function syncFinalPlayerLayout(player) {
-  /** 左列宽 = 右栏高度 × 视频宽高比；右栏 flex 吃剩，互不重叠。 */
+  /** 左列宽 = 右栏高度 × 视频宽高比。右栏变窄会折行变高，不能跟着无限改。 */
   if (!player) return;
   const poster = player.closest?.(".movie-poster");
   const card = poster?.closest?.(".movie-card");
   const info = card?.querySelector?.(".movie-info");
   if (!poster) return;
 
-  const layout = () => {
+  const layout = (force) => {
+    if (poster._layoutLock) return;
+    if (!force && poster._settled && poster.style.width === poster._settled) return;
     poster.style.removeProperty("aspect-ratio");
     const has = !!(player.getAttribute("src") && !player.hidden);
     const vw = player.videoWidth || 0;
@@ -3636,29 +4104,89 @@ function syncFinalPlayerLayout(player) {
     if (!has || !vw || !vh) {
       poster.classList.remove("has-video");
       poster.style.removeProperty("width");
+      poster._settled = "";
       return;
     }
     poster.classList.add("has-video");
     if (window.matchMedia("(max-width: 860px)").matches) {
       poster.style.removeProperty("width");
+      poster._settled = "";
       return;
     }
-    const h = Math.max(info?.offsetHeight || 0, card?.clientHeight || 0);
-    if (h < 40) return;
+    const ratio = vw / vh;
     const maxW = Math.min(Math.floor(window.innerWidth * 0.45), 560);
-    const w = Math.max(120, Math.min(maxW, Math.round((h * vw) / vh)));
-    poster.style.width = `${w}px`;
+    const widthForHeight = () => {
+      const h = info?.offsetHeight || 0;
+      if (h < 40) return 0;
+      return Math.max(120, Math.min(maxW, Math.round(h * ratio)));
+    };
+
+    poster._layoutLock = true;
+    try {
+      const first = widthForHeight();
+      if (!first) return;
+      poster.style.width = `${first}px`;
+      const second = widthForHeight();
+      let chosen = first;
+      if (second && Math.abs(second - first) > 1) {
+        // 没有单档能同时满足「高度算出的宽度」和「这个宽度下的新高度」。
+        // 在探到的几档里留误差最小的，然后锁住，避免来回跳。
+        poster.style.width = `${second}px`;
+        const third = widthForHeight();
+        const cands = [];
+        for (const w of [first, second, third]) {
+          if (w && !cands.includes(w)) cands.push(w);
+        }
+        const score = (w) => {
+          poster.style.width = `${w}px`;
+          const h = info?.offsetHeight || 0;
+          return Math.abs(h * ratio - w);
+        };
+        chosen = cands[0];
+        let best = score(chosen);
+        for (const w of cands.slice(1)) {
+          const err = score(w);
+          if (err < best) {
+            best = err;
+            chosen = w;
+          }
+        }
+      }
+      poster.style.width = `${chosen}px`;
+      poster._settled = `${chosen}px`;
+    } finally {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => { poster._layoutLock = false; });
+      });
+    }
   };
 
-  layout();
+  const relayout = () => {
+    poster._settled = "";
+    layout(true);
+  };
+
+  layout(false);
   if (!poster._finalLayoutBound) {
     poster._finalLayoutBound = true;
     if (info && typeof ResizeObserver !== "undefined") {
-      poster._finalLayoutObs = new ResizeObserver(() => layout());
+      poster._finalLayoutObs = new ResizeObserver(() => layout(false));
       poster._finalLayoutObs.observe(info);
     }
-    window.addEventListener("resize", layout);
-    player.addEventListener("loadedmetadata", layout);
+    window.addEventListener("resize", relayout);
+    player.addEventListener("loadedmetadata", relayout);
+    if (info) {
+      info.addEventListener("load", (ev) => {
+        if (ev.target && ev.target.tagName === "IMG") relayout();
+      }, true);
+      if (typeof MutationObserver !== "undefined") {
+        poster._finalLayoutMo = new MutationObserver(() => {
+          if (poster._layoutLock) return;
+          relayout();
+        });
+        poster._finalLayoutMo.observe(info, { childList: true, subtree: true, characterData: true });
+      }
+    }
   }
 }
 
@@ -4463,6 +4991,32 @@ function bind() {
   });
   $("#setup-retry")?.addEventListener("click", retrySetup);
   $("#setup-install")?.addEventListener("click", retrySetup);
+  $("#setup-stop")?.addEventListener("click", stopSetup);
+  $("#model-clean")?.addEventListener("click", () => { openModelClean(); });
+  $("#model-clean-list")?.addEventListener("change", syncCleanChoice);
+  $("#model-clean-all")?.addEventListener("change", () => {
+    const on = !!$("#model-clean-all")?.checked;
+    cleanChecks().forEach((el) => { el.checked = on; });
+    syncCleanChoice();
+  });
+  $("#model-clean-unused")?.addEventListener("click", () => {
+    cleanChecks().forEach((el) => { el.checked = el.dataset.inUse !== "1"; });
+    syncCleanChoice();
+  });
+  $("#model-clean-form")?.addEventListener("submit", (ev) => {
+    const value = ev.submitter?.value || "cancel";
+    if (value === "ok") {
+      ev.preventDefault();
+      confirmModelClean();
+    }
+  });
+  $("#model-grid")?.addEventListener("change", (ev) => {
+    const sel = ev.target;
+    if (!sel || sel.tagName !== "SELECT") return;
+    const note = sel.parentElement?.querySelector(".model-note");
+    if (note) note.textContent = noteForModel(sel.dataset.stage, sel.value);
+    saveModelPicks();
+  });
   $("#back-to-projects").addEventListener("click", backToProjects);
 }
 
@@ -4474,6 +5028,7 @@ setInterval(refreshStateAndLock, 4000);
 
 (async function boot() {
   const setup = await refreshSetup();
+  await loadModelPicks();
   await refreshState();
   // 依赖未齐时停在项目选择页，展示安装进度
   if (!setup?.ready) return;

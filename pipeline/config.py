@@ -11,6 +11,8 @@ from pipeline.util import ROOT, resolve, snap, snap_frames
 
 @dataclass
 class Settings:
+    # auto：macOS 用 MLX。CUDA 运行时按 pipeline.backends 的 open_* 接入后再启用。
+    backend: str = "auto"
     image_model: str = "flux2-klein-4b"
     image_quantize: int = 4
     image_steps: int = 4
@@ -18,7 +20,7 @@ class Settings:
     image_height: int = 1024
     portrait_width: int = 768
     portrait_height: int = 1024
-    video_model: str = "dgrauet/ltx-2.3-mlx-q4"
+    video_model: str = "ltx-2.3-q4"
     video_width: int = 384
     video_height: int = 640
     video_frames: int = 49
@@ -34,12 +36,12 @@ class Settings:
     video_low_ram: bool = True
     max_shots: int = 16
     # 小说→分镜：Qwen3-4B Instruct 4bit ≈ 3.3 GB，16 GB 统一内存可跑
-    llm_model: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    llm_model: str = "qwen3-4b-instruct-4bit"
     # 短篇分镜 JSON 通常 1–2k tokens；过大只会拖慢首跑
     llm_max_tokens: int = 2048
     llm_temperature: float = 0.3
-    tts_model: str = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"
-    music_model: str = "facebook/musicgen-small"
+    tts_model: str = "qwen3-tts-1.7b-customvoice-8bit"
+    music_model: str = "musicgen-small"
     # 配乐一次生成的最长秒数；成片多长就生成多长，避免 -stream_loop 在中间留硬接缝
     music_max_seconds: float = 180.0
     voice_volume: float = 1.35

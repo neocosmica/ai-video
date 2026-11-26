@@ -1,31 +1,21 @@
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import time
 from pathlib import Path
 
 from pipeline.audio import pad_wav_to_duration
+from pipeline.backends import open_video
 from pipeline.config import Settings
-from pipeline.hf_cache import resolve_snapshot
-from pipeline.mirrors import child_env
 from pipeline.projects import artifacts_sub
-from pipeline.runtime import (
-    ensure_runtime_layout,
-    ltx_cli,
-    ltx_python,
-    main_venv_path,
-    preflight,
-)
+from pipeline.runtime import ensure_runtime_layout, ltx_python, preflight
 from pipeline.motion import (
     end_frame_path,
     start_frame_path,
     video_conditioning,
-    video_prompt,
 )
-from pipeline.progress import run_tee
 from pipeline.util import dump_json, load_json, resolve, snap, snap_frames
 
 # 环境类错误：同一批再跑下一镜也必然挂，应立即终止并写清原因
@@ -45,65 +35,6 @@ _ENV_ERROR_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
 )
 
-DEFAULT_GEMMA = "mlx-community/gemma-3-12b-it-4bit"
-
-# LTX distilled 两段 Denoising 的默认步数（8 步半分辨率 + 3 步精修）。
-# 交给进度条先定死分母，第一段跑完只到 8/11，不会先冲到 100% 再掉回来。
-DENOISE_PLAN = (8, 3)
-
-
-def _ensure_ltx_patches(settings: Settings) -> None:
-    marker = "NOVEL_VIDEO_STAGED_GEMMA_LOAD"
-    blocks = (
-        settings.ltx_dir
-        / "packages"
-        / "ltx-pipelines-mlx"
-        / "src"
-        / "ltx_pipelines_mlx"
-        / "utils"
-        / "blocks.py"
-    )
-    encoder = (
-        settings.ltx_dir
-        / "packages"
-        / "ltx-core-mlx"
-        / "src"
-        / "ltx_core_mlx"
-        / "text_encoders"
-        / "gemma"
-        / "encoders"
-        / "base_encoder.py"
-    )
-    need = any(not path.exists() or marker not in path.read_text(encoding="utf-8") for path in (blocks, encoder))
-    if not need:
-        return
-    patcher = resolve("scripts/apply_ltx_gemma_patch.py")
-    if not patcher.exists():
-        raise SystemExit(f"LTX 缺少 Gemma 分阶段加载补丁，且找不到 {patcher}")
-    print("正在为 vendor/ltx-2-mlx 应用 Gemma 稳定加载补丁…")
-    py = main_venv_path() / "bin" / "python"
-    if not py.exists():
-        py = Path(resolve(".venv")) / "bin" / "python"
-    if not py.exists():
-        raise SystemExit("找不到主环境 Python，请先运行 scripts/setup.sh")
-    env = child_env()
-    env.pop("VIRTUAL_ENV", None)
-    code = subprocess.call([str(py), str(patcher)], env=env)
-    if code != 0:
-        raise SystemExit("应用 Gemma 补丁失败")
-    for path in (blocks, encoder):
-        if not path.exists() or marker not in path.read_text(encoding="utf-8"):
-            raise SystemExit(f"补丁后仍缺少标记：{path}")
-
-
-def _resolve_model_arg(repo_or_path: str, *, label: str) -> str:
-    local = resolve_snapshot(repo_or_path)
-    if local is not None:
-        print(f"使用本地{label}：{local}")
-        return str(local)
-    print(f"未命中本地缓存，回退 repo id：{repo_or_path}")
-    return repo_or_path
-
 
 def _shot_frames(shot: dict, settings: Settings) -> int:
     raw = shot.get("video_frames")
@@ -111,100 +42,6 @@ def _shot_frames(shot: dict, settings: Settings) -> int:
         return int(settings.video_frames)
     return snap_frames(int(raw))
 
-
-def _command(
-    settings: Settings,
-    *,
-    prompt: str,
-    image: Path,
-    output: Path,
-    seed: int,
-    width: int,
-    height: int,
-    frames: int,
-    model: str,
-    gemma: str,
-    audio: Path | None,
-    end_image: Path | None = None,
-    start_strength: float = 1.0,
-    start_binding: str = "replace",
-    end_strength: float | None = None,
-    end_binding: str | None = None,
-    denoise_plan: tuple[int, int] = DENOISE_PLAN,
-) -> list[str]:
-    # 直接跑 venv 里的入口，禁止每镜 `uv run`
-    cli = str(ltx_cli(settings.ltx_dir))
-    image_args = [
-        "--image",
-        str(image),
-        "0",
-        f"{float(start_strength):.4g}",
-        start_binding,
-    ]
-    if end_image is not None and end_strength is not None and end_binding:
-        image_args += [
-            "--image",
-            str(end_image),
-            "last",
-            f"{float(end_strength):.4g}",
-            end_binding,
-        ]
-    common_tail = [
-        "--model",
-        model,
-        "--gemma",
-        gemma,
-        "--prompt",
-        prompt,
-        *image_args,
-        "-f",
-        str(frames),
-        "--frame-rate",
-        str(settings.video_fps),
-        "-H",
-        str(height),
-        "-W",
-        str(width),
-        "--seed",
-        str(seed),
-        "-o",
-        str(output),
-    ]
-    if audio is not None:
-        cmd = [cli, "a2v", "--distilled", "--audio", str(audio), *common_tail]
-    else:
-        cmd = [cli, "generate", "--distilled", *common_tail, "--no-audio"]
-    # 步数与进度条分母一致（dynamic 可能是 12+4）
-    cmd += ["--stage1-steps", str(denoise_plan[0]), "--stage2-steps", str(denoise_plan[1])]
-    if settings.video_low_ram:
-        cmd.append("--low-ram")
-    return cmd
-
-
-def _video_env(settings: Settings, *, offline: bool) -> dict[str, str]:
-    env = child_env()
-    if offline:
-        # 本地 snapshot 齐备时禁止 hub 联网刷新，避免卡在 snapshot_download
-        env["HF_HUB_OFFLINE"] = "1"
-        env["TRANSFORMERS_OFFLINE"] = "1"
-        env["HF_DATASETS_OFFLINE"] = "1"
-    # 短剧 prompt 很短；1024 会放大 Gemma 激活显存
-    env.setdefault("LTX2_GEMMA_MAX_LENGTH", "256")
-    # 可编辑包 + 防止隐藏 .pth 被跳过：显式 PYTHONPATH
-    srcs = [
-        settings.ltx_dir / "packages" / "ltx-pipelines-mlx" / "src",
-        settings.ltx_dir / "packages" / "ltx-core-mlx" / "src",
-    ]
-    env["PYTHONPATH"] = os.pathsep.join(str(path) for path in srcs)
-    # LTX 用 shutil.which("ffmpeg")：把已校验可用的 bin 目录放最前，避开坏的 tools/
-    ff_dir = str(Path(settings.ffmpeg).resolve().parent)
-    local_bin = str(Path.home() / ".local" / "bin")
-    env["PATH"] = os.pathsep.join(
-        [ff_dir, local_bin, env.get("PATH", "")]
-    )
-    # 子进程勿继承主项目 VIRTUAL_ENV，否则会指到错误解释器
-    env.pop("VIRTUAL_ENV", None)
-    return env
 
 
 def _read_log_tail(path: Path, nbytes: int = 12288) -> str:
@@ -244,58 +81,6 @@ def _prepare_a2v_audio(out: Path, shot: dict, voice: Path, frames: int, fps: int
     return pad_wav_to_duration(voice, dest, need)
 
 
-def _run_once(
-    settings: Settings,
-    shot: dict,
-    image: Path,
-    output: Path,
-    log: Path,
-    width: int,
-    height: int,
-    frames: int,
-    *,
-    model: str,
-    gemma: str,
-    offline: bool,
-    audio: Path | None,
-    end_image: Path | None = None,
-    cond=None,
-) -> int:
-    plan = cond or video_conditioning(shot, has_end_frame=bool(end_image and end_image.exists()))
-    use_end = bool(plan.use_end_frame and end_image is not None and end_image.exists())
-    env = _video_env(settings, offline=offline)
-    cmd = _command(
-        settings,
-        prompt=video_prompt(shot, with_speech=audio is not None, cond=plan),
-        image=image,
-        output=output,
-        seed=int(shot["seed"]),
-        width=width,
-        height=height,
-        frames=frames,
-        model=model,
-        gemma=gemma,
-        audio=audio,
-        end_image=end_image if use_end else None,
-        start_strength=plan.start_strength,
-        start_binding=plan.start_binding,
-        end_strength=plan.end_strength if use_end else None,
-        end_binding=plan.end_binding if use_end else None,
-        denoise_plan=plan.denoise_plan,
-    )
-    mode = "a2v" if audio is not None else "i2v"
-    shot_id = str(shot.get("id") or "shot")
-    tag = f"{shot_id} {mode} {plan.motion_level}"
-    if use_end:
-        tag += "+end"
-    return run_tee(
-        cmd,
-        log=log,
-        env=env,
-        progress=tag,
-        plan=plan.denoise_plan,
-        desc="Denoising",
-    )
 
 
 def _wait_memory_headroom(min_free_pct: float = 25.0, timeout_s: float = 90.0) -> None:
@@ -339,7 +124,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
         print(f"ffmpeg：{note}", flush=True)
     ensure_runtime_layout(ltx_dir=settings.ltx_dir)
     preflight(ltx_dir=settings.ltx_dir, python=ltx_python(settings.ltx_dir), soft=False)
-    _ensure_ltx_patches(settings)
+    runtime = open_video(settings)
     out = resolve(args.out)
     story_path = out / "storyboard.json"
     if not story_path.exists():
@@ -352,9 +137,6 @@ def cmd_videos(args: argparse.Namespace) -> None:
     clips.mkdir(parents=True, exist_ok=True)
     failures = 0
     width, height = settings.video_width, settings.video_height
-    model = _resolve_model_arg(settings.video_model, label="LTX 权重")
-    gemma = _resolve_model_arg(DEFAULT_GEMMA, label="Gemma")
-    offline = Path(model).exists() and Path(gemma).exists()
     frames_dir = artifacts_sub(out, "frames")
     for shot in story["shots"]:
         if wanted and shot["id"] not in wanted:
@@ -418,15 +200,11 @@ def cmd_videos(args: argparse.Namespace) -> None:
         _wait_memory_headroom()
         log_path = artifacts_sub(out, "logs", f"{shot['id']}.log")
         run_kw = dict(
-            model=model,
-            gemma=gemma,
-            offline=offline,
             audio=audio_for_ltx,
             end_image=end_image,
             cond=cond,
         )
-        code = _run_once(
-            settings,
+        code = runtime.render(
             shot,
             image,
             dest,
@@ -449,8 +227,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
             _wait_memory_headroom(min_free_pct=30.0, timeout_s=120.0)
             time.sleep(3)
             log_path = artifacts_sub(out, "logs", f"{shot['id']}-retry.log")
-            code = _run_once(
-                settings,
+            code = runtime.render(
                 shot,
                 image,
                 dest,
@@ -475,8 +252,7 @@ def cmd_videos(args: argparse.Namespace) -> None:
                 audio_for_ltx = _prepare_a2v_audio(out, shot, voice, frames, settings.video_fps)
                 run_kw["audio"] = audio_for_ltx
             log_path = artifacts_sub(out, "logs", f"{shot['id']}-small.log")
-            code = _run_once(
-                settings,
+            code = runtime.render(
                 shot,
                 image,
                 dest,

@@ -1,16 +1,17 @@
-"""用本机 MLX 聊天模型把小说写成 storyboard.json。
+"""用本机聊天模型把小说写成 storyboard.json。
 
-默认模型：mlx-community/Qwen3-4B-Instruct-2507-4bit（约 3.3 GB，16 GB 统一内存可跑）。
+模型由 ``pipeline.backends`` 按配置加载（默认 Qwen3-4B Instruct 4-bit）。
 生成后交给 screenplay 做规范化与对白覆盖校验。
 """
 
 from __future__ import annotations
 
 import argparse
-import gc
 import re
 from pathlib import Path
 
+from pipeline.backends import open_storyboard
+from pipeline.backends.catalog import default_model
 from pipeline.config import Settings
 from pipeline.dialogue import plan_segments
 from pipeline.screenplay import (
@@ -28,7 +29,7 @@ from pipeline.util import (
 )
 from pipeline.voices import default_music_prompt, infer_gender, pick_voice
 
-DEFAULT_LLM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+DEFAULT_LLM_MODEL = default_model("storyboard").repo
 
 _SYSTEM = """你是华语竖屏短剧分镜编剧。只输出一个 JSON 对象，不要 markdown，不要解释。
 字段与约束严格按用户提示；台词必须照小说引号原文，禁止删字、改写、压短。"""
@@ -121,65 +122,6 @@ def _build_user_prompt(
 {novel}
 >>>
 """
-
-
-def _load_mlx(model_id: str):
-    try:
-        from mlx_lm import generate, load
-        from mlx_lm.sample_utils import make_sampler
-    except ImportError as exc:
-        raise SystemExit(
-            "缺少 mlx-lm。请重跑 ./scripts/setup.sh，或在主环境安装：uv sync"
-        ) from exc
-
-    print(f"加载分镜 LLM：{model_id}", flush=True)
-    # 优先本机 hub 缓存。快照目录可能只有 config/tokenizer，没有 model*.safetensors；
-    # 直接 load 会 FileNotFoundError: No safetensors found。缺了就补下再加载。
-    from pipeline.hf_cache import ensure_snapshot
-
-    path = ensure_snapshot(
-        model_id,
-        weight_globs=("model*.safetensors",),
-        label="分镜语言模型",
-    )
-    try:
-        model, tokenizer = load(str(path))
-    except FileNotFoundError as exc:
-        raise SystemExit(
-            f"分镜模型权重打不开：{exc}\n"
-            f"可删掉该目录后重开，让它重新下载：{path}"
-        ) from exc
-    return model, tokenizer, generate, make_sampler
-
-
-def _chat_once(
-    model,
-    tokenizer,
-    generate,
-    make_sampler,
-    *,
-    user: str,
-    max_tokens: int,
-    temp: float,
-) -> str:
-    messages = [
-        {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": user},
-    ]
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    sampler = make_sampler(temp=temp)
-    return generate(
-        model,
-        tokenizer,
-        prompt=prompt,
-        max_tokens=max_tokens,
-        sampler=sampler,
-        verbose=True,
-    )
 
 
 def _merge_storyboards(parts: list[dict], *, max_shots: int) -> dict:
@@ -407,7 +349,6 @@ def generate_storyboard_dict(
     title_fallback: str = "untitled",
     retries: int = 2,
 ) -> dict:
-    model_id = (settings.llm_model or DEFAULT_LLM_MODEL).strip()
     fps = max(1, settings.video_fps)
     max_seconds = snap_frames(settings.video_frames_max) / fps
     limit = dialogue_char_limit(settings.video_frames_max, fps)
@@ -415,7 +356,7 @@ def generate_storyboard_dict(
     # 多段时每段镜头配额均分，至少 4
     per_chunk_shots = max(4, settings.max_shots // max(1, len(chunks)))
 
-    model, tokenizer, generate, make_sampler = _load_mlx(model_id)
+    llm = open_storyboard(settings)
     parts: list[dict] = []
     try:
         for index, chunk in enumerate(chunks):
@@ -437,14 +378,11 @@ def generate_storyboard_dict(
                     flush=True,
                 )
                 try:
-                    raw_text = _chat_once(
-                        model,
-                        tokenizer,
-                        generate,
-                        make_sampler,
+                    raw_text = llm.complete(
+                        system=_SYSTEM,
                         user=user,
                         max_tokens=settings.llm_max_tokens,
-                        temp=settings.llm_temperature if attempt == 0 else 0.2,
+                        temperature=settings.llm_temperature if attempt == 0 else 0.2,
                     )
                     data = extract_json(raw_text)
                     if not isinstance(data.get("shots"), list) or not data["shots"]:
@@ -458,14 +396,7 @@ def generate_storyboard_dict(
                 raise SystemExit(f"分镜生成失败：{last_err}")
             parts.append(data)
     finally:
-        del model, tokenizer
-        gc.collect()
-        try:
-            import mlx.core as mx
-
-            mx.clear_cache()
-        except Exception:
-            pass
+        llm.close()
 
     merged = _merge_storyboards(parts, max_shots=settings.max_shots)
     merged = _polish_fields(merged, title_fallback=title_fallback)
@@ -498,7 +429,7 @@ def cmd_storyboard(args: argparse.Namespace) -> None:
         raise SystemExit(f"小说是空的：{novel}")
 
     print(f"小说 → 分镜：{novel} → {story_path}", flush=True)
-    print(f"模型：{settings.llm_model}（约 3–4 GB，适合 16 GB Mac）", flush=True)
+    print(f"模型：{settings.llm_model}", flush=True)
     data = generate_storyboard_dict(
         novel_text,
         settings,

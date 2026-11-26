@@ -2,21 +2,17 @@ from __future__ import annotations
 
 import argparse
 import math
-import os
-import subprocess
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
+from pipeline.backends import open_speech, render_music
 from pipeline.config import Settings
 from pipeline.dialogue import plan_segments, spoken_chars, split_text_by_ratios
-from pipeline.hf_cache import resolve_snapshot
-from pipeline.mirrors import child_env
 from pipeline.projects import artifacts_sub
-from pipeline.runtime import ensure_runtime_layout, musicgen_python, musicgen_venv_path
-from pipeline.progress import run_tee
-from pipeline.util import dump_json, frames_for_duration, load_json, resolve, snap_frames, stable_seed, stable_seed
+from pipeline.runtime import ensure_runtime_layout
+from pipeline.util import dump_json, frames_for_duration, load_json, resolve, snap_frames, stable_seed
 from pipeline.voices import (
     default_music_prompt,
     emotion_instruct,
@@ -222,29 +218,8 @@ def pad_wav_to_duration(src: Path, dest: Path, duration_s: float) -> Path:
     return dest
 
 
-def _synth_line(model, *, line: str, profile: dict) -> tuple[np.ndarray, int]:
-    """合成一句台词，返回波形与采样率。"""
-    chunks: list[np.ndarray] = []
-    sample_rate = 24000
-    # 条的总长按字数估，留足余量；说到 EOS 就停，避免默认 2048 步看起来几乎不动
-    max_tokens = min(2048, max(128, len(line) * 8))
-    for result in model.generate_custom_voice(
-        text=line,
-        speaker=profile["voice"],
-        language="Chinese",
-        instruct=profile["instruct"],
-        verbose=True,
-        max_tokens=max_tokens,
-    ):
-        chunks.append(np.array(result.audio, dtype=np.float32).reshape(-1))
-        sample_rate = int(getattr(result, "sample_rate", sample_rate) or sample_rate)
-    if not chunks:
-        raise SystemExit(f"TTS 没有产出音频：{line}")
-    return np.concatenate(chunks), sample_rate
-
-
 def _speak_with_fit(
-    model,
+    speech,
     *,
     shot_id: str,
     line: str,
@@ -262,7 +237,9 @@ def _speak_with_fit(
 
     返回 [(分段文本, wav 路径, 时长)]；第 2 种情况的时长可以超过 max_seconds。
     """
-    audio, sample_rate = _synth_line(model, line=line, profile=profile)
+    audio, sample_rate = speech.synthesize(
+        text=line, speaker=profile["voice"], instruct=profile["instruct"]
+    )
     whole = scratch / f"{shot_id}-whole.wav"
     _save_mono_wav(whole, audio, sample_rate)
     trimmed = trim_silence_wav(whole, report_pad=True)
@@ -326,8 +303,6 @@ def _generate_dialogue(
     （网页按镜头重做配音走的就是这条路径）。缺的配音留给之后单独补，
     或去掉 ``--only`` 再跑一遍。``--only`` 不自动拆镜。
     """
-    from mlx_audio.tts.utils import load_model
-
     voice_dir = artifacts_sub(out, "audio", "voice")
     voice_dir.mkdir(parents=True, exist_ok=True)
     scratch = artifacts_sub(out, "audio", "scratch")
@@ -379,15 +354,33 @@ def _generate_dialogue(
             if dest.exists()
         ]
 
-    tts_dir = resolve_snapshot(settings.tts_model)
-    if tts_dir is None:
-        raise SystemExit(f"找不到 TTS 权重 {settings.tts_model}。请先运行 scripts/setup.sh，不要在成片时再下载。")
-    # 传本地目录，mlx_audio 就不会再 snapshot_download
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    print(f"加载 TTS：{tts_dir}")
-    model = load_model(str(tts_dir))
+    speech = open_speech(settings)
+    try:
+        return _dialogue_jobs(
+            speech,
+            story,
+            jobs,
+            voice_dir=voice_dir,
+            scratch=scratch,
+            max_seconds=max_seconds,
+            force=force,
+            wanted=wanted,
+        )
+    finally:
+        speech.close()
 
+
+def _dialogue_jobs(
+    speech,
+    story: dict,
+    jobs,
+    *,
+    voice_dir: Path,
+    scratch: Path,
+    max_seconds: float,
+    force: bool,
+    wanted: set[str] | None,
+) -> list[dict]:
     results: list[dict] = []
     # 每个对白镜头的处理结果：单段就是原镜头，多段则是一串子镜头
     by_shot: dict[str, list[dict]] = {}
@@ -403,7 +396,7 @@ def _generate_dialogue(
             dest.unlink()
         print(f"对白 {shot['id']} · {profile['voice']} · {profile['emotion']}：{line}")
         segments = _speak_with_fit(
-            model,
+            speech,
             shot_id=str(shot["id"]),
             line=line,
             profile=profile,
@@ -654,64 +647,15 @@ def _generate_music(settings: Settings, story: dict, out: Path, force: bool) -> 
             f"已有配乐只有 {have:.1f}s，短于成片 {timeline:.1f}s，重新生成："
             f"{have:.1f}s → {wanted:.0f}s（时间轴依据：{source}）"
         )
-    if not settings.musicgen_dir.exists():
-        raise SystemExit(f"还没有 MusicGen 代码：{settings.musicgen_dir}。请先运行 scripts/setup.sh")
-    script = settings.musicgen_dir / "generate.py"
-    if not script.exists():
-        raise SystemExit(f"MusicGen 源码不完整：缺少 {script}。请重新运行 scripts/setup.sh")
-
-    ensure_runtime_layout(musicgen_dir=settings.musicgen_dir)
-    py = musicgen_python(settings.musicgen_dir)
-    model_dir = resolve_snapshot(settings.music_model)
-    t5_dir = resolve_snapshot("t5-base")
-    if (
-        model_dir is None
-        or not (model_dir / "state_dict.bin").is_file()
-        or not (model_dir / "compression_state_dict.bin").is_file()
-    ):
-        raise SystemExit(
-            f"找不到 MusicGen 权重 {settings.music_model}（需要 state_dict.bin 与 compression_state_dict.bin）。"
-            "请先运行 scripts/setup.sh。"
-        )
-    if t5_dir is None or not (t5_dir / "model.safetensors").is_file():
-        raise SystemExit("找不到 MusicGen 文本编码器 t5-base。请先运行 scripts/setup.sh。")
     print(f"配乐约 {wanted:.0f}s（计划片长 {timeline:.1f}s，依据 {source}）：{prompt}")
-    env = child_env()
-    local_bin = str(Path.home() / ".local" / "bin")
-    env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
-    # 直调 Caches 里的 Python + 仓库 cwd；禁止 uv run（会反复解析/偶发重建）
-    env["UV_PROJECT_ENVIRONMENT"] = str(musicgen_venv_path())
-    env.pop("VIRTUAL_ENV", None)
-    # 权重目录已在本地。T5 仍按检查点里的名字 t5-base 加载，离线后只会读缓存。
-    env["HF_HUB_OFFLINE"] = "1"
-    env["TRANSFORMERS_OFFLINE"] = "1"
-    env["HF_DATASETS_OFFLINE"] = "1"
-    cmd = [
-        str(py),
-        "generate.py",
-        prompt,
-        "-m",
-        str(model_dir),
-        "-d",
-        str(int(round(wanted))),
-        "-o",
-        str(dest),
-        "--no-open",
-        "--seed",
-        str(seed),
-    ]
-    print(f"配乐 seed={seed}")
-    log = artifacts_sub(out, "logs", "bgm.log")
-    code = run_tee(
-        cmd,
-        log=log,
-        env=env,
-        cwd=settings.musicgen_dir,
-        progress="配乐",
-        desc="MusicGen",
+    render_music(
+        settings,
+        prompt=prompt,
+        seconds=wanted,
+        seed=seed,
+        dest=dest,
+        log=artifacts_sub(out, "logs", "bgm.log"),
     )
-    if code != 0 or not dest.exists():
-        raise SystemExit(f"配乐失败，详见 {log}")
     return dest
 
 

@@ -57,10 +57,37 @@ def cmd_doctor(_: argparse.Namespace) -> None:
     print(f"主 venv 目标：{main_venv_path()}")
     print(f"LTX venv 目标：{ltx_venv_path()}")
     print(f"MusicGen venv 目标：{musicgen_venv_path()}")
-    print(f"分镜 LLM：{settings.llm_model}（小说→storyboard.json；约 3–4 GB，适合 16 GB Mac）")
-    print(f"文生图：{settings.image_model}，{settings.image_quantize}-bit，{settings.image_width}x{settings.image_height}")
+    from pipeline.backends import resolve_backend, selection_view
+
+    try:
+        backend = resolve_backend(settings.backend)
+        print(f"推理后端：{backend.name}（{backend.reason}）")
+    except SystemExit as exc:
+        print(f"推理后端：配置无效 — {exc}")
+    picked = selection_view(settings)
+    for stage in picked["stages"]:
+        choices = "、".join(item["id"] for item in stage["choices"])
+        if stage["error"]:
+            if stage.get("runtime") == "ollama":
+                print(
+                    f"{stage['label']}：{stage['selected_label']} [{stage['selected']}]"
+                    f" — {stage['error']}"
+                )
+            else:
+                print(f"{stage['label']}：配置无效 {stage['selected']!r} — {stage['error']}")
+            continue
+        ready = "权重在" if stage["ready"] else "权重未下载"
+        if stage.get("runtime") == "ollama":
+            ready = "走 Ollama" if stage["ready"] else "Ollama 里没有"
+        size = stage.get("selected_size") or ""
+        size_bit = f" · 磁盘 {size}" if size else ""
+        print(
+            f"{stage['label']}：{stage['selected_label']}{size_bit} [{stage['selected']}] "
+            f"{stage['selected_repo']}（{ready}；可选 {choices}）"
+        )
     print(
-        f"视频：{settings.video_model}，{settings.video_width}x{settings.video_height}，"
+        f"画面：静帧 {settings.image_width}x{settings.image_height}，"
+        f"视频 {settings.video_width}x{settings.video_height}，"
         f"默认 {settings.video_frames} 帧 / {settings.video_fps} fps；"
         f"有对白走 a2v（{settings.video_frames_min}–{settings.video_frames_max} 帧跟 TTS）"
     )
@@ -76,9 +103,7 @@ def cmd_doctor(_: argparse.Namespace) -> None:
         print(f"单镜上限（auto）：{settings.video_frames_max} 帧（硬顶 {settings.video_frames_ceiling}）")
     else:
         print(f"单镜上限（手动）：{settings.video_frames_max} 帧（video_frames_auto=false）")
-    print("提示词编码器：LTX 内置 Gemma 3 12B 4-bit（视频阶段用，不是分镜聊天）")
-    print(f"对白 TTS：{settings.tts_model}（先于视频，供 A2V 条件）")
-    print(f"配乐：{settings.music_model}")
+    print("提示词编码器：跟视频模型走（默认 Gemma 3 12B 4-bit，只在视频阶段编码）")
     from pipeline.version import read_version
 
     print(f"版本：{read_version() or '未写入'}")
@@ -102,23 +127,40 @@ def cmd_doctor(_: argparse.Namespace) -> None:
     print(f"LTX 代码：{settings.ltx_dir}（{'存在' if settings.ltx_dir.exists() else '缺失'}）")
     from pipeline.hf_cache import resolve_snapshot, snapshot_ready
 
-    llm_snap = resolve_snapshot(settings.llm_model or DEFAULT_LLM_MODEL)
-    llm_ok, llm_detail = snapshot_ready(llm_snap, weight_globs=("model*.safetensors",))
-    if llm_ok:
-        print(f"分镜 LLM 权重：有 {llm_snap}")
-    elif llm_snap is not None:
-        print(f"分镜 LLM 权重：缓存残缺（{llm_detail}）{llm_snap}")
+    from pipeline.backends.catalog import resolve_stage_model
+
+    try:
+        story_model = resolve_stage_model("storyboard", settings.llm_model)
+        llm_repo = story_model.repo
+    except SystemExit:
+        story_model = None
+        llm_repo = settings.llm_model or DEFAULT_LLM_MODEL
+    if story_model is not None and story_model.runtime == "ollama":
+        from pipeline.backends.ollama_storyboard import status_line
+
+        print(status_line(story_model.repo))
     else:
-        print("分镜 LLM 权重：未下载（setup.sh 会拉）")
+        llm_snap = resolve_snapshot(llm_repo)
+        llm_ok, llm_detail = snapshot_ready(llm_snap, weight_globs=("model*.safetensors",))
+        if llm_ok:
+            print(f"分镜 LLM 权重：有 {llm_snap}")
+        elif llm_snap is not None:
+            print(f"分镜 LLM 权重：缓存残缺（{llm_detail}）{llm_snap}")
+        else:
+            print("分镜 LLM 权重：未下载（setup.sh 会拉）")
     try:
         import mlx_lm  # noqa: F401
 
         print("mlx-lm：已安装（主 venv）")
     except ImportError:
         print("mlx-lm：缺失（请 uv sync / 重跑 setup.sh）")
-    ltx_snap = resolve_snapshot(settings.video_model)
+    try:
+        ltx_repo = resolve_stage_model("video", settings.video_model).repo
+    except SystemExit:
+        ltx_repo = settings.video_model
+    ltx_snap = resolve_snapshot(ltx_repo)
     if ltx_snap is None:
-        print(f"LTX 权重缓存：未找到 {settings.video_model}")
+        print(f"LTX 权重缓存：未找到 {ltx_repo}")
     else:
         for name in ("audio_vae.safetensors", "vocoder.safetensors"):
             path = ltx_snap / name
@@ -291,14 +333,10 @@ def cmd_selftest(_: argparse.Namespace) -> None:
         def __init__(self) -> None:
             self.calls: list[str] = []
 
-        def generate_custom_voice(self, *, text, speaker, language, instruct, verbose, max_tokens):
+        def synthesize(self, *, text, speaker, instruct):
             self.calls.append(text)
-
-            class _R:
-                audio = np.full(int(24000 * (spoken_chars(text) / 2.0)), 0.5, dtype=np.float32)
-                sample_rate = 24000
-
-            return [_R()]
+            audio = np.full(int(24000 * (spoken_chars(text) / 2.0)), 0.5, dtype=np.float32)
+            return audio, 24000
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -973,8 +1011,22 @@ def cmd_selftest(_: argparse.Namespace) -> None:
             _JOBS.update(original_jobs)
 
     from pipeline.artifact_plan import selftest_web_edges
+    from pipeline.backends.catalog import selftest_catalog
+    from pipeline.backends.ollama_storyboard import selftest_ollama_storyboard
+    from pipeline.bootstrap import selftest_cancel, selftest_download_progress, selftest_recheck
+    from pipeline.disk_space import selftest_disk_space
+    from pipeline.model_cache import selftest_model_cache
+    from pipeline.process_guard import selftest_process_guard
 
     selftest_web_edges()
+    selftest_catalog()
+    selftest_ollama_storyboard()
+    selftest_model_cache()
+    selftest_disk_space()
+    selftest_recheck()
+    selftest_download_progress()
+    selftest_cancel()
+    selftest_process_guard()
     for label, path in (
         ("main", main_venv_path()),
         ("ltx", ltx_venv_path()),

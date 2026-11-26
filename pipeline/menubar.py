@@ -1,7 +1,7 @@
 """macOS 菜单栏图标：挂在网页控制台进程上。
 
 用仓内编译好的 ``scripts/macos/menubar-helper``（Swift / AppKit），
-菜单项：打开网页、复制地址、退出。退出会 SIGTERM 本进程，``serve`` 收尾停 HTTP。
+菜单项：打开网页、复制地址、退出。退出会先 ``POST /api/shutdown`` 清相关进程，再 SIGTERM 本进程。
 
 非 Darwin、缺二进制、或 ``NOVEL_VIDEO_NO_MENUBAR=1`` 时直接跳过。
 """
