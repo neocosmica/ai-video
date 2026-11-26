@@ -118,7 +118,7 @@ novel.txt → budget → storyboard（本机 LLM）→ screenplay --strict → �
 流程：点 ↻ → `POST /api/artifact/plan` → 对话框确认 → `POST /api/queue/add` 写入**左边待跑队列**（去重、补缺失前置）→ 点「启动任务」→ `POST /api/queue/start` 拉起一条**历史任务**。右侧「历史任务」= 每次启动一条记录。停止只杀进程，队列保留并复位为待跑。
 
 - **前置（传递）**：缺失则入队；已有则跳过
-- **目标 / 勾选后置**：入队强制重做（start 时清产物）
+- **目标 / 勾选后置**：入队强制重做；start 时清强制项及其全部后向受影响产物（未勾选后置也会删；重跑分镜会清空下游过程产物）
 - 队列项被其它项依赖时不可删；可一键清空待跑
 
 实现：`pipeline/run_queue.py` + `pipeline/artifact_plan.py`。

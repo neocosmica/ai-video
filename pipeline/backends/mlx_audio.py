@@ -9,10 +9,16 @@ import numpy as np
 
 from pipeline.backends.catalog import StageModel, weight_by_id
 from pipeline.config import Settings
+from pipeline.voices import (
+    VOICE_MODE_CLONE,
+    VOICE_MODE_DESIGN,
+    VOICE_MODE_PRESET,
+    design_instruct,
+)
 
 
 class MlxSpeech:
-    def __init__(self, spec: StageModel):
+    def __init__(self, spec: StageModel, *, mode: str = VOICE_MODE_PRESET):
         if spec.runtime != "mlx_tts":
             raise SystemExit(f"对白运行时不是 mlx_tts：{spec.runtime}")
         from pipeline.hf_cache import resolve_snapshot
@@ -21,33 +27,79 @@ class MlxSpeech:
         if tts_dir is None:
             raise SystemExit(
                 f"找不到 TTS 权重 {spec.label}（{spec.repo}）。"
-                "请先运行 scripts/setup.sh，不要在成片时再下载。"
+                "请先运行 scripts/setup.sh，或在网页里点「安装依赖」。"
             )
         self.spec = spec
+        self.mode = mode
         # 传本地目录，mlx_audio 就不会再 snapshot_download
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        print(f"加载 TTS：{tts_dir}")
+        print(f"加载 TTS（{mode}）：{tts_dir}")
         from mlx_audio.tts.utils import load_model
 
         self._model = load_model(str(tts_dir))
 
-    def synthesize(self, *, text: str, speaker: str, instruct: str) -> tuple[np.ndarray, int]:
+    def synthesize(
+        self,
+        *,
+        text: str,
+        speaker: str = "",
+        instruct: str = "",
+        ref_audio: str | Path | None = None,
+        ref_text: str = "",
+        voice_design: str = "",
+    ) -> tuple[np.ndarray, int]:
         """合成一句台词，返回波形与采样率。"""
         chunks: list[np.ndarray] = []
         sample_rate = 24000
         # 条的总长按字数估，留足余量；说到 EOS 就停，避免默认 2048 步看起来几乎不动
         max_tokens = min(2048, max(128, len(text) * 8))
-        for result in self._model.generate_custom_voice(
-            text=text,
-            speaker=speaker,
-            language="Chinese",
-            instruct=instruct,
-            verbose=True,
-            max_tokens=max_tokens,
-        ):
-            chunks.append(np.array(result.audio, dtype=np.float32).reshape(-1))
-            sample_rate = int(getattr(result, "sample_rate", sample_rate) or sample_rate)
+        mode = self.mode
+        if mode == VOICE_MODE_CLONE:
+            ref_path = Path(ref_audio) if ref_audio else None
+            if ref_path is None or not ref_path.is_file():
+                raise SystemExit(
+                    f"参考音频克隆需要有效的参考 wav（当前：{ref_audio!r}）。"
+                    "请在角色卡上传参考音频。"
+                )
+            ref_line = (ref_text or "").strip()
+            if not ref_line:
+                raise SystemExit(
+                    "参考音频克隆需要填写「参考音频里说的原文」（voice_ref_text）。"
+                )
+            for result in self._model.generate(
+                text=text,
+                ref_audio=str(ref_path),
+                ref_text=ref_line,
+                verbose=True,
+                max_tokens=max_tokens,
+            ):
+                chunks.append(np.array(result.audio, dtype=np.float32).reshape(-1))
+                sample_rate = int(getattr(result, "sample_rate", sample_rate) or sample_rate)
+        elif mode == VOICE_MODE_DESIGN:
+            design = design_instruct(voice_design, instruct)
+            for result in self._model.generate_voice_design(
+                text=text,
+                language="Chinese",
+                instruct=design,
+                verbose=True,
+                max_tokens=max_tokens,
+            ):
+                chunks.append(np.array(result.audio, dtype=np.float32).reshape(-1))
+                sample_rate = int(getattr(result, "sample_rate", sample_rate) or sample_rate)
+        else:
+            if not speaker:
+                raise SystemExit("预设配音缺少 speaker（如 Serena / Dylan）")
+            for result in self._model.generate_custom_voice(
+                text=text,
+                speaker=speaker,
+                language="Chinese",
+                instruct=instruct or "用自然对白的语气说",
+                verbose=True,
+                max_tokens=max_tokens,
+            ):
+                chunks.append(np.array(result.audio, dtype=np.float32).reshape(-1))
+                sample_rate = int(getattr(result, "sample_rate", sample_rate) or sample_rate)
         if not chunks:
             raise SystemExit(f"TTS 没有产出音频：{text}")
         return np.concatenate(chunks), sample_rate

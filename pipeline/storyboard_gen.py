@@ -1,14 +1,16 @@
 """用本机聊天模型把小说写成 storyboard.json。
 
-模型由 ``pipeline.backends`` 按配置加载（默认 Qwen3-4B Instruct 4-bit）。
-生成后交给 screenplay 做规范化与对白覆盖校验。
+多轮分步：① 角色与片头 → ② 镜头大纲（对白）→ ③ 分批补画面/运镜。
+模型由 ``pipeline.backends`` 按配置加载。生成后交给 screenplay 规范化与对白校验。
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
+from typing import Any
 
 from pipeline.backends import open_storyboard
 from pipeline.backends.catalog import default_model
@@ -27,55 +29,114 @@ from pipeline.util import (
     resolve,
     snap_frames,
 )
-from pipeline.voices import default_music_prompt, infer_gender, pick_voice
+from pipeline.voices import (
+    VOICE_MODE_CLONE,
+    default_music_prompt,
+    default_voice_design,
+    infer_gender,
+    pick_voice,
+    voice_mode,
+)
 
 DEFAULT_LLM_MODEL = default_model("storyboard").repo
 
-_SYSTEM = """你是华语竖屏短剧分镜编剧。只输出一个 JSON 对象，不要 markdown，不要解释。
-字段与约束严格按用户提示；台词必须照小说引号原文，禁止删字、改写、压短。"""
+_SYSTEM_BASE = """你是华语竖屏短剧分镜编剧。
+思考结束后只输出一个 JSON 对象，不要 markdown，不要解释。
+台词必须照小说引号原文，禁止删字、改写、压短。"""
+
+_EFFORT_HINT = {
+    "low": "reasoning_effort=low：用极少步骤想完就输出；不要复述约束、不要英文长篇、不要起草完整逐镜字段。",
+    "medium": "reasoning_effort=medium：简短规划即可，不要逐镜起草完整字段。",
+    "high": "reasoning_effort=high：可稍细规划，但仍不要输出思考以外的解释。",
+}
+
+# 每步生成额度（思考额度统一用 settings.llm_think_max_tokens）
+_STEP_GEN_MAX = {
+    # 单步天花板仍受 llm_max_tokens（8192）约束；略抬高以容纳 think+JSON
+    "cast": 3072,
+    "outline": 4096,
+    "enrich": 4096,
+}
+_ENRICH_BATCH = 4
+
+
+def _system_prompt(effort: str) -> str:
+    key = str(effort or "low").strip().lower()
+    hint = _EFFORT_HINT.get(key, _EFFORT_HINT["low"])
+    return f"{_SYSTEM_BASE}\n{hint}"
 
 
 def _spoken_key(text: str) -> str:
     return re.sub(r"[\s\W_]+", "", text or "", flags=re.UNICODE)
 
 
-def _build_user_prompt(
+def _quote_block(quoted_lines: list[str]) -> str:
+    if not quoted_lines:
+        return "本段没有引号台词：所有镜头 dialogue 必须是 \"\"。\n"
+    listed = "\n".join(f"- {line}" for line in quoted_lines)
+    return (
+        "本段必须原样覆盖的引号台词（dialogue 只能用这些字，可拆到相邻镜；"
+        "禁止把旁白写进 dialogue）：\n"
+        f"{listed}\n"
+    )
+
+
+def _chunk_note(chunk_index: int, chunk_total: int) -> str:
+    if chunk_total <= 1:
+        return ""
+    return f"\n这是小说第 {chunk_index + 1}/{chunk_total} 段，只根据本段写；角色可重复出现。\n"
+
+
+def _complete_json(
+    llm: Any,
+    *,
+    label: str,
+    system: str,
+    user: str,
+    max_tokens: int,
+    think_max_tokens: int,
+    temperature: float,
+    retries: int,
+) -> dict:
+    last_err: Exception | None = None
+    for attempt in range(max(1, retries)):
+        print(f"  {label}：尝试 {attempt + 1}/{retries}", flush=True)
+        try:
+            raw = llm.complete(
+                system=system,
+                user=user,
+                max_tokens=max_tokens,
+                temperature=temperature if attempt == 0 else min(temperature, 0.2),
+                think_max_tokens=think_max_tokens,
+            )
+            data = extract_json(raw)
+            return data
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            print(f"    失败：{exc}", flush=True)
+    raise ValueError(f"{label}失败：{last_err}")
+
+
+def _step_cast(
+    llm: Any,
     novel: str,
     *,
-    max_shots: int,
-    dialogue_limit: int,
-    max_seconds: float,
-    quoted_lines: list[str],
-    chunk_index: int = 0,
-    chunk_total: int = 1,
-) -> str:
-    chunk_note = ""
-    if chunk_total > 1:
-        chunk_note = f"\n这是小说第 {chunk_index + 1}/{chunk_total} 段，只根据本段写镜头；角色可重复出现。\n"
-    if quoted_lines:
-        listed = "\n".join(f"- {line}" for line in quoted_lines)
-        quote_block = (
-            "本段必须原样覆盖的引号台词（dialogue 只能用这些字，可拆到相邻镜；"
-            "禁止把旁白写进 dialogue）：\n"
-            f"{listed}\n"
-        )
-    else:
-        quote_block = "本段没有引号台词：所有镜头 dialogue 必须是 \"\"。\n"
-    return f"""把下面小说改成竖屏短剧分镜 JSON。只输出 JSON。
+    settings: Settings,
+    retries: int,
+    temperature: float,
+    system: str,
+) -> dict:
+    gen_max = _STEP_GEN_MAX["cast"]
+    user = f"""根据小说提取片头与角色卡。只输出 JSON。
 
-硬约束：
-- 最多 {max_shots} 个镜头
-- 单镜对白约 {dialogue_limit} 字 / {max_seconds:.1f} 秒；超长按标点拆镜，台词不许删字
-- dialogue 只能是引号内台词；叙述镜头 dialogue 与 speaker 都必须 ""
-- 禁止把旁白（如「雨下得很大」「她推开门」）写进 dialogue
-- motion_prompt 与 music_prompt 必须英文；music_prompt 无人声
-- gender：female/male；voice：女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric
-- emotion：calm/warm/sad/tense/bitter/nostalgic/surprised/whisper
-- image_prompt 中文景别/地点/动作/光线；人脸清晰；有对白时嘴微张
-- motion_level：subtle（对白近景）/ normal（空镜轻运镜）/ dynamic（明确肢体或镜头动作）
-- 动作镜必须写 end_image_prompt：同一机位/景别，只写终点姿势差（门开到哪、手脚挪到哪）；禁止「已走进室内换景」；对白近景可省略
-- 外貌只取原文可见特征；每镜换景别或角度
-{chunk_note}{quote_block}
+约束：
+- 外貌只取原文可见特征
+- gender：female/male；voice：女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric（也可后改成 clone/design）
+- voice_design：英文音色描述（给 VoiceDesign 文字造声用），根据外貌与气质写，例如
+  "A soft-spoken woman in her twenties, slightly breathy, southern Mandarin tint"
+  每个角色都要写，即使当前 voice 是预设音色
+- music_prompt 必须英文、无人声器乐
+
 结构：
 {{
   "title": "短剧标题",
@@ -87,32 +148,8 @@ def _build_user_prompt(
       "name": "林晚",
       "gender": "female",
       "voice": "Serena",
+      "voice_design": "A soft-spoken woman in her twenties, slightly breathy, calm Mandarin delivery",
       "appearance": "二十多岁女性，短发，深色风衣"
-    }}
-  ],
-  "shots": [
-    {{
-      "id": "s001",
-      "characters": ["linwan"],
-      "location": "地点",
-      "image_prompt": "中景，……",
-      "motion_prompt": "He turns and walks two steps toward the door",
-      "motion_level": "dynamic",
-      "end_image_prompt": "同一机位，门已推开半扇，人物身体侧入门内半步，一手仍扶门框",
-      "speaker": "",
-      "dialogue": "",
-      "emotion": "calm"
-    }},
-    {{
-      "id": "s002",
-      "characters": ["linwan"],
-      "location": "地点",
-      "image_prompt": "中近景，嘴微张，面部清晰",
-      "motion_prompt": "Locked-off camera, natural lip motion",
-      "motion_level": "subtle",
-      "speaker": "林晚",
-      "dialogue": "引号原句",
-      "emotion": "surprised"
     }}
   ]
 }}
@@ -122,6 +159,282 @@ def _build_user_prompt(
 {novel}
 >>>
 """
+    data = _complete_json(
+        llm,
+        label="① 角色与片头",
+        system=system,
+        user=user,
+        max_tokens=min(gen_max, settings.llm_max_tokens),
+        think_max_tokens=settings.llm_think_max_tokens,
+        temperature=temperature,
+        retries=retries,
+    )
+    chars = data.get("characters")
+    if not isinstance(chars, list) or not chars:
+        raise ValueError("角色步骤缺少 characters")
+    return data
+
+
+def _step_outline(
+    llm: Any,
+    novel: str,
+    *,
+    characters: list[dict],
+    quoted_lines: list[str],
+    max_shots: int,
+    dialogue_limit: int,
+    max_seconds: float,
+    settings: Settings,
+    retries: int,
+    temperature: float,
+    system: str,
+    chunk_index: int = 0,
+    chunk_total: int = 1,
+) -> list[dict]:
+    gen_max = _STEP_GEN_MAX["outline"]
+    cast_json = json.dumps(characters, ensure_ascii=False, indent=2)
+    user = f"""根据小说与角色卡，只写镜头大纲（不要 image_prompt / motion_prompt）。只输出 JSON。
+{_chunk_note(chunk_index, chunk_total)}
+硬约束：
+- 最多 {max_shots} 个镜头；id 用 s001、s002…
+- 单镜对白约 {dialogue_limit} 字 / {max_seconds:.1f} 秒；超长按标点拆镜，台词不许删字
+- dialogue 只能是引号内台词；叙述镜头 dialogue 与 speaker 都必须 ""
+- emotion：calm/warm/sad/tense/bitter/nostalgic/surprised/whisper
+- beat：中文一句话说明本镜在干什么（给下一步写画面用）
+- characters 填角色 id 数组
+{_quote_block(quoted_lines)}
+已有角色：
+{cast_json}
+
+结构：
+{{
+  "shots": [
+    {{
+      "id": "s001",
+      "characters": ["linwan"],
+      "location": "街角便利店门口",
+      "speaker": "",
+      "dialogue": "",
+      "emotion": "calm",
+      "beat": "林晚推门走进雨夜便利店"
+    }},
+    {{
+      "id": "s002",
+      "characters": ["linwan"],
+      "location": "便利店柜台前",
+      "speaker": "林晚",
+      "dialogue": "引号原句",
+      "emotion": "surprised",
+      "beat": "林晚近景开口"
+    }}
+  ]
+}}
+
+小说：
+<<<
+{novel}
+>>>
+"""
+    data = _complete_json(
+        llm,
+        label="② 镜头大纲",
+        system=system,
+        user=user,
+        max_tokens=min(gen_max, settings.llm_max_tokens),
+        think_max_tokens=settings.llm_think_max_tokens,
+        temperature=temperature,
+        retries=retries,
+    )
+    shots = data.get("shots")
+    if not isinstance(shots, list) or not shots:
+        raise ValueError("大纲步骤缺少 shots")
+    return [s for s in shots if isinstance(s, dict)][:max_shots]
+
+
+def _step_enrich_batch(
+    llm: Any,
+    novel: str,
+    *,
+    characters: list[dict],
+    shots_batch: list[dict],
+    settings: Settings,
+    retries: int,
+    temperature: float,
+    system: str,
+) -> list[dict]:
+    gen_max = _STEP_GEN_MAX["enrich"]
+    user = f"""为下列镜头大纲补画面与运镜字段。保持 id/dialogue/speaker/location/emotion/characters 原样。只输出 JSON。
+
+约束：
+- image_prompt 中文：景别/地点/动作/光线；人脸清晰；有对白时嘴微张；每镜换景别或角度
+- motion_prompt 必须英文
+- motion_level：subtle（对白近景）/ normal（空镜轻运镜）/ dynamic（明确肢体或镜头动作）
+- 动作镜（dynamic）必须写 end_image_prompt：同一机位/景别，只写终点姿势差；禁止「已走进室内换景」；对白近景可省略 end_image_prompt
+- 外貌只取角色卡与原文可见特征
+
+角色：
+{json.dumps(characters, ensure_ascii=False, indent=2)}
+
+待补全镜头大纲：
+{json.dumps(shots_batch, ensure_ascii=False, indent=2)}
+
+结构：
+{{
+  "shots": [
+    {{
+      "id": "s001",
+      "characters": ["linwan"],
+      "location": "地点",
+      "image_prompt": "中景，……",
+      "motion_prompt": "She pushes the door open and steps inside",
+      "motion_level": "dynamic",
+      "end_image_prompt": "同一机位，门已推开，人物侧入门内半步",
+      "speaker": "",
+      "dialogue": "",
+      "emotion": "calm"
+    }}
+  ]
+}}
+
+小说（供核对场景，勿改台词）：
+<<<
+{novel}
+>>>
+"""
+    data = _complete_json(
+        llm,
+        label=f"③ 补画面（{shots_batch[0].get('id', '?')}…）",
+        system=system,
+        user=user,
+        max_tokens=min(gen_max, settings.llm_max_tokens),
+        think_max_tokens=settings.llm_think_max_tokens,
+        temperature=temperature,
+        retries=retries,
+    )
+    shots = data.get("shots")
+    if not isinstance(shots, list) or not shots:
+        raise ValueError("补画面步骤缺少 shots")
+    return [s for s in shots if isinstance(s, dict)]
+
+
+def _merge_enrich(outline: list[dict], enriched: list[dict]) -> list[dict]:
+    """按 id 合并；缺补的镜保留大纲并填保守默认画面。"""
+    by_id = {
+        str(s.get("id") or "").strip(): s
+        for s in enriched
+        if str(s.get("id") or "").strip()
+    }
+    out: list[dict] = []
+    for raw in outline:
+        sid = str(raw.get("id") or "").strip()
+        base = dict(raw)
+        base.pop("beat", None)
+        got = by_id.get(sid)
+        if got:
+            for key in (
+                "image_prompt",
+                "motion_prompt",
+                "motion_level",
+                "end_image_prompt",
+            ):
+                if got.get(key):
+                    base[key] = got[key]
+            # 大纲字段以大纲为准，防止模型改台词
+            for key in ("id", "characters", "location", "speaker", "dialogue", "emotion"):
+                if key in raw:
+                    base[key] = raw[key]
+        if not str(base.get("image_prompt") or "").strip():
+            beat = str(raw.get("beat") or "").strip()
+            base["image_prompt"] = (
+                f"中景，{beat}，电影感光线，浅景深"
+                if beat
+                else "中景，场景交代，电影感光线，浅景深"
+            )
+        if not str(base.get("motion_prompt") or "").strip():
+            base["motion_prompt"] = (
+                "Locked-off camera, natural lip motion, subtle expression"
+                if str(base.get("dialogue") or "").strip()
+                else "Slow cinematic push in, subtle natural movement"
+            )
+        out.append(base)
+    return out
+
+
+def _generate_chunk(
+    llm: Any,
+    novel: str,
+    *,
+    settings: Settings,
+    max_shots: int,
+    dialogue_limit: int,
+    max_seconds: float,
+    quoted_lines: list[str],
+    retries: int,
+    temperature: float,
+    chunk_index: int,
+    chunk_total: int,
+    cast_seed: dict | None = None,
+) -> dict:
+    """单段小说：角色 → 大纲 → 分批补画面。"""
+    system = _system_prompt(str(getattr(settings, "llm_reasoning_effort", "low") or "low"))
+    if cast_seed and isinstance(cast_seed.get("characters"), list) and cast_seed["characters"]:
+        cast = {
+            "title": cast_seed.get("title") or "",
+            "style": cast_seed.get("style") or "",
+            "music_prompt": cast_seed.get("music_prompt") or "",
+            "characters": list(cast_seed["characters"]),
+        }
+        print("  ① 角色与片头：复用上一段", flush=True)
+    else:
+        cast = _step_cast(
+            llm,
+            novel,
+            settings=settings,
+            retries=retries,
+            temperature=temperature,
+            system=system,
+        )
+    outline = _step_outline(
+        llm,
+        novel,
+        characters=list(cast.get("characters") or []),
+        quoted_lines=quoted_lines,
+        max_shots=max_shots,
+        dialogue_limit=dialogue_limit,
+        max_seconds=max_seconds,
+        settings=settings,
+        retries=retries,
+        temperature=temperature,
+        system=system,
+        chunk_index=chunk_index,
+        chunk_total=chunk_total,
+    )
+    enriched: list[dict] = []
+    for i in range(0, len(outline), _ENRICH_BATCH):
+        batch = outline[i : i + _ENRICH_BATCH]
+        try:
+            enriched.extend(
+                _step_enrich_batch(
+                    llm,
+                    novel,
+                    characters=list(cast.get("characters") or []),
+                    shots_batch=batch,
+                    settings=settings,
+                    retries=retries,
+                    temperature=temperature,
+                    system=system,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"    补画面批次失败，用大纲兜底：{exc}", flush=True)
+    shots = _merge_enrich(outline, enriched)
+    return {
+        "title": cast.get("title") or "",
+        "style": cast.get("style") or "",
+        "music_prompt": cast.get("music_prompt") or "",
+        "characters": cast.get("characters") or [],
+        "shots": shots,
+    }
 
 
 def _merge_storyboards(parts: list[dict], *, max_shots: int) -> dict:
@@ -297,13 +610,26 @@ def _polish_fields(data: dict, *, title_fallback: str) -> dict:
         appearance = str(raw.get("appearance") or name).strip()
         gender = infer_gender(appearance, str(raw.get("gender") or ""))
         voice = pick_voice(gender, str(raw.get("voice") or "") or None, appearance)
+        mode = voice_mode({"voice": voice, "voice_mode": raw.get("voice_mode")})
+        design = str(raw.get("voice_design") or "").strip()
+        if not design:
+            design = default_voice_design(gender, appearance, name)
         item = {
             "id": str(raw.get("id") or name).strip() or name,
             "name": name,
             "gender": gender,
             "voice": voice,
+            "voice_mode": mode,
+            "voice_design": design,
             "appearance": appearance,
         }
+        if mode == VOICE_MODE_CLONE:
+            ref = str(raw.get("voice_ref") or "").strip()
+            ref_text = str(raw.get("voice_ref_text") or "").strip()
+            if ref:
+                item["voice_ref"] = ref
+            if ref_text:
+                item["voice_ref_text"] = ref_text
         chars_out.append(item)
     shots_out: list[dict] = []
     for index, raw in enumerate(data.get("shots") or [], start=1):
@@ -355,45 +681,47 @@ def generate_storyboard_dict(
     chunks = chunk_novel(novel_text, limit=1600)
     # 多段时每段镜头配额均分，至少 4
     per_chunk_shots = max(4, settings.max_shots // max(1, len(chunks)))
+    temperature = float(settings.llm_temperature)
 
     llm = open_storyboard(settings)
     parts: list[dict] = []
+    cast_seed: dict | None = None
     try:
         for index, chunk in enumerate(chunks):
             quoted = extract_novel_dialogues(chunk)
-            user = _build_user_prompt(
-                chunk,
-                max_shots=min(settings.max_shots, per_chunk_shots if len(chunks) > 1 else settings.max_shots),
-                dialogue_limit=limit,
-                max_seconds=max_seconds,
-                quoted_lines=quoted,
-                chunk_index=index,
-                chunk_total=len(chunks),
+            max_shots = min(
+                settings.max_shots,
+                per_chunk_shots if len(chunks) > 1 else settings.max_shots,
             )
-            last_err: Exception | None = None
-            data: dict | None = None
-            for attempt in range(max(1, retries)):
-                print(
-                    f"生成分镜：段 {index + 1}/{len(chunks)}，尝试 {attempt + 1}/{retries}",
-                    flush=True,
+            print(
+                f"生成分镜：段 {index + 1}/{len(chunks)}（角色→大纲→画面，最多 {max_shots} 镜）",
+                flush=True,
+            )
+            try:
+                data = _generate_chunk(
+                    llm,
+                    chunk,
+                    settings=settings,
+                    max_shots=max_shots,
+                    dialogue_limit=limit,
+                    max_seconds=max_seconds,
+                    quoted_lines=quoted,
+                    retries=retries,
+                    temperature=temperature,
+                    chunk_index=index,
+                    chunk_total=len(chunks),
+                    cast_seed=cast_seed,
                 )
-                try:
-                    raw_text = llm.complete(
-                        system=_SYSTEM,
-                        user=user,
-                        max_tokens=settings.llm_max_tokens,
-                        temperature=settings.llm_temperature if attempt == 0 else 0.2,
-                    )
-                    data = extract_json(raw_text)
-                    if not isinstance(data.get("shots"), list) or not data["shots"]:
-                        raise ValueError("JSON 缺少 shots")
-                    break
-                except Exception as exc:  # noqa: BLE001 — 重试 JSON/生成失败
-                    last_err = exc
-                    print(f"  失败：{exc}", flush=True)
-                    data = None
-            if data is None:
-                raise SystemExit(f"分镜生成失败：{last_err}")
+            except Exception as exc:  # noqa: BLE001
+                raise SystemExit(f"分镜生成失败：{exc}") from exc
+            if not data.get("shots"):
+                raise SystemExit("分镜生成失败：没有镜头")
+            cast_seed = {
+                "title": data.get("title"),
+                "style": data.get("style"),
+                "music_prompt": data.get("music_prompt"),
+                "characters": data.get("characters"),
+            }
             parts.append(data)
     finally:
         llm.close()

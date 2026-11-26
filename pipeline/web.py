@@ -1713,6 +1713,79 @@ def write_text(rel: str, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def api_voice_ref_upload(data: dict) -> dict:
+    """把角色参考音频写到项目 ``work/voices/<id>_ref.wav``，并回写分镜字段。"""
+    import base64
+    import binascii
+
+    from pipeline.projects import artifacts_sub
+
+    out_rel = str(data.get("out") or data.get("project") or "").strip()
+    char_id = str(data.get("character_id") or data.get("id") or "").strip()
+    if not out_rel or not char_id:
+        raise ValueError("需要 out 与 character_id")
+    if not re.match(r"^[\w\-]+$", char_id):
+        raise ValueError(f"不接受的角色 id：{char_id!r}")
+    payload = data.get("content_base64") or data.get("base64") or ""
+    if not isinstance(payload, str) or not payload.strip():
+        raise ValueError("需要 content_base64（参考音频）")
+    # 允许 data URL
+    raw_b64 = payload.strip()
+    if "," in raw_b64 and raw_b64.lower().startswith("data:"):
+        raw_b64 = raw_b64.split(",", 1)[1]
+    try:
+        blob = base64.b64decode(raw_b64, validate=False)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("参考音频 base64 无效") from exc
+    if len(blob) < 256:
+        raise ValueError("参考音频太短")
+    if len(blob) > 12 * 1024 * 1024:
+        raise ValueError("参考音频请控制在 12 MB 以内")
+    base = safe_path(out_rel)
+    if not base.is_dir():
+        raise ValueError(f"项目不存在：{out_rel}")
+    voices_dir = artifacts_sub(base, "voices")
+    voices_dir.mkdir(parents=True, exist_ok=True)
+    # 后缀以客户端为准，默认 wav
+    name = str(data.get("filename") or "ref.wav")
+    suffix = Path(name).suffix.lower() or ".wav"
+    if suffix not in {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac"}:
+        suffix = ".wav"
+    dest = voices_dir / f"{char_id}_ref{suffix}"
+    dest.write_bytes(blob)
+    rel = str(dest.relative_to(base)).replace("\\", "/")
+    ref_text = data.get("ref_text")
+    # 可选：直接改 storyboard.json 里的角色卡
+    sb_path = base / "storyboard.json"
+    updated = False
+    if sb_path.is_file() and bool(data.get("update_storyboard", True)):
+        from pipeline.util import dump_json, load_json
+
+        story = load_json(sb_path)
+        for char in story.get("characters") or []:
+            if not isinstance(char, dict):
+                continue
+            if str(char.get("id") or "") != char_id:
+                continue
+            char["voice"] = "clone"
+            char["voice_mode"] = "clone"
+            char["voice_ref"] = rel
+            if ref_text is not None:
+                char["voice_ref_text"] = str(ref_text).strip()
+            updated = True
+            break
+        if updated:
+            dump_json(sb_path, story)
+    return {
+        "ok": True,
+        "path": rel,
+        "character_id": char_id,
+        "bytes": len(blob),
+        "storyboard_updated": updated,
+        "voice_ref_text": None if ref_text is None else str(ref_text).strip(),
+    }
+
+
 def _storyboard_read_error(data: object) -> str | None:
     from pipeline.artifact_plan import _shape_error
 
@@ -2107,7 +2180,7 @@ def api_models_space(data: dict | None = None) -> dict:
 
 
 def api_models_save(data: dict) -> dict:
-    """把网页上的阶段选择写回 config.json。只改模型字段。"""
+    """把网页上的阶段选择写回 config.json。只改模型字段（及可选外部 API）。"""
     from pipeline.backends import save_selection, selection_view
     from pipeline.config import Settings
     from pipeline.util import ROOT
@@ -2115,8 +2188,19 @@ def api_models_save(data: dict) -> dict:
     raw = data.get("models") if isinstance(data.get("models"), dict) else data.get("selections")
     if not isinstance(raw, dict) or not raw:
         raise ValueError("需要 models：阶段 → 模型 id")
+    api = data.get("storyboard_api") if isinstance(data.get("storyboard_api"), dict) else {}
+    extra: dict = {}
+    if "base" in api:
+        extra["api_base"] = str(api.get("base") or "")
+    # key 省略 = 不改已有密钥；传 "" 表示清空
+    if "key" in api:
+        extra["api_key_value"] = "" if api.get("key") is None else str(api.get("key"))
     try:
-        save_selection(ROOT / "config.json", {str(key): str(value) for key, value in raw.items()})
+        save_selection(
+            ROOT / "config.json",
+            {str(key): str(value) for key, value in raw.items()},
+            **extra,
+        )
     except SystemExit as exc:
         raise ValueError(str(exc)) from exc
     return selection_view(Settings.load())
@@ -2367,6 +2451,8 @@ class _Handler(BaseHTTPRequestHandler):
                 rel = str(data.get("path") or "")
                 write_text(rel, str(data.get("content") or ""))
                 self._json({"path": rel, "ok": True})
+            elif path == "/api/voice-ref/upload":
+                self._json(api_voice_ref_upload(data))
             elif path == "/api/storyboard/read":
                 rel = str(data.get("path") or "")
                 self._json(read_storyboard(rel))
@@ -2678,7 +2764,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _queue_start_locked(self, data: dict) -> dict:
         _ensure_no_running_job()
-        from pipeline.artifact_plan import clear_nodes, queue_block_reason
+        from pipeline.artifact_plan import clear_for_force_rerun, queue_block_reason
         from pipeline.run_queue import (
             annotate_removable,
             build_groups_from_queue,
@@ -2719,14 +2805,14 @@ class _Handler(BaseHTTPRequestHandler):
         groups = build_groups_from_queue(out, queue)
         if not groups:
             raise ValueError("队列里没有可执行项（产物可能已齐全）")
-        # 强制项：启动前清产物
-        to_clear = [
+        # 强制项 + 其后向闭包：未勾选的后置也会清掉，避免陈旧产物留盘
+        force_items = [
             {"kind": it["kind"], "id": it.get("id") or ""}
             for it in queue["items"]
             if it.get("force")
         ]
-        if to_clear:
-            clear_nodes(out, to_clear)
+        if force_items:
+            clear_for_force_rerun(out, force_items)
         novel = novel_rel or str(data.get("novel") or "").strip()
         if not novel:
             project_novel = resolve(out) / "novel.txt"
@@ -3114,6 +3200,8 @@ def request_web_shutdown() -> dict:
     """给菜单栏「退出」用：先回包，再在后台收尾并结束本进程。"""
     import signal
 
+    print(f"[webui] /api/shutdown 被调用 pid={os.getpid()}", flush=True)
+
     if _SHUTDOWN_ONCE.is_set():
         return {"ok": True, "status": "stopping"}
     _SHUTDOWN_ONCE.set()
@@ -3133,6 +3221,15 @@ def request_web_shutdown() -> dict:
 
 
 def serve(host: str, port: int) -> None:
+    # 脱离启动器/终端进程组，避免 launcher 退出或外层 shell 收尾时把后端连坐杀掉；
+    # 否则菜单栏会因 checkParent 发现父进程已死而跟着退出，看起来像「助手自己挂了」。
+    try:
+        os.setsid()
+    except OSError:
+        try:
+            os.setpgrp()
+        except OSError:
+            pass
     _claim_port_or_exit(host, port)
     try:
         from pipeline.process_guard import KIND_DOWNLOAD, KIND_SETUP, sweep_stale
@@ -3196,6 +3293,15 @@ def serve(host: str, port: int) -> None:
         def _sigterm(_signum, _frame) -> None:
             nonlocal stopping
             stopping = True
+            mb_pid = getattr(menubar, "pid", None) if menubar is not None else None
+            mb_alive = (
+                menubar.poll() is None if menubar is not None else False
+            )
+            print(
+                f"[webui] 收到 SIGTERM pid={os.getpid()} "
+                f"menubar_pid={mb_pid} menubar_alive={mb_alive}",
+                flush=True,
+            )
             raise KeyboardInterrupt
 
         prev_term = None
@@ -3213,7 +3319,10 @@ def serve(host: str, port: int) -> None:
                 # helper 自己挂了（非用户退出）：重启，别把网页服务拖死
                 if stopping:
                     break
-                print("菜单栏助手已退出，正在重启…", flush=True)
+                print(
+                    f"菜单栏助手已退出（code={code}），正在重启…",
+                    flush=True,
+                )
                 menubar = start_menubar(url)
                 if menubar is None:
                     print("菜单栏助手无法重启，网页服务继续运行（Ctrl+C 停止）", flush=True)

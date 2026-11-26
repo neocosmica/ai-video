@@ -33,7 +33,7 @@ KNOWN_BACKENDS = ("auto", "mlx", "cuda")
 
 # 每个阶段目前注册了哪些 runtime。新平台加运行时模块后，把名字填到这里。
 REGISTERED_RUNTIMES: dict[str, frozenset[str]] = {
-    "storyboard": frozenset({"mlx_lm", "ollama"}),
+    "storyboard": frozenset({"mlx_lm", "ollama", "openai"}),
     "images": frozenset({"mflux_flux2"}),
     "tts": frozenset({"mlx_tts"}),
     "music": frozenset({"musicgen"}),
@@ -85,8 +85,8 @@ def bind(settings, stage: str) -> StageModel:
         raise SystemExit(f"未知阶段 {stage!r}")
     info = resolve_backend(getattr(settings, "backend", "auto"))
     model = resolve_stage_model(stage, getattr(settings, STAGE_FIELDS[stage], ""))
-    # Ollama 只接管分镜聊天，静帧 / 对白 / 视频仍走当前后端。
-    if model.backend != info.name and model.backend != "ollama":
+    # Ollama / 外部 API 只接管分镜聊天，静帧 / 对白 / 视频仍走当前后端。
+    if model.backend != info.name and model.backend not in {"ollama", "openai"}:
         raise SystemExit(
             f"{STAGE_LABELS[stage]}模型 {model.id} 属于 {model.backend}，"
             f"当前后端是 {info.name}（{info.reason}）。"
@@ -103,13 +103,28 @@ def bind(settings, stage: str) -> StageModel:
 def open_storyboard(settings):
     """加载分镜聊天模型。用完调用 ``close()``。"""
     model = bind(settings, "storyboard")
+    think_max = int(getattr(settings, "llm_think_max_tokens", 1024) or 1024)
+    effort = str(getattr(settings, "llm_reasoning_effort", "low") or "low").strip().lower()
     if model.runtime == "ollama":
         from pipeline.backends.ollama_storyboard import OllamaStoryboardLLM
 
-        return OllamaStoryboardLLM(model)
+        return OllamaStoryboardLLM(model, reasoning_effort=effort)
+    if model.runtime == "openai":
+        from pipeline.backends.openai_storyboard import OpenAIStoryboardLLM
+
+        return OpenAIStoryboardLLM(
+            model,
+            settings,
+            reasoning_effort=effort,
+            think_max_tokens=think_max,
+        )
     from pipeline.backends.mlx_storyboard import MlxStoryboardLLM
 
-    return MlxStoryboardLLM(model)
+    return MlxStoryboardLLM(
+        model,
+        think_max_tokens=think_max,
+        reasoning_effort=effort,
+    )
 
 
 def open_images(settings, *, kind: str, load_label: str = "文生图模型"):
@@ -120,12 +135,23 @@ def open_images(settings, *, kind: str, load_label: str = "文生图模型"):
     return MlxFluxSession(model, kind=kind, load_label=load_label)
 
 
-def open_speech(settings):
-    """加载对白模型。用完调用 ``close()``。"""
-    model = bind(settings, "tts")
-    from pipeline.backends.mlx_audio import MlxSpeech
+def open_speech(settings, *, mode: str = "preset"):
+    """加载对白模型。用完调用 ``close()``。
 
-    return MlxSpeech(model)
+    ``mode``：``preset``（CustomVoice）/ ``clone``（Base）/ ``design``（VoiceDesign）。
+    角色卡选参考音频克隆或文字造声时，按当前 ``tts_model`` 档位映射到对应权重。
+    """
+    from pipeline.backends.catalog import resolve_stage_model
+    from pipeline.backends.mlx_audio import MlxSpeech
+    from pipeline.voices import VOICE_MODE_PRESET, companion_tts_id, voice_mode
+
+    kind = voice_mode({"voice_mode": mode}) if mode else VOICE_MODE_PRESET
+    if kind == VOICE_MODE_PRESET:
+        model = bind(settings, "tts")
+    else:
+        model_id = companion_tts_id(getattr(settings, "tts_model", ""), kind)
+        model = resolve_stage_model("tts", model_id)
+    return MlxSpeech(model, mode=kind)
 
 
 def render_music(settings, *, prompt: str, seconds: float, seed: int, dest: Path, log: Path) -> None:
@@ -156,17 +182,43 @@ def _weight_ready(item) -> bool:
     return ok
 
 
-def _stage_models(stage: str, ollama_scan) -> tuple[StageModel, ...]:
-    """静态目录。分镜再附上这一次 ``ollama list`` 查到的模型。"""
-    catalog = models_for(stage)
+def _stage_models(stage: str, ollama_scan, settings=None) -> tuple[StageModel, ...]:
+    """静态目录。分镜再附上 Ollama 现扫结果，以及当前已填的外部 API。"""
+    # 对白 Base/VoiceDesign 等 internal 条目不进网页下拉；一选三件套即可
+    catalog = models_for(stage, selectable_only=True)
     if stage != "storyboard":
         return catalog
+    from pipeline.backends.catalog import make_api_model
     from pipeline.backends.ollama_storyboard import storyboard_choices
 
     scanned = storyboard_choices(ollama_scan)
     known = {model.id for model in catalog}
     extra = tuple(model for model in scanned if model.id not in known)
-    return catalog + extra
+    known.update(model.id for model in extra)
+    api_extra: tuple[StageModel, ...] = ()
+    raw = str(getattr(settings, STAGE_FIELDS["storyboard"], "") or "") if settings is not None else ""
+    if raw.startswith("api:"):
+        try:
+            api_model = resolve_stage_model("storyboard", raw)
+        except SystemExit:
+            api_model = None
+        if api_model is not None and api_model.id not in known:
+            from pipeline.backends.openai_storyboard import api_base_url
+
+            host = api_base_url(settings)
+            note = (
+                f"OpenAI 兼容接口（{host}）。分镜不下载 Hugging Face 权重。"
+                if host
+                else "OpenAI 兼容接口。请填写 Base URL 与 API Key。"
+            )
+            api_extra = (
+                make_api_model(
+                    api_model.repo,
+                    label=f"外部 API · {api_model.repo}",
+                    note=note,
+                ),
+            )
+    return catalog + extra + api_extra
 
 
 def _prefer_local_ollama(selected: StageModel, choices: tuple[StageModel, ...]) -> StageModel:
@@ -184,11 +236,16 @@ def _prefer_local_ollama(selected: StageModel, choices: tuple[StageModel, ...]) 
     return selected
 
 
-def _choice_ready(model: StageModel, ollama_scan) -> bool:
+def _choice_ready(model: StageModel, ollama_scan, settings=None) -> bool:
     if model.runtime == "ollama":
         from pipeline.backends.ollama_storyboard import model_is_local
 
         return model_is_local(model.repo, ollama_scan)
+    if model.runtime == "openai":
+        from pipeline.backends.openai_storyboard import credentials_ready
+
+        ok, _detail = credentials_ready(settings)
+        return ok
     if not model.downloads:
         return False
     return all(_weight_ready(item) for item in model.downloads)
@@ -205,10 +262,15 @@ def selection_view(settings) -> dict[str, Any]:
     from pipeline.backends.ollama_storyboard import scan_local_models
 
     ollama_scan = scan_local_models()
+    from pipeline.backends.openai_storyboard import api_base_url, api_key, credentials_ready
+
+    api_host = api_base_url(settings)
+    api_secret = api_key(settings)
+    api_ok, api_detail = credentials_ready(settings)
     stages = []
     for stage in STAGES:
         raw = str(getattr(settings, STAGE_FIELDS[stage], "") or "")
-        choices_models = _stage_models(stage, ollama_scan)
+        choices_models = _stage_models(stage, ollama_scan, settings)
         selected_runtime = ""
         try:
             selected = _prefer_local_ollama(resolve_stage_model(stage, raw), choices_models)
@@ -218,9 +280,11 @@ def selection_view(settings) -> dict[str, Any]:
             selected_runtime = selected.runtime
             selected_size = choice_disk_size(selected)
             error = ""
-            ready = _choice_ready(selected, ollama_scan)
+            ready = _choice_ready(selected, ollama_scan, settings)
             if selected.runtime == "ollama" and not ready:
                 error = ollama_scan.detail or f"Ollama 里没有模型 {selected.repo}。"
+            elif selected.runtime == "openai" and not ready:
+                error = api_detail or "外部 API 还没填齐 Base URL / API Key。"
         except SystemExit as exc:
             selected_id = raw
             selected_label = raw
@@ -235,7 +299,7 @@ def selection_view(settings) -> dict[str, Any]:
                 "repo": model.repo,
                 "note": model.note,
                 "runtime": model.runtime,
-                "ready": _choice_ready(model, ollama_scan),
+                "ready": _choice_ready(model, ollama_scan, settings),
                 "size": choice_disk_size(model),
             }
             for model in choices_models
@@ -255,12 +319,29 @@ def selection_view(settings) -> dict[str, Any]:
                 "choices": choices,
             }
         )
-    return {"backend": backend, "stages": stages}
+    return {
+        "backend": backend,
+        "stages": stages,
+        "storyboard_api": {
+            "base": api_host,
+            "key_set": bool(api_secret),
+            # 不回传完整密钥；网页只显示是否已保存，改密时再重填
+            "key_hint": ("*" * min(8, len(api_secret))) if api_secret else "",
+            "ready": api_ok,
+            "detail": api_detail,
+        },
+    }
 
 
-def save_selection(path: Path, selections: dict[str, str]) -> None:
-    """把阶段选择写回 config.json。只改模型字段，其它键原样保留。值为短 id。"""
-    if not selections:
+def save_selection(
+    path: Path,
+    selections: dict[str, str],
+    *,
+    api_base: str | None = None,
+    api_key_value: str | None = None,
+) -> None:
+    """把阶段选择写回 config.json。只改模型字段（及可选的外部 API 字段），其它键原样保留。"""
+    if not selections and api_base is None and api_key_value is None:
         raise SystemExit("没有要保存的模型选择")
     data: dict[str, Any] = {}
     if path.exists():
@@ -273,5 +354,15 @@ def save_selection(path: Path, selections: dict[str, str]) -> None:
     for stage, raw in selections.items():
         model = resolve_stage_model(stage, raw)
         data[STAGE_FIELDS[stage]] = model.id
+    if api_base is not None:
+        text = str(api_base or "").strip().rstrip("/")
+        if text:
+            from pipeline.backends.openai_storyboard import validate_api_base
+
+            text = validate_api_base(text)
+        data["llm_api_base"] = text
+    if api_key_value is not None:
+        # 空字符串表示清空；网页可传 null/省略表示「不改已有密钥」
+        data["llm_api_key"] = str(api_key_value or "").strip()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

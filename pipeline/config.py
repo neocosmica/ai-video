@@ -36,9 +36,17 @@ class Settings:
     video_low_ram: bool = True
     max_shots: int = 16
     # 小说→分镜：Qwen3-4B Instruct 4bit ≈ 3.3 GB，16 GB 统一内存可跑
+    # 也可填 ollama:<名> 或 api:<名>（OpenAI 兼容外部接口）
     llm_model: str = "qwen3-4b-instruct-4bit"
-    # 短篇分镜 JSON 通常 1–2k tokens；过大只会拖慢首跑
-    llm_max_tokens: int = 2048
+    # api: 分镜用的 OpenAI 兼容地址与密钥；环境变量可覆盖
+    llm_api_base: str = ""
+    llm_api_key: str = ""
+    # 短篇分镜 JSON 通常 1–2k tokens；含思考时总上限要更大
+    llm_max_tokens: int = 8192
+    # 思考阶段硬上限（token）；超出则强制 </think> 后继续写 JSON
+    llm_think_max_tokens: int = 1536
+    # 思考强度：low / medium / high（API/Ollama 走原生参数；本机 MLX 主要靠额度+提示）
+    llm_reasoning_effort: str = "low"
     llm_temperature: float = 0.3
     tts_model: str = "qwen3-tts-1.7b-customvoice-8bit"
     music_model: str = "musicgen-small"

@@ -11,6 +11,9 @@
 分镜还可以写成 ``ollama:<模型名>``（例如 ``ollama:qwen2.5:7b``）。
 这类条目不在下面的静态目录里，由本机已下载的 Ollama 模型现扫出来，
 推理走 Ollama，不进 Hugging Face 下载清单。
+
+分镜也可以写成 ``api:<模型名>``（例如 ``api:deepseek-chat``），走 OpenAI 兼容的
+外部聊天接口；``llm_api_base`` / ``llm_api_key`` 另存，不进下载清单。
 """
 
 from __future__ import annotations
@@ -82,6 +85,8 @@ class StageModel:
     accepts_custom_repo: bool = False
     # mflux ModelConfig 的方法名。空则沿用 Klein 4B。
     variant: str = ""
+    # False：仍可 resolve / 下载，但不出现在网页阶段下拉里（对白三件套的 Base/VoiceDesign）
+    selectable: bool = True
 
 
 _LTX_ALLOW = (
@@ -355,40 +360,153 @@ _CATALOG: dict[str, tuple[StageModel, ...]] = {
         StageModel(
             stage="tts",
             id="qwen3-tts-1.7b-customvoice-8bit",
-            label="Qwen3-TTS 1.7B CustomVoice 8-bit",
+            label="Qwen3-TTS 1.7B 8-bit（预设+克隆+造声）",
             backend="mlx",
             runtime="mlx_tts",
             repo="mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit",
             aliases=("mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit",),
-            note="默认。音色 Serena / Vivian / Dylan / Uncle_Fu / Eric",
+            note="默认。一选三件套：CustomVoice 预设 + Base 克隆 + VoiceDesign 造声",
             accepts_custom_repo=True,
             downloads=(
                 WeightSpec(
                     id="tts",
-                    label="对白 TTS Qwen3-TTS",
+                    label="预设音色 CustomVoice",
                     repo="mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit",
                     weight_globs=("model*.safetensors",),
                     approx_bytes=_gb(3.2),
+                ),
+                WeightSpec(
+                    id="tts-base",
+                    label="参考音频克隆 Base",
+                    repo="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+                    weight_globs=("model*.safetensors",),
+                    approx_bytes=_gb(3.1),
+                ),
+                WeightSpec(
+                    id="tts-voicedesign",
+                    label="文字造声 VoiceDesign",
+                    repo="mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit",
+                    weight_globs=("model*.safetensors",),
+                    approx_bytes=_gb(3.1),
                 ),
             ),
         ),
         StageModel(
             stage="tts",
             id="qwen3-tts-1.7b-customvoice-bf16",
-            label="Qwen3-TTS 1.7B CustomVoice bf16",
+            label="Qwen3-TTS 1.7B bf16（预设+克隆+造声）",
             backend="mlx",
             runtime="mlx_tts",
             repo="mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16",
             aliases=("mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16",),
-            note="32 GB 推荐。同一套音色，bf16",
+            note="32 GB 推荐。一选三件套 bf16",
             accepts_custom_repo=True,
             downloads=(
                 WeightSpec(
                     id="tts",
-                    label="对白 TTS Qwen3-TTS bf16",
+                    label="预设音色 CustomVoice bf16",
                     repo="mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16",
                     weight_globs=("model*.safetensors",),
                     approx_bytes=_gb(4.8),
+                ),
+                WeightSpec(
+                    id="tts-base",
+                    label="参考音频克隆 Base bf16",
+                    repo="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
+                    weight_globs=("model*.safetensors",),
+                    approx_bytes=_gb(4.5),
+                ),
+                WeightSpec(
+                    id="tts-voicedesign",
+                    label="文字造声 VoiceDesign bf16",
+                    repo="mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+                    weight_globs=("model*.safetensors",),
+                    approx_bytes=_gb(4.5),
+                ),
+            ),
+        ),
+        # 下列条目不出现在网页下拉：角色选克隆/造声时由 companion_tts_id 解析加载
+        StageModel(
+            stage="tts",
+            id="qwen3-tts-1.7b-base-8bit",
+            label="Qwen3-TTS 1.7B Base 8-bit",
+            backend="mlx",
+            runtime="mlx_tts",
+            repo="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+            aliases=("mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",),
+            note="内部：参考音频克隆",
+            accepts_custom_repo=True,
+            selectable=False,
+            downloads=(
+                WeightSpec(
+                    id="tts",
+                    label="对白 TTS Base",
+                    repo="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+                    weight_globs=("model*.safetensors",),
+                    approx_bytes=_gb(3.1),
+                ),
+            ),
+        ),
+        StageModel(
+            stage="tts",
+            id="qwen3-tts-1.7b-base-bf16",
+            label="Qwen3-TTS 1.7B Base bf16",
+            backend="mlx",
+            runtime="mlx_tts",
+            repo="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
+            aliases=("mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",),
+            note="内部：参考音频克隆 bf16",
+            accepts_custom_repo=True,
+            selectable=False,
+            downloads=(
+                WeightSpec(
+                    id="tts",
+                    label="对白 TTS Base bf16",
+                    repo="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
+                    weight_globs=("model*.safetensors",),
+                    approx_bytes=_gb(4.5),
+                ),
+            ),
+        ),
+        StageModel(
+            stage="tts",
+            id="qwen3-tts-1.7b-voicedesign-8bit",
+            label="Qwen3-TTS 1.7B VoiceDesign 8-bit",
+            backend="mlx",
+            runtime="mlx_tts",
+            repo="mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit",
+            aliases=("mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit",),
+            note="内部：文字造声",
+            accepts_custom_repo=True,
+            selectable=False,
+            downloads=(
+                WeightSpec(
+                    id="tts",
+                    label="对白 TTS VoiceDesign",
+                    repo="mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit",
+                    weight_globs=("model*.safetensors",),
+                    approx_bytes=_gb(3.1),
+                ),
+            ),
+        ),
+        StageModel(
+            stage="tts",
+            id="qwen3-tts-1.7b-voicedesign-bf16",
+            label="Qwen3-TTS 1.7B VoiceDesign bf16",
+            backend="mlx",
+            runtime="mlx_tts",
+            repo="mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+            aliases=("mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",),
+            note="内部：文字造声 bf16",
+            accepts_custom_repo=True,
+            selectable=False,
+            downloads=(
+                WeightSpec(
+                    id="tts",
+                    label="对白 TTS VoiceDesign bf16",
+                    repo="mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+                    weight_globs=("model*.safetensors",),
+                    approx_bytes=_gb(4.5),
                 ),
             ),
         ),
@@ -452,6 +570,11 @@ def choice_disk_size(model: StageModel) -> str:
     parts = [item for item in model.downloads if item.approx_bytes > 0]
     if not parts:
         return ""
+    # 对白三件套：合计体积，避免下拉里一行拆成三个长标签
+    pack_ids = {item.id for item in parts}
+    if {"tts", "tts-base", "tts-voicedesign"} <= pack_ids:
+        total = sum(item.approx_bytes for item in parts)
+        return f"{format_bytes(total)}（预设+克隆+造声）"
     if len(parts) == 1:
         return format_bytes(parts[0].approx_bytes)
     names = {"gemma": "Gemma", "t5": "T5"}
@@ -462,16 +585,20 @@ def choice_disk_size(model: StageModel) -> str:
     return f"{main} + {rest}"
 
 
-def models_for(stage: str) -> tuple[StageModel, ...]:
+def models_for(stage: str, *, selectable_only: bool = False) -> tuple[StageModel, ...]:
     try:
-        return _CATALOG[stage]
+        items = _CATALOG[stage]
     except KeyError as exc:
         known = "、".join(STAGES)
         raise SystemExit(f"未知阶段 {stage!r}（可选 {known}）") from exc
+    if selectable_only:
+        return tuple(model for model in items if model.selectable)
+    return items
 
 
 def default_model(stage: str) -> StageModel:
-    return models_for(stage)[0]
+    visible = models_for(stage, selectable_only=True)
+    return visible[0] if visible else models_for(stage)[0]
 
 
 def weight_by_id(model: StageModel, weight_id: str) -> WeightSpec:
@@ -482,8 +609,11 @@ def weight_by_id(model: StageModel, weight_id: str) -> WeightSpec:
 
 
 _OLLAMA_PREFIX = "ollama:"
+_API_PREFIX = "api:"
 # 与 ollama list 里的名字对齐：qwen2.5:7b、library 外的 namespace/name:tag、hf.co/...
 _OLLAMA_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,200}$")
+# OpenAI 兼容模型名：deepseek-chat、gpt-4o-mini、vendor/model
+_API_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,200}$")
 
 
 def ollama_model_name(raw: str) -> str:
@@ -492,6 +622,16 @@ def ollama_model_name(raw: str) -> str:
     if not name or ".." in name or not _OLLAMA_NAME.fullmatch(name):
         raise SystemExit(
             f"无效的 Ollama 模型名 {raw!r}。应写成 ollama:模型名，例如 ollama:qwen2.5:7b。"
+        )
+    return name
+
+
+def api_model_name(raw: str) -> str:
+    """``api:deepseek-chat`` → ``deepseek-chat``。不是这个前缀时不要调。"""
+    name = (raw or "").strip()[len(_API_PREFIX) :].strip()
+    if not name or ".." in name or not _API_NAME.fullmatch(name):
+        raise SystemExit(
+            f"无效的外部 API 模型名 {raw!r}。应写成 api:模型名，例如 api:deepseek-chat。"
         )
     return name
 
@@ -507,6 +647,21 @@ def make_ollama_model(name: str, *, label: str = "", note: str = "") -> StageMod
         repo=name,
         downloads=(),
         note=note or "本机 Ollama 已下载的模型。分镜推理走 Ollama，不下载 Hugging Face 权重。",
+    )
+
+
+def make_api_model(name: str, *, label: str = "", note: str = "") -> StageModel:
+    """分镜走 OpenAI 兼容外部 API。没有本机权重，下载清单为空。"""
+    return StageModel(
+        stage="storyboard",
+        id=f"{_API_PREFIX}{name}",
+        label=label or f"外部 API · {name}",
+        backend="openai",
+        runtime="openai",
+        repo=name,
+        downloads=(),
+        note=note
+        or "OpenAI 兼容接口。填 Base URL 与 API Key；分镜不下载 Hugging Face 权重。",
     )
 
 
@@ -550,6 +705,8 @@ def resolve_stage_model(stage: str, raw: str | None) -> StageModel:
         return models[0]
     if stage == "storyboard" and text.startswith(_OLLAMA_PREFIX):
         return make_ollama_model(ollama_model_name(text))
+    if stage == "storyboard" and text.startswith(_API_PREFIX):
+        return make_api_model(api_model_name(text))
     for model in models:
         if text == model.id or text == model.repo or text in model.aliases:
             return model
@@ -626,6 +783,11 @@ def selftest_catalog() -> None:
     assert "Gemma" in choice_disk_size(resolve_stage_model("video", "ltx-2.3-q4"))
     assert "Gemma" not in choice_disk_size(resolve_stage_model("video", "ltx-2.5-q4"))
     assert "T5" in choice_disk_size(resolve_stage_model("music", "musicgen-small"))
+    tts_pack = resolve_stage_model("tts", "qwen3-tts-1.7b-customvoice-8bit")
+    assert "预设+克隆+造声" in choice_disk_size(tts_pack)
+    assert all(m.selectable for m in models_for("tts", selectable_only=True))
+    assert any(not m.selectable for m in models_for("tts"))
+    assert len(models_for("tts", selectable_only=True)) == 2
 
     ollama = resolve_stage_model("storyboard", "ollama:qwen2.5:7b")
     assert ollama.runtime == "ollama" and ollama.backend == "ollama"
@@ -644,6 +806,22 @@ def selftest_catalog() -> None:
         raise AssertionError("越界的 ollama 模型名应失败")
     except SystemExit as exc:
         assert "Ollama" in str(exc)
+
+    api = resolve_stage_model("storyboard", "api:deepseek-chat")
+    assert api.runtime == "openai" and api.backend == "openai"
+    assert api.id == "api:deepseek-chat" and api.repo == "deepseek-chat"
+    assert api.downloads == ()
+    assert resolve_stage_model("storyboard", "api:openai/gpt-4o-mini").repo == "openai/gpt-4o-mini"
+    try:
+        resolve_stage_model("storyboard", "api:")
+        raise AssertionError("空的 api 模型名应失败")
+    except SystemExit as exc:
+        assert "外部 API" in str(exc)
+    try:
+        resolve_stage_model("storyboard", "api:../secret")
+        raise AssertionError("越界的 api 模型名应失败")
+    except SystemExit as exc:
+        assert "外部 API" in str(exc)
     try:
         resolve_stage_model("images", "some-org/not-flux")
         raise AssertionError("静帧不应接受任意仓库")
@@ -682,6 +860,11 @@ def selftest_catalog() -> None:
     assert "mlx-community/Qwen3-4B-Instruct-2507-4bit" not in ollama_repos
     assert all(not str(repo).startswith("ollama:") for repo in ollama_repos)
 
+    via_api = Settings(llm_model="api:deepseek-chat")
+    api_repos = [item["repo"] for item in download_specs(via_api)]
+    assert "mlx-community/Qwen3-4B-Instruct-2507-4bit" not in api_repos
+    assert all(not str(repo).startswith("api:") for repo in api_repos)
+
     q8 = Settings(video_model="ltx-2.3-q8", music_model="musicgen-medium")
     picked = [item["repo"] for item in download_specs(q8)]
     assert "dgrauet/ltx-2.3-mlx-q8" in picked
@@ -711,6 +894,8 @@ def selftest_catalog() -> None:
         assert info.name == "mlx" and info.is_mlx
         picked_ollama = bind(Settings(llm_model="ollama:qwen2.5:7b"), "storyboard")
         assert picked_ollama.runtime == "ollama" and picked_ollama.backend == "ollama"
+        picked_api = bind(Settings(llm_model="api:deepseek-chat"), "storyboard")
+        assert picked_api.runtime == "openai" and picked_api.backend == "openai"
         try:
             resolve_backend("cuda")
             raise AssertionError("未注册的 cuda 后端应拒绝")
@@ -741,6 +926,17 @@ def selftest_catalog() -> None:
         saved = json.loads(path.read_text(encoding="utf-8"))
         assert saved["llm_model"] == "ollama:qwen2.5:7b"
         assert saved["video_model"] == "ltx-2.3-q8"
+        save_selection(
+            path,
+            {"storyboard": "api:deepseek-chat"},
+            api_base="https://api.deepseek.com/v1",
+            api_key_value="sk-test",
+        )
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert saved["llm_model"] == "api:deepseek-chat"
+        assert saved["llm_api_base"] == "https://api.deepseek.com/v1"
+        assert saved["llm_api_key"] == "sk-test"
         loaded = Settings.load(path)
         assert resolve_stage_model("video", loaded.video_model).repo == "dgrauet/ltx-2.3-mlx-q8"
-        assert resolve_stage_model("storyboard", loaded.llm_model).runtime == "ollama"
+        assert resolve_stage_model("storyboard", loaded.llm_model).runtime == "openai"
+        assert loaded.llm_api_base == "https://api.deepseek.com/v1"

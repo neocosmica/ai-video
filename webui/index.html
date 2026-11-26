@@ -45,8 +45,26 @@
         <div id="disk-banner-msg" class="setup-msg"></div>
       </div>
       <details class="model-picks" id="model-picks">
-        <summary>各阶段模型 <span class="hint">分镜可选本机 Ollama 已下载的模型。</span> <span id="model-disk-hint" class="hint"></span></summary>
+        <summary>各阶段模型 <span class="hint">分镜可选本机 Ollama，也可填入 OpenAI 兼容外部 API。</span> <span id="model-disk-hint" class="hint"></span></summary>
         <div id="model-grid" class="model-grid"></div>
+        <div class="model-api" id="model-api">
+          <div class="model-api-head">外部 API（OpenAI 兼容，仅分镜）</div>
+          <div class="model-api-grid">
+            <label>Base URL
+              <input id="model-api-base" placeholder="https://api.deepseek.com/v1" autocomplete="off" />
+            </label>
+            <label>API Key
+              <input id="model-api-key" type="password" placeholder="留空则保留已保存的密钥" autocomplete="off" />
+            </label>
+            <label>模型名
+              <input id="model-api-model" placeholder="deepseek-chat" autocomplete="off" />
+            </label>
+          </div>
+          <div class="model-api-actions">
+            <button type="button" id="model-api-apply" class="ghost">用这个外部 API</button>
+            <span id="model-api-hint" class="hint"></span>
+          </div>
+        </div>
         <div class="model-actions">
           <span id="model-msg" class="hint"></span>
           <span id="model-disk" class="hint model-disk"></span>
@@ -335,7 +353,7 @@
     <section class="rerun-section" id="rerun-post-sec">
       <h4>
         <span>后置</span>
-        <span class="hint">传递影响 · 可选 · 未勾选仍会过时</span>
+        <span class="hint">传递影响 · 可选 · 未勾选也会在启动时清除</span>
         <label class="rerun-all" id="rerun-posts-all-wrap" hidden>
           <input type="checkbox" id="rerun-posts-all" aria-controls="rerun-posts">
           <span id="rerun-posts-all-text">全选</span>
@@ -343,7 +361,7 @@
       </h4>
       <div id="rerun-posts" class="rerun-list"></div>
     </section>
-    <p class="hint rerun-foot">确认后加入左边待跑队列（自动补缺失前置、去重）；点「启动任务」再跑。未勾选的后置会与新结果不一致。</p>
+    <p class="hint rerun-foot">确认后加入左边待跑队列（自动补缺失前置、去重）；点「启动任务」再跑。未勾选的后置文件也会在启动时清除。</p>
     <div class="rerun-actions">
       <button type="submit" value="cancel" class="ghost" id="rerun-cancel">取消</button>
       <button type="submit" value="ok" class="primary" id="rerun-ok">加入待跑队列</button>

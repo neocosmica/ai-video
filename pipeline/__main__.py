@@ -139,6 +139,10 @@ def cmd_doctor(_: argparse.Namespace) -> None:
         from pipeline.backends.ollama_storyboard import status_line
 
         print(status_line(story_model.repo))
+    elif story_model is not None and story_model.runtime == "openai":
+        from pipeline.backends.openai_storyboard import status_line as api_status_line
+
+        print(api_status_line(story_model.repo, settings))
     else:
         llm_snap = resolve_snapshot(llm_repo)
         llm_ok, llm_detail = snapshot_ready(llm_snap, weight_globs=("model*.safetensors",))
@@ -245,6 +249,15 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     assert len(chunks) == 2, chunks
     data = extract_json("说明\n```json\n{\"shots\": []}\n```")
     assert data == {"shots": []}
+    from pipeline.util import strip_think
+
+    assert strip_think("<think>草稿</think>\n{\"ok\":1}") == "{\"ok\":1}"
+    assert strip_think("<think>未闭合思考还在继续") == ""
+    try:
+        extract_json("<think>Thinking Process:\n1. plan…")
+        raise AssertionError("截断思考应判为无 JSON")
+    except ValueError as exc:
+        assert "没有返回 JSON" in str(exc)
     lines = extract_novel_dialogues('甲说：“你好。”乙回「在呢」。又说：“你好。”')
     assert lines == ["你好。", "在呢"], lines
     # 一句台词按标点拆到相邻镜头，拼回去仍算覆盖
@@ -1013,6 +1026,7 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     from pipeline.artifact_plan import selftest_web_edges
     from pipeline.backends.catalog import selftest_catalog
     from pipeline.backends.ollama_storyboard import selftest_ollama_storyboard
+    from pipeline.backends.openai_storyboard import selftest_openai_storyboard
     from pipeline.bootstrap import selftest_cancel, selftest_download_progress, selftest_recheck
     from pipeline.disk_space import selftest_disk_space
     from pipeline.model_cache import selftest_model_cache
@@ -1021,6 +1035,7 @@ def cmd_selftest(_: argparse.Namespace) -> None:
     selftest_web_edges()
     selftest_catalog()
     selftest_ollama_storyboard()
+    selftest_openai_storyboard()
     selftest_model_cache()
     selftest_disk_space()
     selftest_recheck()

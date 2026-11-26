@@ -570,13 +570,23 @@ def _summary(target: dict, prereqs: list[dict], posts: list[dict]) -> str:
     if posts:
         chosen = [p["label"] for p in posts if p.get("suggested")]
         if target.get("kind") == "storyboard":
-            parts.append("请先只生成分镜。分镜写完后，再单独添加静帧、配音、视频、配乐或成片")
+            parts.append(
+                "请先只生成分镜。启动时会清除现有静帧、配音、视频、配乐与成片；"
+                "分镜写完后，再单独添加后置产物"
+            )
         elif len(chosen) == len(posts):
             parts.append("后置默认全选（可取消）：" + "、".join(chosen))
         elif not chosen:
-            parts.append("后置默认全不选（可勾选）：" + "、".join(p["label"] for p in posts))
+            parts.append(
+                "后置默认全不选（可勾选；未勾选也会在启动时清除）："
+                + "、".join(p["label"] for p in posts)
+            )
         else:
-            parts.append("后置默认勾选：" + "、".join(chosen))
+            parts.append(
+                "后置默认勾选："
+                + "、".join(chosen)
+                + "；未勾选也会在启动时清除"
+            )
     return "；".join(parts)
 
 
@@ -610,6 +620,84 @@ def clear_nodes(out: str | Path, nodes: Iterable[dict | tuple[str, str]]) -> lis
                     except ValueError:
                         removed.append(str(extra))
                     extra.unlink()
+    return removed
+
+
+def force_clear_nodes(
+    out: str | Path,
+    force_items: Iterable[dict],
+) -> list[tuple[str, str]]:
+    """强制重做项 + 后向传递闭包（不含强制项自身时也会列出后继）。
+
+    未勾选的后置同样列入：启动时清掉，避免磁盘上留陈旧产物。
+    """
+    story = _load_story(out, optional=True)
+    seen: set[str] = set()
+    ordered: list[tuple[str, str]] = []
+
+    def _add(kind: str, nid: str = "") -> None:
+        kind = str(kind or "").strip()
+        nid = str(nid or "").strip()
+        if not kind or kind not in KINDS:
+            return
+        key = _node_key(kind, nid)
+        if key in seen:
+            return
+        seen.add(key)
+        ordered.append((kind, nid))
+
+    for raw in force_items or []:
+        if not isinstance(raw, dict):
+            continue
+        kind = str(raw.get("kind") or "").strip()
+        nid = str(raw.get("id") or "").strip()
+        if not kind:
+            continue
+        _add(kind, nid)
+        if kind == "storyboard":
+            # 分镜重写后镜头 id 可能全变；后继用现有图枚举，孤儿由 clear_for_force_rerun 整段清
+            for pk, pid in _reachable(story, out, ("storyboard", ""), forward=True):
+                _add(pk, pid)
+            continue
+        try:
+            for pk, pid in _reachable(story, out, (kind, nid), forward=True):
+                _add(pk, pid)
+        except Exception:
+            continue
+    return ordered
+
+
+def clear_for_force_rerun(
+    out: str | Path,
+    force_items: Iterable[dict],
+) -> list[str]:
+    """单跑启动前：清掉强制项及其全部后向受影响文件。
+
+    - 普通产物：按依赖图后向闭包删文件（未勾选后置也删）
+    - 含分镜：额外按阶段清空 images/audio/videos/music/assemble，含旧镜头 id 孤儿
+    """
+    items = [it for it in (force_items or []) if isinstance(it, dict) and str(it.get("kind") or "").strip()]
+    if not items:
+        return []
+
+    removed: list[str] = []
+    has_storyboard = any(str(it.get("kind") or "").strip() == "storyboard" for it in items)
+
+    if has_storyboard:
+        from pipeline.projects import clear_artifacts
+
+        # 分镜会重写镜头表：下游过程产物整段作废（保留 work/webui）
+        removed.extend(
+            clear_artifacts(
+                out,
+                stages=["images", "audio", "videos", "music", "assemble"],
+            )
+        )
+        removed.extend(clear_nodes(out, [{"kind": "storyboard", "id": ""}]))
+        return removed
+
+    nodes = [{"kind": k, "id": i} for k, i in force_clear_nodes(out, items)]
+    removed.extend(clear_nodes(out, nodes))
     return removed
 
 
@@ -1005,6 +1093,41 @@ def selftest_web_edges() -> None:
         }
         regen = plan_rerun(film, kind="storyboard")
         assert regen["ok"] and "请先只生成分镜" in regen["summary"], regen
+        assert "启动时会清除" in (regen.get("summary") or ""), regen
+
+        # 单跑启动前：未勾选后置也要清；分镜重跑清掉孤儿镜头产物
+        from pipeline.artifact_plan import clear_for_force_rerun, force_clear_nodes
+
+        stale_clip = artifacts_sub(film, "clips", "s002.mp4")
+        stale_final = film / "final.mp4"
+        stale_clip.parent.mkdir(parents=True, exist_ok=True)
+        stale_clip.write_bytes(b"old-clip")
+        stale_final.write_bytes(b"old-final")
+        voice_force = force_clear_nodes(film, [{"kind": "voice", "id": "s001"}])
+        assert ("voice", "s001") in voice_force
+        assert ("clip", "s001") in voice_force
+        assert ("music", "") in voice_force
+        assert ("final", "") in voice_force
+        clear_for_force_rerun(film, [{"kind": "voice", "id": "s001"}])
+        assert not (artifacts_sub(film, "audio", "voice", "s001.wav")).is_file()
+        assert not (artifacts_sub(film, "clips", "s001.mp4")).is_file()
+        assert not (artifacts_sub(film, "audio", "bgm.wav")).is_file()
+        assert not stale_final.is_file()
+        # 未在 voice 后向闭包里的 s002 视频应保留
+        assert stale_clip.is_file()
+
+        orphan = artifacts_sub(film, "frames", "s999.png")
+        orphan.parent.mkdir(parents=True, exist_ok=True)
+        orphan.write_bytes(b"orphan")
+        portrait = artifacts_sub(film, "characters", "lin.png")
+        portrait.parent.mkdir(parents=True, exist_ok=True)
+        portrait.write_bytes(b"face")
+        clear_for_force_rerun(film, [{"kind": "storyboard", "id": ""}])
+        assert not orphan.is_file()
+        assert not portrait.is_file()
+        assert not stale_clip.is_file()
+        assert not (film / "storyboard.json").is_file()
+        (film / "storyboard.json").write_text(json.dumps(story, ensure_ascii=False), encoding="utf-8")
 
         assert queue_block_reason(film, [
             {"kind": "storyboard", "id": "", "label": "分镜"},

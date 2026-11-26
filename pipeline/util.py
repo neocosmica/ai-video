@@ -140,7 +140,12 @@ def has_cjk(text: str) -> bool:
 
 
 def strip_think(text: str) -> str:
+    # Qwen 开 think 时：开标签在 prompt 里，模型输出常是「推理…</think>\n\n正文」
+    if "</think>" in text:
+        text = text.split("</think>")[-1]
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+    # 触顶截断时常只剩未闭合 <think>…，整段丢掉以免误当成正文
+    text = re.sub(r"<think>.*\Z", "", text, flags=re.S)
     return text.replace("<think>", "").replace("</think>", "").strip()
 
 
@@ -152,7 +157,8 @@ def extract_json(text: str) -> dict:
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start < 0 or end <= start:
-        raise ValueError("模型没有返回 JSON")
+        hint = "（输出像被截断或只含思考，没有完整 JSON）" if text.strip() else ""
+        raise ValueError(f"模型没有返回 JSON{hint}")
     blob = cleaned[start : end + 1]
     blob = re.sub(r",\s*([}\]])", r"\1", blob)
     data = json.loads(blob)

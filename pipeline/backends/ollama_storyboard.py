@@ -233,13 +233,19 @@ def _num_ctx(system: str, user: str, max_tokens: int) -> int:
 
 
 class OllamaStoryboardLLM:
-    def __init__(self, spec: StageModel):
+    def __init__(self, spec: StageModel, *, reasoning_effort: str = "low"):
         if spec.runtime != "ollama":
             raise SystemExit(f"分镜运行时不是 ollama：{spec.runtime}")
         self.spec = spec
         self.name = spec.repo
         self.host = ollama_base_url()
-        print(f"加载分镜 LLM：{spec.label}（Ollama {self.name} @ {self.host}）", flush=True)
+        effort = str(reasoning_effort or "low").strip().lower()
+        self.reasoning_effort = effort if effort in {"low", "medium", "high"} else "low"
+        print(
+            f"加载分镜 LLM：{spec.label}（Ollama {self.name} @ {self.host}，"
+            f"think={self.reasoning_effort}）",
+            flush=True,
+        )
         scan = scan_local_models()
         if not scan.online:
             raise SystemExit(
@@ -251,7 +257,15 @@ class OllamaStoryboardLLM:
                 f"Ollama 里没有模型 {self.name}。当前已下载：{names}。"
             )
 
-    def complete(self, *, system: str, user: str, max_tokens: int, temperature: float) -> str:
+    def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int,
+        temperature: float,
+        think_max_tokens: int | None = None,  # noqa: ARG002 — 与 MLX 签名对齐
+    ) -> str:
         payload = {
             "model": self.name,
             "messages": [
@@ -259,14 +273,15 @@ class OllamaStoryboardLLM:
                 {"role": "user", "content": user},
             ],
             "stream": True,
-            "think": False,
+            # 新版支持 low/medium/high；旧版不认字符串时回退 true / 去掉 think
+            "think": self.reasoning_effort,
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens,
                 "num_ctx": _num_ctx(system, user, max_tokens),
             },
         }
-        print("Ollama 生成中…", flush=True)
+        print(f"Ollama 生成中（think={self.reasoning_effort}）…", flush=True)
         try:
             resp_ctx = self._open_chat(payload)
         except urllib.error.URLError as exc:
@@ -284,12 +299,21 @@ class OllamaStoryboardLLM:
         return text
 
     def _open_chat(self, payload: dict):
-        """旧版 Ollama 不认识 ``think`` 时，去掉该字段再试一次。"""
+        """旧版 Ollama：不认 think 字符串则改 true；再不认则去掉 think。"""
         try:
             return _post_json(f"{self.host}/api/chat", payload, _CHAT_TIMEOUT)
         except urllib.error.HTTPError as exc:
             message = _http_error_message(exc)
             if "think" in payload and exc.code == 400 and "think" in message.lower():
+                think = payload.get("think")
+                if isinstance(think, str):
+                    retry = dict(payload)
+                    retry["think"] = True
+                    try:
+                        return _post_json(f"{self.host}/api/chat", retry, _CHAT_TIMEOUT)
+                    except urllib.error.HTTPError as again:
+                        message = _http_error_message(again)
+                        exc = again
                 retry = {key: value for key, value in payload.items() if key != "think"}
                 try:
                     return _post_json(f"{self.host}/api/chat", retry, _CHAT_TIMEOUT)

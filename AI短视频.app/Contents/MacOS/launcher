@@ -157,11 +157,14 @@ if [[ -f "$PID_FILE" ]]; then
   fi
 fi
 
-# 后台起服务（菜单栏「退出」会停掉该进程）；日志进 Application Support
+# 后台起服务（菜单栏「退出」会停掉该进程）；日志进 Application Support。
+# disown：避免本 launcher（App 主可执行文件）退出时，把同作业里的后端一起收掉；
+# 后端里还会 setsid，双保险。
 : >"$LOG"
 nohup "$ROOT/scripts/run.sh" --host "$HOST" --port "$PORT" >>"$LOG" 2>&1 &
 echo $! >"$PID_FILE"
 child_pid="$(cat "$PID_FILE")"
+disown "$child_pid" 2>/dev/null || true
 
 for _ in {1..90}; do
   if ready; then

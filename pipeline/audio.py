@@ -14,10 +14,15 @@ from pipeline.projects import artifacts_sub
 from pipeline.runtime import ensure_runtime_layout
 from pipeline.util import dump_json, frames_for_duration, load_json, resolve, snap_frames, stable_seed
 from pipeline.voices import (
+    VOICE_MODE_CLONE,
+    VOICE_MODE_DESIGN,
+    VOICE_MODE_PRESET,
     default_music_prompt,
+    default_voice_design,
     emotion_instruct,
     infer_gender,
     pick_voice,
+    voice_mode,
 )
 
 
@@ -29,16 +34,37 @@ def _character_map(story: dict) -> dict[str, dict]:
     return out
 
 
-def _speaker_profile(shot: dict, characters: dict[str, dict]) -> dict:
+def _resolve_ref_audio(out: Path, char: dict) -> Path | None:
+    raw = str(char.get("voice_ref") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_absolute():
+        path = out / path
+    return path if path.is_file() else path
+
+
+def _speaker_profile(shot: dict, characters: dict[str, dict], out: Path | None = None) -> dict:
     speaker = str(shot.get("speaker") or "").strip()
     char = characters.get(speaker) or {}
     gender = infer_gender(char.get("appearance", ""), char.get("gender") or shot.get("gender"))
     voice = pick_voice(gender, char.get("voice") or shot.get("voice"), char.get("appearance", ""))
+    mode = voice_mode({**char, "voice": voice})
     emotion = shot.get("emotion") or char.get("emotion") or "calm"
+    design = str(char.get("voice_design") or "").strip()
+    if mode == VOICE_MODE_DESIGN and not design:
+        design = default_voice_design(gender, str(char.get("appearance") or ""), speaker)
+    ref_audio = None
+    if mode == VOICE_MODE_CLONE and out is not None:
+        ref_audio = _resolve_ref_audio(out, char)
     return {
         "speaker": speaker,
         "gender": gender,
         "voice": voice,
+        "voice_mode": mode,
+        "voice_design": design,
+        "voice_ref": str(ref_audio) if ref_audio else str(char.get("voice_ref") or ""),
+        "voice_ref_text": str(char.get("voice_ref_text") or "").strip(),
         "emotion": emotion,
         "instruct": emotion_instruct(str(emotion)),
     }
@@ -237,8 +263,14 @@ def _speak_with_fit(
 
     返回 [(分段文本, wav 路径, 时长)]；第 2 种情况的时长可以超过 max_seconds。
     """
+    mode = profile.get("voice_mode") or VOICE_MODE_PRESET
     audio, sample_rate = speech.synthesize(
-        text=line, speaker=profile["voice"], instruct=profile["instruct"]
+        text=line,
+        speaker=profile["voice"] if mode == VOICE_MODE_PRESET else "",
+        instruct=profile["instruct"],
+        ref_audio=profile.get("voice_ref") or None,
+        ref_text=profile.get("voice_ref_text") or "",
+        voice_design=profile.get("voice_design") or "",
     )
     whole = scratch / f"{shot_id}-whole.wav"
     _save_mono_wav(whole, audio, sample_rate)
@@ -318,7 +350,9 @@ def _generate_dialogue(
             continue
         if wanted is not None and str(shot["id"]) not in wanted:
             continue
-        jobs.append((shot, voice_dir / f"{shot['id']}.wav", _speaker_profile(shot, characters), line))
+        jobs.append(
+            (shot, voice_dir / f"{shot['id']}.wav", _speaker_profile(shot, characters, out), line)
+        )
 
     def _reusable(dest: Path) -> bool:
         """已有 wav 只有在不超单镜时长时才复用。
@@ -354,24 +388,20 @@ def _generate_dialogue(
             if dest.exists()
         ]
 
-    speech = open_speech(settings)
-    try:
-        return _dialogue_jobs(
-            speech,
-            story,
-            jobs,
-            voice_dir=voice_dir,
-            scratch=scratch,
-            max_seconds=max_seconds,
-            force=force,
-            wanted=wanted,
-        )
-    finally:
-        speech.close()
+    return _dialogue_jobs(
+        settings,
+        story,
+        jobs,
+        voice_dir=voice_dir,
+        scratch=scratch,
+        max_seconds=max_seconds,
+        force=force,
+        wanted=wanted,
+    )
 
 
 def _dialogue_jobs(
-    speech,
+    settings,
     story: dict,
     jobs,
     *,
@@ -385,48 +415,65 @@ def _dialogue_jobs(
     # 每个对白镜头的处理结果：单段就是原镜头，多段则是一串子镜头
     by_shot: dict[str, list[dict]] = {}
     split_count = 0
-    for shot, dest, profile, line in jobs:
-        if dest.exists() and not force:
-            # 能走到这里说明长度复核通过（见 _reusable）
-            results.append({"shot_id": shot["id"], "path": str(dest), **profile, "text": line})
-            by_shot[str(shot["id"])] = [shot]
-            continue
-        if dest.exists():
-            # 旧 wav 超长：删掉重念，让 _speak_with_fit 按当前上限切段
-            dest.unlink()
-        print(f"对白 {shot['id']} · {profile['voice']} · {profile['emotion']}：{line}")
-        segments = _speak_with_fit(
-            speech,
-            shot_id=str(shot["id"]),
-            line=line,
-            profile=profile,
-            max_seconds=max_seconds,
-            scratch=scratch,
-        )
-        if len(segments) == 1:
-            text, wav, _ = segments[0]
-            wav.replace(dest)
-            shot["dialogue"] = text
-            results.append({"shot_id": shot["id"], "path": str(dest), **profile, "text": text})
-            by_shot[str(shot["id"])] = [shot]
-            continue
-        # 一句台词放不进一个镜头：拆成相邻子镜头，各段独立配音
-        if wanted is not None:
-            raise SystemExit(
-                f"镜头 {shot['id']} 的台词超过单镜上限，需要拆镜；"
-                "--only 模式不改分镜，请不带 --only 跑 audio（或先在分镜里手工拆好）。"
+    engines: dict[str, object] = {}
+    try:
+        for shot, dest, profile, line in jobs:
+            if dest.exists() and not force:
+                # 能走到这里说明长度复核通过（见 _reusable）
+                results.append({"shot_id": shot["id"], "path": str(dest), **profile, "text": line})
+                by_shot[str(shot["id"])] = [shot]
+                continue
+            if dest.exists():
+                # 旧 wav 超长：删掉重念，让 _speak_with_fit 按当前上限切段
+                dest.unlink()
+            mode = profile.get("voice_mode") or VOICE_MODE_PRESET
+            label = {
+                VOICE_MODE_CLONE: "克隆",
+                VOICE_MODE_DESIGN: "造声",
+            }.get(mode, profile["voice"])
+            print(f"对白 {shot['id']} · {label} · {profile['emotion']}：{line}")
+            if mode not in engines:
+                engines[mode] = open_speech(settings, mode=mode)
+            speech = engines[mode]
+            segments = _speak_with_fit(
+                speech,
+                shot_id=str(shot["id"]),
+                line=line,
+                profile=profile,
+                max_seconds=max_seconds,
+                scratch=scratch,
             )
-        children: list[dict] = []
-        for offset, (text, wav, _) in enumerate(segments, start=1):
-            child = _split_shot(shot, offset, text)
-            child_wav = voice_dir / f"{child['id']}.wav"
-            wav.replace(child_wav)
-            children.append(child)
-            results.append({"shot_id": child["id"], "path": str(child_wav), **profile, "text": text})
-        by_shot[str(shot["id"])] = children
-        split_count += len(children)
-        if dest.exists():
-            dest.unlink()
+            if len(segments) == 1:
+                text, wav, _ = segments[0]
+                wav.replace(dest)
+                shot["dialogue"] = text
+                results.append({"shot_id": shot["id"], "path": str(dest), **profile, "text": text})
+                by_shot[str(shot["id"])] = [shot]
+                continue
+            # 一句台词放不进一个镜头：拆成相邻子镜头，各段独立配音
+            if wanted is not None:
+                raise SystemExit(
+                    f"镜头 {shot['id']} 的台词超过单镜上限，需要拆镜；"
+                    "--only 模式不改分镜，请不带 --only 跑 audio（或先在分镜里手工拆好）。"
+                )
+            children: list[dict] = []
+            for offset, (text, wav, _) in enumerate(segments, start=1):
+                child = _split_shot(shot, offset, text)
+                child_wav = voice_dir / f"{child['id']}.wav"
+                wav.replace(child_wav)
+                children.append(child)
+                results.append(
+                    {"shot_id": child["id"], "path": str(child_wav), **profile, "text": text}
+                )
+            by_shot[str(shot["id"])] = children
+            split_count += len(children)
+            if dest.exists():
+                dest.unlink()
+    finally:
+        for engine in engines.values():
+            close = getattr(engine, "close", None)
+            if callable(close):
+                close()
 
     if split_count:
         rebuilt: list[dict] = []
@@ -693,6 +740,9 @@ def cmd_audio(args: argparse.Namespace) -> None:
             continue
         char.setdefault("gender", item["gender"])
         char.setdefault("voice", item["voice"])
+        char.setdefault("voice_mode", item.get("voice_mode") or VOICE_MODE_PRESET)
+        if item.get("voice_design"):
+            char.setdefault("voice_design", item["voice_design"])
     if not story.get("music_prompt"):
         story["music_prompt"] = manifest["music_prompt"]
     dump_json(story_path, story)

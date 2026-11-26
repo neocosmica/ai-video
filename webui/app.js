@@ -380,6 +380,7 @@ function renderSetupBanner(st) {
     banner.classList.toggle("ready", false);
   }
   picker.classList.toggle("setup-busy", busy || failed || shortSpace || waiting);
+  picker.classList.toggle("setup-installing", busy);
   const pct = Math.max(0, Math.min(100, Number(state.setup.pct) || 0));
   const title = $("#setup-title");
   const pctEl = $("#setup-pct");
@@ -447,6 +448,13 @@ function syncSetupEntry() {
   btn.textContent = failed ? "重试安装" : shortSpace ? "继续安装" : busy ? "正在安装…" : "安装依赖";
   const clean = $("#model-clean");
   if (clean) clean.disabled = busy || clean.dataset.cleaning === "1";
+  $$("#model-grid select").forEach((sel) => { sel.disabled = busy; });
+  const apply = $("#model-api-apply");
+  if (apply) apply.disabled = busy;
+  ["model-api-base", "model-api-key", "model-api-model"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = busy;
+  });
   if (!hint) return;
   if (shortSpace) hint.textContent = "磁盘空间不够，模型还没开始下载。腾出空间或清理未使用模型后，再点继续安装。";
   else if (waiting) hint.textContent = "检查完成，点「安装依赖」才会开始下载。";
@@ -588,7 +596,12 @@ function choiceNote(choice, error) {
 }
 
 function modelOption(item, selected) {
-  const missing = item.ready ? "" : (item.runtime === "ollama" ? "（不在本机）" : "（未下载）");
+  let missing = "";
+  if (!item.ready) {
+    if (item.runtime === "ollama") missing = "（不在本机）";
+    else if (item.runtime === "openai") missing = "（未填齐）";
+    else missing = "（未下载）";
+  }
   const size = choiceSize(item);
   const sizeMark = size ? ` · ${size}` : "";
   const on = item.id === selected ? " selected" : "";
@@ -600,15 +613,60 @@ function modelOptions(stage) {
   const choices = stage.choices || [];
   const known = choices.some((item) => item.id === selected);
   const extra = known ? "" : `<option value="${esc(selected)}" selected>${esc(stage.selected_label || selected)}</option>`;
-  const builtin = choices.filter((item) => item.runtime !== "ollama");
+  const builtin = choices.filter((item) => item.runtime !== "ollama" && item.runtime !== "openai");
   const local = choices.filter((item) => item.runtime === "ollama");
-  if (!local.length) {
-    return builtin.map((item) => modelOption(item, selected)).join("") + extra;
+  const remote = choices.filter((item) => item.runtime === "openai");
+  const selectedKind = String(selected).startsWith("ollama:")
+    ? "ollama"
+    : String(selected).startsWith("api:")
+      ? "api"
+      : "builtin";
+  const parts = [
+    `<optgroup label="内置">${builtin.map((item) => modelOption(item, selected)).join("")}${selectedKind === "builtin" ? extra : ""}</optgroup>`,
+  ];
+  if (local.length || selectedKind === "ollama") {
+    parts.push(
+      `<optgroup label="本机 Ollama">${local.map((item) => modelOption(item, selected)).join("")}${selectedKind === "ollama" ? extra : ""}</optgroup>`
+    );
   }
-  const extraBuiltin = String(selected).startsWith("ollama:") ? "" : extra;
-  const extraLocal = String(selected).startsWith("ollama:") ? extra : "";
-  return `<optgroup label="内置">${builtin.map((item) => modelOption(item, selected)).join("")}${extraBuiltin}</optgroup>`
-    + `<optgroup label="本机 Ollama">${local.map((item) => modelOption(item, selected)).join("")}${extraLocal}</optgroup>`;
+  if (remote.length || selectedKind === "api") {
+    parts.push(
+      `<optgroup label="外部 API">${remote.map((item) => modelOption(item, selected)).join("")}${selectedKind === "api" && !known ? extra : ""}</optgroup>`
+    );
+  }
+  return parts.join("");
+}
+
+function paintStoryboardApiForm(info) {
+  const base = $("#model-api-base");
+  const key = $("#model-api-key");
+  const model = $("#model-api-model");
+  const hint = $("#model-api-hint");
+  const story = (modelCatalog?.stages || []).find((item) => item.stage === "storyboard");
+  const apiInfo = info || modelCatalog?.storyboard_api || {};
+  if (base && document.activeElement !== base) {
+    base.value = apiInfo.base || "";
+  }
+  if (key && document.activeElement !== key && !key.dataset.dirty) {
+    key.value = "";
+    key.placeholder = apiInfo.key_set ? "已保存密钥，留空不改" : "sk-…";
+  }
+  if (model && document.activeElement !== model) {
+    const selected = String(story?.selected || "");
+    model.value = selected.startsWith("api:") ? selected.slice(4) : (model.value || "");
+  }
+  if (hint) {
+    if (apiInfo.detail && String(story?.selected || "").startsWith("api:")) {
+      hint.textContent = apiInfo.detail;
+    } else if (apiInfo.key_set && apiInfo.base) {
+      hint.textContent = `已配置 ${apiInfo.base}`;
+    } else {
+      hint.textContent = "填好后点「用这个外部 API」，会出现在分镜下拉里。";
+    }
+  }
+  const apply = $("#model-api-apply");
+  if (apply) apply.disabled = setupBusy();
+  [base, key, model].forEach((el) => { if (el) el.disabled = setupBusy(); });
 }
 
 async function loadModelPicks() {
@@ -630,8 +688,10 @@ async function loadModelPicks() {
     if (msg && modelCatalog.backend && modelCatalog.backend.error) {
       msg.textContent = modelCatalog.backend.error;
     }
+    paintStoryboardApiForm(modelCatalog.storyboard_api);
     refreshUnusedModels();
     refreshDiskPlan();
+    $$("#model-grid select").forEach((sel) => { sel.disabled = setupBusy(); });
   } catch (err) {
     box.textContent = err.message || "模型列表加载失败";
   }
@@ -861,17 +921,39 @@ function noteForModel(stageName, modelId) {
 }
 
 function modelSaveHint(models, setup) {
-  const ollama = String(models.storyboard || "").startsWith("ollama:");
+  const story = String(models.storyboard || "");
+  const ollama = story.startsWith("ollama:");
+  const remote = story.startsWith("api:");
   const stage = (modelCatalog?.stages || []).find((item) => item.stage === "storyboard");
-  if (ollama && stage?.error) return `已保存。${stage.error}`;
-  if (!setup) return ollama ? "已保存。分镜走本机 Ollama，生成前请让 Ollama 保持运行。" : "已保存。";
+  if ((ollama || remote) && stage?.error) return `已保存。${stage.error}`;
+  const remoteOk = "已保存。分镜走外部 API，不下载本机分镜权重。";
+  const ollamaOk = "已保存。分镜走本机 Ollama，生成前请让 Ollama 保持运行。";
+  if (!setup) {
+    if (remote) return remoteOk;
+    if (ollama) return ollamaOk;
+    return "已保存。";
+  }
   if (setup.status === "need_space") return "已保存。磁盘空间不够，下载还没开始。";
   if (setup.status === "need_install") return "已保存。还缺依赖，点「安装依赖」后再下载。";
   if (setup.status === "failed") return "已保存。依赖检查未通过，见上方提示。";
   if (setup.ready) {
-    return ollama ? "已保存。依赖已就绪。分镜走本机 Ollama，生成前请让 Ollama 保持运行。" : "已保存。依赖与模型已就绪。";
+    if (remote) return `已保存。依赖已就绪。${remoteOk.slice(4)}`;
+    if (ollama) return `已保存。依赖已就绪。${ollamaOk.slice(4)}`;
+    return "已保存。依赖与模型已就绪。";
   }
   return "已保存。正在检查并补齐还没下载的依赖。";
+}
+
+function storyboardApiPayload(force = false) {
+  const base = $("#model-api-base");
+  const key = $("#model-api-key");
+  const story = picksFromForm().storyboard || modelCatalog?.stages?.find((s) => s.stage === "storyboard")?.selected || "";
+  const usingApi = String(story).startsWith("api:");
+  if (!force && !usingApi && !(key && key.dataset.dirty === "1")) return {};
+  const payload = {};
+  if (base) payload.base = base.value.trim();
+  if (key && key.dataset.dirty === "1") payload.key = key.value.trim();
+  return payload;
 }
 
 function picksFromForm() {
@@ -903,20 +985,38 @@ function restoreModelSelects() {
 
 let modelSaveToken = 0;
 
-async function saveModelPicks() {
-  const models = picksFromForm();
-  if (!Object.keys(models).length || !selectionDiffers(models)) return;
+async function saveModelPicks(extra = {}) {
+  const models = { ...picksFromForm(), ...(extra.models || {}) };
+  const apiPayload = { ...storyboardApiPayload(), ...(extra.storyboard_api || {}) };
+  const apiChanged = Object.keys(apiPayload).length > 0;
+  if (!Object.keys(models).length) return;
+  if (!selectionDiffers(models) && !apiChanged && !extra.force) return;
   const token = ++modelSaveToken;
   const msg = $("#model-msg");
   if (msg) msg.textContent = "正在保存…";
   try {
+    const body = { models };
+    if (apiChanged) body.storyboard_api = apiPayload;
     const saved = await api("/api/models", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ models }),
+      body: JSON.stringify(body),
     });
     if (token !== modelSaveToken) return;
     modelCatalog = saved;
+    const key = $("#model-api-key");
+    if (key) {
+      key.value = "";
+      delete key.dataset.dirty;
+    }
+    // 外部 API 新模型要进下拉；顺带对齐其它阶段选中项
+    $$("#model-grid select").forEach((sel) => {
+      const stage = (saved.stages || []).find((item) => item.stage === sel.dataset.stage);
+      if (!stage) return;
+      sel.innerHTML = modelOptions(stage);
+      sel.value = stage.selected;
+    });
+    paintStoryboardApiForm(saved.storyboard_api);
     refreshModelNotes();
     let setup = null;
     try {
@@ -2590,15 +2690,38 @@ const MOTION_LEVEL_OPTIONS = [
   { value: "dynamic", label: "dynamic · 动作/首尾帧" },
 ];
 
-const VOICE_OPTIONS = {
+const VOICE_PRESETS = {
   female: ["Serena", "Vivian"],
   male: ["Dylan", "Uncle_Fu", "Eric"],
+};
+const VOICE_SPECIAL = [
+  { value: "clone", label: "参考音频克隆" },
+  { value: "design", label: "文字造声" },
+];
+const VOICE_OPTIONS = {
+  female: [...VOICE_PRESETS.female, ...VOICE_SPECIAL.map((o) => o.value)],
+  male: [...VOICE_PRESETS.male, ...VOICE_SPECIAL.map((o) => o.value)],
 };
 
 const GENDER_OPTIONS = [
   { value: "female", label: "女" },
   { value: "male", label: "男" },
 ];
+
+function voiceLabel(v) {
+  const key = String(v || "");
+  const special = VOICE_SPECIAL.find((o) => o.value === key);
+  if (special) return special.label;
+  return key;
+}
+
+function voiceModeOf(ch) {
+  const mode = String(ch?.voice_mode || "").toLowerCase();
+  if (mode === "clone" || mode === "design" || mode === "preset") return mode;
+  const v = String(ch?.voice || "").toLowerCase();
+  if (v === "clone" || v === "design") return v;
+  return "preset";
+}
 
 function storyCharacters() {
   return Array.isArray(state.shotSb?.characters) ? state.shotSb.characters : [];
@@ -3604,13 +3727,16 @@ function fillCastSelect(input, field, ch) {
   if (field === "gender") {
     opts = GENDER_OPTIONS.map((o) => ({ value: o.value, label: o.label }));
   } else if (field === "voice") {
-    opts = voiceOptionsFor(ch?.gender).map((v) => ({ value: v, label: v }));
+    opts = voiceOptionsFor(ch?.gender).map((v) => ({ value: v, label: voiceLabel(v) }));
   }
   input.innerHTML = opts.map((o) =>
     `<option value="${esc(o.value)}"${o.value === cur ? " selected" : ""}>${esc(o.label)}</option>`
   ).join("");
   if (cur && !opts.some((o) => o.value === cur)) {
-    input.insertAdjacentHTML("afterbegin", `<option value="${esc(cur)}" selected>${esc(cur)}</option>`);
+    input.insertAdjacentHTML(
+      "afterbegin",
+      `<option value="${esc(cur)}" selected>${esc(voiceLabel(cur))}</option>`,
+    );
   }
 }
 
@@ -3628,8 +3754,20 @@ function castFieldShown(ch, field) {
     return { text: t, empty: !ch.gender };
   }
   if (field === "voice") {
-    const t = ch.voice ? `配音 ${ch.voice}` : "配音";
+    const mode = voiceModeOf(ch);
+    let t = "配音";
+    if (mode === "clone") t = ch.voice_ref ? "配音 · 已上传参考音频" : "配音 · 参考音频克隆";
+    else if (mode === "design") t = ch.voice_design ? "配音 · 文字造声" : "配音 · 文字造声（待写描述）";
+    else if (ch.voice) t = `配音 ${voiceLabel(ch.voice)}`;
     return { text: t, empty: !ch.voice };
+  }
+  if (field === "voice_design") {
+    const t = String(ch.voice_design || "").trim();
+    return { text: t || "音色描述未写", empty: !t };
+  }
+  if (field === "voice_ref_text") {
+    const t = String(ch.voice_ref_text || "").trim();
+    return { text: t || "参考音频原文未写", empty: !t };
   }
   if (field === "appearance") {
     const t = String(ch.appearance || "").trim();
@@ -3668,6 +3806,54 @@ function syncCastDisplays(card) {
   });
   const initial = $(".cast-avatar-fallback", card);
   if (initial) initial.textContent = castInitial(ch);
+  syncCastVoiceExtras(card);
+}
+
+function syncCastVoiceExtras(card) {
+  const ch = liveCastCharacter(card) || card?._ch;
+  if (!ch) return;
+  const mode = voiceModeOf(ch);
+  $$(".cast-voice-panel", card).forEach((panel) => {
+    panel.hidden = panel.dataset.mode !== mode;
+  });
+  const status = $(".cast-ref-status", card);
+  if (status) {
+    status.textContent = ch.voice_ref
+      ? String(ch.voice_ref).split("/").pop()
+      : "未上传";
+  }
+}
+
+async function uploadCastVoiceRef(card, file) {
+  const ch = liveCastCharacter(card);
+  const out = state.currentOut;
+  if (!ch || !out || !file) return;
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  const content_base64 = btoa(binary);
+  const res = await api("/api/voice-ref/upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      out,
+      character_id: ch.id,
+      filename: file.name || "ref.wav",
+      content_base64,
+      ref_text: ch.voice_ref_text || "",
+      update_storyboard: false,
+    }),
+  });
+  ch.voice = "clone";
+  ch.voice_mode = "clone";
+  ch.voice_ref = res.path;
+  syncCastDisplays(card);
+  markShotSbDirty();
+  toast(`已上传参考音频（${formatBytes(res.bytes || file.size)}）`);
 }
 
 function syncCastCardMedia(card, info = {}) {
@@ -3770,16 +3956,26 @@ async function commitCastField(wrap, card, { cancel = false } = {}) {
       changed = true;
     }
   }
-  // 换性别时配音若不在可选列表里，清到默认
+  // 换性别时配音若不在可选列表里，清到默认（clone/design 跨性别保留）
   if (key === "gender" && changed) {
     const voices = voiceOptionsFor(ch.gender);
     if (ch.voice && !voices.includes(ch.voice)) {
       ch.voice = voices[0] || "";
+      ch.voice_mode = "preset";
     } else if (!ch.voice) {
       ch.voice = voices[0] || "";
+      ch.voice_mode = "preset";
+    }
+  }
+  if (key === "voice" && changed) {
+    const mode = voiceModeOf({ voice: ch.voice });
+    ch.voice_mode = mode;
+    if (mode === "preset") {
+      // 切回预设时保留 voice_design / voice_ref，方便再切回去
     }
   }
   syncCastDisplays(card);
+  syncCastVoiceExtras(card);
   if (!changed) return;
   await persistCastChange(key);
 }
@@ -3832,6 +4028,26 @@ function bindCastCard(card, info = {}) {
       rerollCastSeed(card);
     });
   }
+  const refBtn = $(".cast-ref-upload", card);
+  const refFile = $(".cast-ref-file", card);
+  if (refBtn && refFile) {
+    refBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      refFile.click();
+    });
+    refFile.addEventListener("change", async () => {
+      const file = refFile.files && refFile.files[0];
+      refFile.value = "";
+      if (!file) return;
+      try {
+        await uploadCastVoiceRef(card, file);
+      } catch (err) {
+        toast(err.message || String(err), true);
+      }
+    });
+  }
+  syncCastVoiceExtras(card);
   $(".cast-portrait-rerun", card)?.addEventListener("click", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
@@ -3892,6 +4108,25 @@ function castCardHtml(ch, info = {}) {
           <select class="cast-iedit-input" hidden></select>
         </div>
       </div>
+      <div class="cast-voice-extras">
+        <div class="cast-voice-panel" data-mode="clone" ${voiceModeOf(ch) === "clone" ? "" : "hidden"}>
+          <div class="cast-voice-ref-row">
+            <button type="button" class="ghost cast-ref-upload">上传参考音频</button>
+            <input type="file" class="cast-ref-file" accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg" hidden>
+            <span class="hint cast-ref-status">${ch.voice_ref ? esc(String(ch.voice_ref).split("/").pop()) : "未上传"}</span>
+          </div>
+          <div class="cast-iedit" data-f="voice_ref_text" data-multiline data-placeholder="参考音频原文">
+            <div class="cast-iedit-display cast-appearance${!(ch.voice_ref_text || "").trim() ? " empty" : ""}">${esc((ch.voice_ref_text || "").trim() || "参考音频原文未写")}</div>
+            <textarea class="cast-iedit-input" hidden rows="2" placeholder="参考音频里说的原文（必填）"></textarea>
+          </div>
+        </div>
+        <div class="cast-voice-panel" data-mode="design" ${voiceModeOf(ch) === "design" ? "" : "hidden"}>
+          <div class="cast-iedit" data-f="voice_design" data-multiline data-placeholder="音色描述">
+            <div class="cast-iedit-display cast-appearance${!(ch.voice_design || "").trim() ? " empty" : ""}">${esc((ch.voice_design || "").trim() || "音色描述未写")}</div>
+            <textarea class="cast-iedit-input" hidden rows="3" placeholder="英文音色描述（分镜会生成，可改）"></textarea>
+          </div>
+        </div>
+      </div>
       <div class="cast-iedit" data-f="appearance" data-multiline data-placeholder="外貌">
         <div class="cast-iedit-display cast-appearance${appShown.empty ? " empty" : ""}">${esc(appShown.text)}</div>
         <textarea class="cast-iedit-input" hidden rows="3"></textarea>
@@ -3947,7 +4182,9 @@ async function addCastCharacter() {
     id,
     name: "新角色",
     gender: "female",
-    voice: VOICE_OPTIONS.female[0],
+    voice: VOICE_PRESETS.female[0],
+    voice_mode: "preset",
+    voice_design: "",
     appearance: "",
     seed: randomSeed(),
   };
@@ -4682,7 +4919,7 @@ function syncRerunItemMeta(input) {
   const meta = input.closest(".rerun-item")?.querySelector(".ri-meta");
   if (!meta) return;
   const on = input.checked;
-  meta.textContent = on ? "勾选 · 将重做" : "未勾选 · 将过时";
+  meta.textContent = on ? "勾选 · 将重做" : "未勾选 · 启动时清除";
   meta.classList.toggle("stale", !on);
 }
 
@@ -4731,7 +4968,7 @@ function renderRerunItem(node, { required = false, target = false, checked = fal
   } else if (checked) {
     metaHtml = `<div class="ri-meta">勾选 · 将重做</div>`;
   } else {
-    metaHtml = `<div class="ri-meta stale">未勾选 · 将过时</div>`;
+    metaHtml = `<div class="ri-meta stale">未勾选 · 启动时清除</div>`;
   }
   const hint = node.hint && !required && !target
     ? `<div class="ri-hint hint">${esc(node.hint)}</div>`
@@ -4857,6 +5094,10 @@ async function confirmRerunFromDialog() {
     runQueueSig = "";
     renderRunQueue();
     syncRunControls();
+    // 对话框关掉后滚到「启动任务」，方便接着点
+    requestAnimationFrame(() => {
+      $("#start-btn")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
   } catch (err) {
     const errEl = $("#rerun-error");
     if (errEl) {
@@ -5012,10 +5253,50 @@ function bind() {
   });
   $("#model-grid")?.addEventListener("change", (ev) => {
     const sel = ev.target;
-    if (!sel || sel.tagName !== "SELECT") return;
+    if (!sel || sel.tagName !== "SELECT" || setupBusy()) return;
     const note = sel.parentElement?.querySelector(".model-note");
     if (note) note.textContent = noteForModel(sel.dataset.stage, sel.value);
+    if (sel.dataset.stage === "storyboard") {
+      const model = $("#model-api-model");
+      const value = String(sel.value || "");
+      if (model && value.startsWith("api:")) model.value = value.slice(4);
+    }
     saveModelPicks();
+  });
+  $("#model-api-key")?.addEventListener("input", () => {
+    const key = $("#model-api-key");
+    if (key) key.dataset.dirty = "1";
+  });
+  $("#model-api-apply")?.addEventListener("click", () => {
+    if (setupBusy()) return;
+    const name = ($("#model-api-model")?.value || "").trim();
+    const base = ($("#model-api-base")?.value || "").trim();
+    const hint = $("#model-api-hint");
+    if (!name) {
+      if (hint) hint.textContent = "请先填模型名，例如 deepseek-chat。";
+      return;
+    }
+    if (!base) {
+      if (hint) hint.textContent = "请先填 Base URL，例如 https://api.deepseek.com/v1。";
+      return;
+    }
+    const id = `api:${name}`;
+    const sel = $$("#model-grid select").find((el) => el.dataset.stage === "storyboard");
+    if (sel) {
+      if (![...sel.options].some((opt) => opt.value === id)) {
+        const group = [...sel.querySelectorAll("optgroup")].find((g) => g.label === "外部 API")
+          || sel.appendChild(Object.assign(document.createElement("optgroup"), { label: "外部 API" }));
+        group.appendChild(new Option(`外部 API · ${name}`, id, true, true));
+      }
+      sel.value = id;
+      const note = sel.parentElement?.querySelector(".model-note");
+      if (note) note.textContent = noteForModel("storyboard", id);
+    }
+    saveModelPicks({
+      models: { storyboard: id },
+      storyboard_api: storyboardApiPayload(true),
+      force: true,
+    });
   });
   $("#back-to-projects").addEventListener("click", backToProjects);
 }

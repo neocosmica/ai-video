@@ -59,7 +59,8 @@ SCHEMA_HINT = """分镜可由本机 LLM 从小说生成，也可手写/Agent 写
   ]
 }
 
-音色：女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric。情绪写在镜头上，影响 TTS instruct。
+音色：女 Serena/Vivian，男 Dylan/Uncle_Fu/Eric；也可 clone（参考音频）/ design（文字造声）。
+每人都写英文 voice_design（文字造声用）。情绪写在镜头上，影响 TTS instruct。
 约束：竖屏短剧，每镜约 2 秒（空镜）；motion_prompt 与 music_prompt 必须是英文。
 台词长度：**按小说原样写，不要为了时长改写、删字或压短**。配音语速和语气由原文与 emotion 决定，
 镜头时长跟着配音走；一句话太长就按语义在标点处分成相邻几个镜头，让运镜跟得上，但文字不许变。
