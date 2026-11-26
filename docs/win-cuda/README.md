@@ -3,6 +3,10 @@
 本文档对应 `feat/windows-nvidia` 分支：在 Windows 上用 **PyTorch / diffusers 原生 CUDA 栈**
 跑完整流程，Mac 侧 MLX 行为保持不变。
 
+> 想先了解**整体方案**（分层设计、模型选型、技术障碍、验收证据、改动面、遗留项），
+> 见 [`DESIGN.md`](DESIGN.md)。本文只讲怎么装、怎么用。
+> 阶段 0 实测数据见 [`PHASE0-PROBE.md`](PHASE0-PROBE.md)。
+
 ## 为什么是两套栈
 
 Mac 的模型全是 MLX 格式（`mlx-community/*-4bit`、`mflux-community/*`、

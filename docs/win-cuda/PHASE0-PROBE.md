@@ -294,14 +294,16 @@ VAE            3.00 GiB
 三种转义均失败。`platform.ass_filter()` 在 Windows 不加 `fontsdir`（ffmpeg 自动加载系统字体），
 Mac/Linux 保留原 `fontsdir` 行为。
 
-**重要质量问题（进行中）**：初版完整 produce 虽然生成 MP4，但抽帧为网格噪点。
-已发现并修复：
+**重要质量问题（已修复）**：初版完整 produce 虽然生成 MP4，但抽帧为网格噪点。
+发现并修复了五类错误（明细见 [`DESIGN.md`](DESIGN.md) §5.2）：
 - latent 必须按 VAE `latents_mean/std` normalize，解码时 denormalize
 - Gemma 必须给 connector 输入全部 49 层 hidden_states，且输出经过 LTX2TextConnectors
+- 单帧必须先编码、再沿 latent 时间轴复制（不能先复制成 49 帧再编码）
 - 官方 I2V 需要 conditioning mask 固定首帧，并按 token 数算 scheduler shift
-- 官方 I2V 对模型输出做 velocity↔x0 转换，scheduler 仅更新非 conditioning 帧
+- transformer 输出是 velocity（不是 x0）；scheduler 仅更新非 conditioning 帧
 
-已重写为官方 LTX2 I2V 步进逻辑；正在最后复测画面质量。**阶段验收以抽帧为真实画面为准，不能只以 rc=0 认定完成。**
+已按官方 LTX2 I2V 步进逻辑重写，复测抽帧为真实画面（人物/便利店/雨夜光照均保留）。
+**阶段验收以抽帧为真实画面为准，不能只以 rc=0 认定完成。**
 
 ## 7.1 网页控制台端到端验收（目标 c，已通过）
 
